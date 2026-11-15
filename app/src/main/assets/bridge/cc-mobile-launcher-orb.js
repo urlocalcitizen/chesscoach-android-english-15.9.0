@@ -1,79 +1,321 @@
 (function () {
-  if (window.__ccMobileLauncherOrbInitialized) return;
-  window.__ccMobileLauncherOrbInitialized = true;
+  "use strict";
 
-  let mainHudShadow = null;
+  const INSTANCE_KEY = Symbol.for("cc.android.mobile-launcher.instance");
+  const previousInstance = window[INSTANCE_KEY];
+  if (previousInstance?.isAlive?.()) return;
+  try { previousInstance?.cleanup?.("reinjection"); } catch (e) {}
+
   const currentPlatform = location.hostname.includes("chess.com") ? "chesscom" : "lichess";
+  const platformPrefix = `${currentPlatform}.`;
+  const calibrationKey = `cc_mobile_calibrated_${currentPlatform}`;
+  const GLOBAL_DEFAULTS = Object.freeze({
+    cc_mobile_ui_view_mode: "full",
+    cc_mobile_ingame_submode: "mini",
+    cc_mobile_last_welcome_date: "",
+    cc_mobile_platform: currentPlatform,
+    cc_mobile_mini_hud_pos: null,
+    cc_mobile_settings_tab: "presets",
+    [calibrationKey]: false
+  });
+  const LEGACY_GLOBAL_KEYS = Object.freeze({
+    cc_ui_view_mode: "cc_mobile_ui_view_mode",
+    cc_ingame_submode: "cc_mobile_ingame_submode",
+    cc_last_welcome_date: "cc_mobile_last_welcome_date",
+    cc_mini_hud_pos: "cc_mobile_mini_hud_pos"
+  });
+  const ENGINE_CONTROL_IDS = new Set([
+    "cc-elo-slider", "cc-sf-wasm-chk", "cc-engine-max-chk", "cc-auto-master-chk", "cc-premove-chk",
+    "cc-premove-arrows-chk", "cc-auto-delay-slider", "cc-auto-jitter-slider",
+    "cc-auto-avg-chk", "cc-auto-avg-freq-slider", "cc-auto-protect-chk",
+    "cc-vis-arrow-style", "cc-vis-arrows-chk", "cc-vis-eval-chk", "cc-vis-phonk-chk",
+    "cc-audio-radar-chk", "cc-heatmap-always-chk", "cc-rage-antiban-chk"
+  ]);
 
-  // 1. СИНХРОННОЕ ЧТЕНИЕ ПАМЯТИ ANDROID (чтобы при новой партии меню не прыгало ни на миллисекунду)
-  let initialStorage = {};
-  try {
-    if (window.CCAndroidBridge && typeof window.CCAndroidBridge.getStorageJson === "function") {
-      const raw = window.CCAndroidBridge.getStorageJson();
-      if (raw) initialStorage = JSON.parse(raw);
-    }
-  } catch (e) {}
+  let destroyed = false;
+  let storageReady = false;
+  let initialStorage = { ...GLOBAL_DEFAULTS };
+  let uiViewMode = "full";
+  let lastInGameSubMode = "mini";
+  let mainHudHost = null;
+  let mainHudShadow = null;
+  let mainPanel = null;
+  let hudHost = null;
+  let hudShadow = null;
+  let welcomeSplash = null;
+  let onboardingModal = null;
+  let autoConfirmModal = null;
+  let miniHudCard = null;
+  let cornerPill = null;
+  let presetStatus = null;
+  let pendingAutomation = null;
+  let applyingPreset = false;
+  let forceAutomationOffOnBoot = false;
+  let welcomeSequenceStarted = false;
+  let welcomeDismissedByBack = false;
+  let rootSetupComplete = false;
+  let overlayPassthrough = false;
+  let miniUpdateRaf = 0;
+  let dragState = null;
+  let documentHudObserver = null;
+  let rootPanelObserver = null;
+  let hudDataObserver = null;
+  let scriptsObserver = null;
+  const previousHudRegistrar = window.__ChessCoachRegisterHudShadow;
+  const timers = new Set();
+  const listenerCleanups = [];
 
-  // Режимы отображения: "full" (большое меню), "mini" (перетягиваемое мини-окно), "pill" (маленькая кнопка в углу)
-  let uiViewMode = initialStorage.cc_ui_view_mode || "full";
-  let lastInGameSubMode = initialStorage.cc_ingame_submode || "mini";
+  window.__ccMobileLauncherOrbInitialized = true;
+  window.__CC_ANDROID_DISABLE_USER_SCRIPTS__ = true;
+  window[INSTANCE_KEY] = {
+    isAlive: () => !destroyed,
+    cleanup
+  };
 
-  function saveStatePatch(obj) {
-    Object.assign(initialStorage, obj);
-    if (window.chrome && window.chrome.storage && window.chrome.storage.local) {
-      window.chrome.storage.local.set(obj);
-    } else if (window.CCAndroidBridge && typeof window.CCAndroidBridge.saveStoragePatch === "function") {
-      window.CCAndroidBridge.saveStoragePatch(JSON.stringify(obj));
-    }
-  }
-
-  function setUiViewMode(newMode) {
-    uiViewMode = newMode;
-    if (newMode === "mini" || newMode === "pill") {
-      lastInGameSubMode = newMode;
-      saveStatePatch({ cc_ui_view_mode: newMode, cc_ingame_submode: newMode });
-    } else {
-      saveStatePatch({ cc_ui_view_mode: "full" });
-    }
-    syncVisibilityStates();
-  }
-
-  function vibrate(ms = 12) {
+  function hasStorage() {
     try {
-      if (window.CCAndroidBridge && typeof window.CCAndroidBridge.vibrateTick === "function") {
-        window.CCAndroidBridge.vibrateTick(ms);
-      }
-    } catch (e) {}
+      return typeof chrome !== "undefined" && Boolean(chrome.storage?.local);
+    } catch (e) {
+      return false;
+    }
   }
 
-  // 2. Читаем базовый content.css из APK
-  let rawContentCss = "";
-  try {
-    if (window.CCAndroidBridge && typeof window.CCAndroidBridge.readAssetText === "function") {
-      rawContentCss = window.CCAndroidBridge.readAssetText("content/content.css") || "";
-    }
-  } catch (e) {}
+  function hasRuntimeLastError() {
+    try { return Boolean(chrome.runtime?.lastError); } catch (e) { return true; }
+  }
 
-  // 3. Просторный и разгруженный мобильный дизайн для окна настроек
+  function storageGet(keys) {
+    return new Promise((resolve) => {
+      if (!hasStorage()) {
+        resolve({});
+        return;
+      }
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(!hasRuntimeLastError() && value && typeof value === "object" ? value : {});
+      };
+      try {
+        const maybePromise = chrome.storage.local.get(keys, finish);
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.then(finish, () => finish({}));
+        }
+      } catch (e) {
+        finish({});
+      }
+    });
+  }
+
+  function storageSet(patch) {
+    return new Promise((resolve) => {
+      if (!hasStorage() || !patch || typeof patch !== "object") {
+        resolve(false);
+        return;
+      }
+      let settled = false;
+      const finish = (success = true) => {
+        if (settled) return;
+        settled = true;
+        resolve(Boolean(success && !hasRuntimeLastError()));
+      };
+      try {
+        const maybePromise = chrome.storage.local.set(patch, finish);
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.then(() => finish(true), () => finish(false));
+        }
+      } catch (e) {
+        resolve(false);
+      }
+    });
+  }
+
+  function storageRemove(keys) {
+    return new Promise((resolve) => {
+      if (!hasStorage() || typeof chrome.storage.local.remove !== "function") {
+        resolve(false);
+        return;
+      }
+      let settled = false;
+      const finish = (success = true) => {
+        if (settled) return;
+        settled = true;
+        resolve(Boolean(success && !hasRuntimeLastError()));
+      };
+      try {
+        const maybePromise = chrome.storage.local.remove(keys, finish);
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.then(() => finish(true), () => finish(false));
+        }
+      } catch (e) {
+        resolve(false);
+      }
+    });
+  }
+
+  async function saveGlobalPatch(patch) {
+    const safePatch = {};
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (key.startsWith("cc_mobile_")) safePatch[key] = value;
+    }
+    if (!Object.keys(safePatch).length) return false;
+    const saved = await storageSet(safePatch);
+    if (saved) Object.assign(initialStorage, safePatch);
+    return saved;
+  }
+
+  async function savePlatformPatch(patch) {
+    const scoped = {};
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (!key || key.startsWith("cc_mobile_") || key.includes(".")) continue;
+      scoped[platformPrefix + key] = value;
+    }
+    if (!Object.keys(scoped).length) return false;
+    const saved = await storageSet(scoped);
+    if (saved) Object.assign(initialStorage, scoped);
+    return saved;
+  }
+
+  async function loadInitialStorage() {
+    const stored = await storageGet(null);
+    initialStorage = { ...GLOBAL_DEFAULTS, ...stored };
+    const migration = {};
+    const removeKeys = [];
+    for (const [legacyKey, globalKey] of Object.entries(LEGACY_GLOBAL_KEYS)) {
+      if (stored[globalKey] === undefined && stored[legacyKey] !== undefined) {
+        migration[globalKey] = stored[legacyKey];
+      }
+      if (stored[legacyKey] !== undefined) removeKeys.push(legacyKey);
+    }
+    if (stored.cc_onboarding_done === true && stored[calibrationKey] === undefined) {
+      migration[calibrationKey] = true;
+    }
+    if (stored.cc_onboarding_done !== undefined) removeKeys.push("cc_onboarding_done");
+    const migrationSaved = !Object.keys(migration).length || await saveGlobalPatch(migration);
+    if (migrationSaved && removeKeys.length) await storageRemove(removeKeys);
+    forceAutomationOffOnBoot = stored[`${platformPrefix}autoMoveEnabled`] === undefined;
+    if (forceAutomationOffOnBoot) {
+      await savePlatformPatch({ autoMoveEnabled: false, premoveEnabled: false, showPremoveArrows: false });
+    }
+
+    uiViewMode = ["full", "mini", "pill"].includes(initialStorage.cc_mobile_ui_view_mode)
+      ? initialStorage.cc_mobile_ui_view_mode
+      : "full";
+    lastInGameSubMode = ["mini", "pill"].includes(initialStorage.cc_mobile_ingame_submode)
+      ? initialStorage.cc_mobile_ingame_submode
+      : "mini";
+    storageReady = true;
+  }
+
+  function nativeRequest(method, params) {
+    try {
+      const request = window.__CC_ANDROID_RUNTIME__?.nativeRequest;
+      if (typeof request !== "function") return Promise.reject(new Error("native runtime unavailable"));
+      return Promise.resolve(request(method, params || {}));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function vibrate(durationMs = 12) {
+    const safeDuration = Math.max(5, Math.min(80, Number(durationMs) || 12));
+    try { navigator.vibrate?.(safeDuration); } catch (e) {}
+  }
+
+  function compactText(value, maxLength) {
+    return String(value || "")
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, maxLength);
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[char]);
+  }
+
+  const TIER_RECOMMENDATIONS = Object.freeze({
+    LOW: Object.freeze({ maxElo: 1600, useStockfish: true, animations: false, visualEffects: false, delayMs: 700, premove: false }),
+    BALANCED: Object.freeze({ maxElo: 2400, useStockfish: true, animations: true, visualEffects: true, delayMs: 440, premove: true }),
+    HIGH: Object.freeze({ maxElo: 2900, useStockfish: true, animations: true, visualEffects: true, delayMs: 260, premove: true })
+  });
+
+  function readDeviceRecommendation() {
+    const runtimeProfile = window.__CC_ANDROID_RUNTIME__?.profile || window.__CC_ANDROID_BOOTSTRAP__?.profile || {};
+    const profile = runtimeProfile.recommendation ? runtimeProfile : window.__CC_DEVICE_PROFILE__ || runtimeProfile;
+    const recommendation = profile.recommendation;
+    const tierCandidate = typeof recommendation === "string"
+      ? recommendation
+      : recommendation?.tier || profile.tier || profile.performanceTier;
+    const tier = String(tierCandidate || "BALANCED").toUpperCase();
+    const safeTier = Object.prototype.hasOwnProperty.call(TIER_RECOMMENDATIONS, tier) ? tier : "BALANCED";
+    const defaults = TIER_RECOMMENDATIONS[safeTier];
+    const movetimeScale = typeof recommendation === "object" && Number.isFinite(Number(recommendation.movetimeScale))
+      ? Math.max(0.65, Math.min(1.8, Number(recommendation.movetimeScale)))
+      : 1;
+    const model = compactText(
+      profile.model || profile.deviceModel || profile.modelName || profile.device || "Android",
+      28
+    ) || "Android";
+    return Object.freeze({
+      tier: safeTier,
+      model,
+      ...defaults,
+      animations: false,
+      visualEffects: false,
+      delayMs: Math.round(defaults.delayMs * movetimeScale)
+    });
+  }
+
+  let deviceRecommendation = readDeviceRecommendation();
+
+  function schedule(fn, delayMs) {
+    const id = setTimeout(() => {
+      timers.delete(id);
+      if (!destroyed) fn();
+    }, Math.max(0, delayMs));
+    timers.add(id);
+    return id;
+  }
+
+  function clearScheduledWork() {
+    for (const id of timers) clearTimeout(id);
+    timers.clear();
+    if (miniUpdateRaf) {
+      cancelAnimationFrame(miniUpdateRaf);
+      miniUpdateRaf = 0;
+    }
+  }
+
+  function listen(target, type, handler, options) {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, handler, options);
+    listenerCleanups.push(() => {
+      try { target.removeEventListener(type, handler, options); } catch (e) {}
+    });
+  }
+
   const mobileOverrideCss = `
+    :host { color-scheme: dark; }
     #chesscoach-panel {
-      position: fixed !important;
-      top: 0 !important;
-      left: 0 !important;
-      right: 0 !important;
-      bottom: 0 !important;
-      width: 100vw !important;
-      height: 100dvh !important;
-      min-height: 100dvh !important;
-      max-height: 100dvh !important;
-      border-radius: 0 !important;
-      border: none !important;
-      margin: 0 !important;
-      display: flex;
-      flex-direction: column !important;
-      overflow: hidden !important;
-      z-index: 2147483646 !important;
-      touch-action: pan-y !important;
+      --cc-accent:#62dfc2; --cc-accent-2:#80cce5;
+      --cc-text-strong:#edf4f6; --cc-text-primary:#c9d4dd; --cc-text-secondary:#9eafbd;
+      --cc-text-muted:#8293a4; --cc-border-soft:#26323e; --cc-border-strong:#354652;
+      position:fixed !important; inset:auto !important; margin:0 !important;
+      left:var(--cc-mobile-viewport-left,0px) !important;
+      top:var(--cc-mobile-viewport-top,0px) !important;
+      width:var(--cc-mobile-viewport-width,100vw) !important;
+      height:var(--cc-mobile-viewport-height,100dvh) !important;
+      min-height:0 !important; max-height:var(--cc-mobile-viewport-height,100dvh) !important;
+      border-radius:0 !important; border:none !important; display:flex !important;
+      flex-direction:column !important; z-index:2147483646 !important;
+      box-shadow:none !important; background:#0c131c !important;
+      backdrop-filter:none !important; -webkit-backdrop-filter:none !important;
+      transform:none !important; overflow:hidden !important;
+      font-family:Roboto,"Segoe UI",system-ui,sans-serif !important;
+      font-size:14px !important; line-height:1.5 !important; color:var(--cc-text-primary) !important;
     }
     #chesscoach-panel.cc-mobile-hidden {
       display: none !important;
@@ -81,1487 +323,1489 @@
       pointer-events: none !important;
       opacity: 0 !important;
     }
-    /* Убираем вкладку АНАЛИЗ из настроек — она вынесена в перетягиваемое мини-окно на доске */
-    .cc-tab-btn[data-tab="analyzer"],
-    #cc-pane-analyzer {
-      display: none !important;
-    }
-    #cc-neural-canvas, #cc-custom-bg-layer, #cc-custom-bg-dim {
-      position: absolute !important;
-      top: 0 !important;
-      left: 0 !important;
-      width: 100% !important;
-      height: 100% !important;
-      pointer-events: none !important;
-      z-index: 0 !important;
-    }
-    #chesscoach-header {
-      position: relative !important;
-      z-index: 4 !important;
-      height: 50px !important;
-      padding: 0 14px !important;
-      flex-shrink: 0 !important;
-    }
+    #chesscoach-panel.cc-core-executing { pointer-events: none !important; }
+    #chesscoach-header { min-height:56px !important; height:56px !important; padding:0 16px !important; flex-shrink:0 !important; cursor:default !important; background:#101a25 !important; gap:12px !important; border-bottom:1px solid #26323e !important; }
+    #chesscoach-panel .cc-brand { font-size:19px !important; font-weight:750 !important; letter-spacing:-.4px !important; min-width:0 !important; gap:9px !important; }
+    #chesscoach-panel .cc-brand-dot { width:8px !important; height:8px !important; box-shadow:none !important; flex-shrink:0 !important; }
+    #chesscoach-panel .cc-badge,#chesscoach-panel .cc-engine-power,#chesscoach-panel .cc-deep-status { display:none !important; }
+    #chesscoach-panel .cc-header-controls { gap:6px !important; flex-shrink:0 !important; }
+    #chesscoach-panel .cc-pill-btn { min-height:44px !important; padding:8px 10px !important; font-size:12px !important; font-weight:650 !important; border-radius:12px !important; background:#1b2936 !important; border-color:#354652 !important; }
+    #cc-toggle-btn { color:#62dfc2 !important; }
     #cc-mobile-launcher-bar {
-      position: relative !important;
-      z-index: 4 !important;
-      padding: 12px 14px !important;
-      background: rgba(6, 9, 16, 0.95) !important;
-      border-bottom: 1px solid rgba(0, 245, 212, 0.22) !important;
-      display: flex !important;
-      flex-direction: column !important;
-      gap: 9px !important;
-      flex-shrink: 0 !important;
+      position:relative !important; z-index:5 !important; display:flex !important;
+      flex-direction:column !important; gap:7px !important; padding:9px 16px 10px !important;
+      background:#101a25 !important; border-bottom:1px solid #26323e !important; flex-shrink:0 !important;
     }
-    .cc-launcher-cards-row {
-      display: grid !important;
-      grid-template-columns: 1fr 1fr !important;
-      gap: 10px !important;
+    .cc-launcher-topline { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:10.5px; }
+    .cc-device-chip { max-width:66%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9ecfbe; font-weight:600; }
+    .cc-launcher-note { color:#91a6b9; font-size:10px; text-align:right; }
+    .cc-launcher-cards-row { display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:6px !important; }
+    #chesscoach-panel .cc-platform-card { min-height:44px !important; min-width:0 !important; padding:8px 11px !important; border-radius:11px !important; border:1px solid #354652 !important; background:#172431 !important; color:#c9d8e4 !important; text-align:left !important; display:flex !important; align-items:center !important; justify-content:space-between !important; gap:6px !important; }
+    #chesscoach-panel .cc-platform-card[aria-current="page"] { border-color:#3c8d79 !important; background:#173332 !important; color:#9bebd3 !important; }
+    .cc-platform-card-title { font-size:13px; font-weight:650; }
+    .cc-platform-card-sub { color:#91a6b9; font-size:10px; font-weight:500; }
+    #cc-mode-switcher-bar { display:grid !important; padding:0 !important; gap:6px !important; background:none !important; border:none !important; }
+    #chesscoach-panel .cc-mode-btn { min-height:44px !important; padding:7px 6px !important; font-size:11px !important; letter-spacing:0 !important; box-shadow:none !important; }
+    #chesscoach-workspace { position:relative !important; z-index:3 !important; display:grid !important; grid-template-columns:minmax(0,1fr) !important; grid-template-rows:minmax(0,1fr) auto !important; overflow:hidden !important; flex:1 !important; min-height:0 !important; }
+    #chesscoach-panel .cc-sidebar { grid-row:2 !important; padding:5px 8px max(5px,env(safe-area-inset-bottom,0px)) !important; border-right:none !important; border-top:1px solid #26323e !important; border-bottom:none !important; background:#101a25 !important; min-height:0 !important; justify-content:flex-start !important; }
+    #chesscoach-panel .cc-nav-list { display:grid !important; grid-template-columns:repeat(5,minmax(0,1fr)) !important; flex-direction:row !important; gap:3px !important; padding:0 !important; min-width:0 !important; }
+    #chesscoach-panel .cc-tab-btn { min-width:0 !important; min-height:58px !important; padding:6px 2px !important; font-size:10.5px !important; font-weight:600 !important; text-align:center !important; white-space:nowrap !important; display:flex !important; flex-direction:column !important; justify-content:center !important; gap:3px !important; border-radius:12px !important; transform:none !important; box-shadow:none !important; color:#93a6b8 !important; }
+    #chesscoach-panel .cc-tab-btn svg { width:21px; height:21px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+    #chesscoach-panel .cc-tab-btn.active { background:#1a3437 !important; color:#82ecd1 !important; border-color:transparent !important; }
+    #chesscoach-panel .cc-tab-btn.cc-mobile-extra-tab,#chesscoach-panel .cc-sidebar-footer { display:none !important; }
+    #chesscoach-panel .cc-main-view { grid-row:1 !important; min-height:0 !important; min-width:0 !important; padding:16px !important; overflow-x:hidden !important; overflow-y:auto !important; overscroll-behavior-y:contain !important; -webkit-overflow-scrolling:touch !important; gap:12px !important; }
+    #chesscoach-panel .cc-tab-pane { flex:none !important; gap:12px !important; min-width:0 !important; }
+    #chesscoach-panel .cc-glass-card { padding:14px !important; border-radius:16px !important; border-color:#2b3946 !important; background:#131f2b !important; box-shadow:none !important; min-width:0 !important; }
+    #chesscoach-panel .cc-section-title { font-size:13px !important; font-weight:650 !important; letter-spacing:0 !important; line-height:1.45 !important; gap:8px !important; align-items:flex-start !important; flex-wrap:wrap !important; color:#bdd5df !important; }
+    #chesscoach-panel .cc-control-row { gap:6px 10px !important; font-size:13px !important; flex-wrap:wrap !important; margin-bottom:0 !important; }
+    #chesscoach-panel .cc-control-row > strong { color:#82ecd1 !important; font-size:13px !important; }
+    #chesscoach-panel .cc-Switch-row { min-height:48px !important; padding:8px 0 !important; gap:12px !important; font-size:13px !important; line-height:1.45 !important; }
+    #chesscoach-panel .cc-Switch-row > div,#chesscoach-panel .cc-Switch-row > span { min-width:0 !important; flex:1 !important; }
+    #chesscoach-panel .cc-Switch-row span[style*="font-size"] { font-size:13px !important; }
+    #chesscoach-panel .cc-Switch-row div[style*="font-size"] { font-size:12px !important; color:#97aabb !important; line-height:1.5 !important; }
+    #chesscoach-panel .cc-Switch-row input[type="checkbox"] { width:48px !important; height:28px !important; min-width:48px !important; min-height:28px !important; padding:0 !important; border-radius:16px !important; background:#344455 !important; border:1px solid #4a5c6d !important; box-shadow:none !important; }
+    #chesscoach-panel .cc-Switch-row input[type="checkbox"]::after { top:3px !important; left:3px !important; width:20px !important; height:20px !important; background:#b5c5d2 !important; }
+    #chesscoach-panel .cc-Switch-row input[type="checkbox"]:checked { background:#62dfc2 !important; border-color:#62dfc2 !important; }
+    #chesscoach-panel .cc-Switch-row input[type="checkbox"]:checked::after { transform:translateX(20px) !important; background:#102c2c !important; }
+    #chesscoach-panel .cc-slider { height:44px !important; min-height:44px !important; margin:0 !important; padding:0 !important; }
+    #chesscoach-panel .cc-select,#chesscoach-panel .cc-text-input { width:100% !important; max-width:100% !important; min-height:46px !important; font-size:14px !important; padding:10px 11px !important; border-radius:11px !important; background:#0d1722 !important; border-color:#354652 !important; }
+    #chesscoach-panel .cc-btn,#chesscoach-panel .cc-style-btn { min-height:46px !important; font-size:13px !important; font-weight:650 !important; padding:10px 12px !important; border-radius:11px !important; box-shadow:none !important; }
+    #chesscoach-panel .cc-btn-primary { background:#62dfc2 !important; color:#0b2825 !important; }
+    #chesscoach-panel .cc-move-card { font-size:13px !important; padding:13px !important; background:#131f2b !important; border-radius:14px !important; box-shadow:none !important; }
+    #chesscoach-panel .cc-move-header { font-size:13px !important; }
+    #chesscoach-panel .cc-auto-status-box { font-size:12px !important; padding:12px !important; gap:8px !important; flex-direction:column !important; align-items:flex-start !important; background:#102e2c !important; border-color:#2b5a51 !important; }
+    #chesscoach-panel .cc-auto-status-box strong { font-weight:600 !important; overflow-wrap:anywhere !important; }
+    #chesscoach-panel .cc-tele-header,#chesscoach-panel .cc-tele-box-val { font-size:12px !important; }
+    #chesscoach-panel .cc-tele-box-title,#chesscoach-panel .cc-mask-field { font-size:11px !important; }
+    #chesscoach-panel .cc-style-grid { grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:8px !important; }
+    #chesscoach-panel .cc-actions-bar { margin-top:0 !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
+    #chesscoach-panel .cc-tele-gear-btn { min-height:44px !important; padding:8px !important; font-size:12px !important; }
+    #chesscoach-panel .cc-tele-chk-label { min-height:44px !important; }
+    #chesscoach-panel input[type="checkbox"] { accent-color:#62dfc2 !important; }
+    #chesscoach-panel button,#chesscoach-panel label { touch-action:manipulation !important; -webkit-tap-highlight-color:transparent !important; }
+    #chesscoach-panel :is(button,input,select):focus-visible { outline:2px solid #80e6ce !important; outline-offset:3px !important; }
+    #chesscoach-panel :is(input,button,select):disabled { opacity:.45 !important; }
+    #cc-welcome-card { display:none !important; }
+    #chesscoach-panel *,#chesscoach-panel *::before,#chesscoach-panel *::after { animation:none !important; transition:none !important; backdrop-filter:none !important; -webkit-backdrop-filter:none !important; }
+    #chesscoach-panel::before { height:2px !important; background:#62dfc2 !important; }
+    #cc-neural-canvas { display:none !important; }
+    .cc-preset-hero { padding:2px 0 4px; }
+    .cc-preset-hero h2 { margin:0 0 5px; font-size:24px; line-height:1.25; font-weight:700; letter-spacing:-.5px; color:#edf4f6; }
+    .cc-preset-lead { margin:0; color:#95a9bc; font-size:13px; line-height:1.55; }
+    .cc-preset-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; }
+    .cc-preset-card { min-height:88px; width:100%; border-radius:14px; padding:14px; text-align:left; border:1px solid #354652; background:#172431; color:#edf4f6; display:flex; flex-direction:column; justify-content:center; gap:5px; }
+    .cc-preset-title { font-size:15px; font-weight:650; }
+    .cc-preset-desc { font-size:12px; line-height:1.5; color:#9aafc0; }
+    .cc-preset-meta { font-size:11px; font-weight:600; color:#82ecd1; }
+    #cc-mobile-preset-status { color:#9cdbca; font-size:12px; line-height:1.5; }
+    .cc-mobile-links { display:grid; gap:8px; }
+    #chesscoach-panel .cc-mobile-link { width:100%; min-height:54px; padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:12px; text-align:left; background:#172431; color:#d8e5ec; border:1px solid #354652; border-radius:12px; font:600 14px/1.4 Roboto,system-ui,sans-serif; cursor:pointer; }
+    .cc-mobile-link small { display:block; color:#91a6b9; font-size:11px; font-weight:400; margin-top:2px; }
+    .cc-mobile-chevron { font-size:22px; color:#62dfc2; }
+    #cc-mobile-search-results { display:grid; gap:7px; margin-top:8px; }
+    #cc-mobile-search-results:empty { display:none; }
+    #chesscoach-panel .cc-mobile-search-hit { outline:2px solid #62dfc2; outline-offset:3px; }
+    @media (min-width:720px) and (min-height:520px) {
+      #chesscoach-panel { left:calc(var(--cc-mobile-viewport-left,0px) + 16px) !important; top:calc(var(--cc-mobile-viewport-top,0px) + 16px) !important; width:calc(var(--cc-mobile-viewport-width,100vw) - 32px) !important; height:calc(var(--cc-mobile-viewport-height,100dvh) - 32px) !important; max-width:960px !important; border:1px solid #354652 !important; border-radius:22px !important; }
+      #chesscoach-workspace { grid-template-columns:132px minmax(0,1fr) !important; grid-template-rows:minmax(0,1fr) !important; }
+      #chesscoach-panel .cc-sidebar { grid-row:1 !important; grid-column:1 !important; border-top:none !important; border-right:1px solid #26323e !important; padding:10px !important; }
+      #chesscoach-panel .cc-nav-list { grid-template-columns:minmax(0,1fr) !important; gap:6px !important; }
+      #chesscoach-panel .cc-tab-btn { flex-direction:row !important; justify-content:flex-start !important; padding:10px !important; font-size:12px !important; min-height:48px !important; gap:9px !important; }
+      #chesscoach-panel .cc-main-view { grid-column:2 !important; padding:20px !important; }
+      .cc-preset-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+      #cc-mobile-launcher-bar { flex-direction:row !important; align-items:center !important; justify-content:space-between !important; padding:10px 16px !important; }
+      .cc-launcher-cards-row { width:330px; flex-shrink:0; }
     }
-    .cc-platform-card {
-      background: rgba(255, 255, 255, 0.05) !important;
-      border: 1.5px solid rgba(255, 255, 255, 0.14) !important;
-      border-radius: 14px !important;
-      padding: 11px 12px !important;
-      color: #cbd5e1 !important;
-      cursor: pointer !important;
-      display: flex !important;
-      flex-direction: column !important;
-      gap: 4px !important;
-      text-align: left !important;
-      transition: transform 0.15s ease !important;
+    @media (max-height:480px) {
+      #chesscoach-header { min-height:48px !important; height:48px !important; }
+      #cc-mobile-launcher-bar { padding:5px 12px !important; }
+      .cc-launcher-topline { display:none; }
+      #chesscoach-panel .cc-tab-btn { min-height:44px !important; flex-direction:row !important; gap:6px !important; }
+      #chesscoach-panel .cc-tab-btn svg { width:18px; height:18px; }
+      #chesscoach-panel .cc-main-view { padding:12px !important; }
     }
-    .cc-platform-card:active {
-      transform: scale(0.97) !important;
-    }
-    .cc-platform-card.active-lichess {
-      background: linear-gradient(135deg, rgba(0, 245, 212, 0.24), rgba(0, 187, 249, 0.10)) !important;
-      border-color: #00f5d4 !important;
-      color: #ffffff !important;
-      box-shadow: 0 4px 18px rgba(0, 245, 212, 0.22) !important;
-    }
-    .cc-platform-card.active-chesscom {
-      background: linear-gradient(135deg, rgba(56, 176, 0, 0.26), rgba(0, 245, 212, 0.10)) !important;
-      border-color: #38b000 !important;
-      color: #ffffff !important;
-      box-shadow: 0 4px 18px rgba(56, 176, 0, 0.24) !important;
-    }
-    .cc-platform-card-title {
-      font-size: 12px !important;
-      font-weight: 900 !important;
-      display: flex !important;
-      justify-content: space-between !important;
-      align-items: center !important;
-      pointer-events: none !important;
-    }
-    .cc-platform-card-sub {
-      font-size: 10px !important;
-      color: #94a3b8 !important;
-      font-weight: 600 !important;
-      pointer-events: none !important;
-    }
-    #cc-return-to-game-btn {
-      width: 100% !important;
-      padding: 12px 14px !important;
-      border-radius: 12px !important;
-      border: none !important;
-      background: linear-gradient(135deg, #00f5d4, #00bbf9) !important;
-      color: #04070e !important;
-      font-size: 12.5px !important;
-      font-weight: 900 !important;
-      letter-spacing: 0.4px !important;
-      cursor: pointer !important;
-      box-shadow: 0 4px 16px rgba(0, 245, 212, 0.32) !important;
-    }
-    #cc-mode-switcher-bar {
-      position: relative !important;
-      z-index: 4 !important;
-      padding: 8px 14px !important;
-      gap: 8px !important;
-      flex-shrink: 0 !important;
-    }
-    .cc-mode-btn {
-      padding: 8px !important;
-      font-size: 11px !important;
-      border-radius: 10px !important;
-    }
-    #chesscoach-workspace {
-      position: relative !important;
-      z-index: 3 !important;
-      display: flex !important;
-      flex-direction: column !important;
-      grid-template-columns: none !important;
-      flex: 1 !important;
-      min-height: 0 !important;
-      overflow: hidden !important;
-    }
-    .cc-sidebar {
-      width: 100% !important;
-      border-right: none !important;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
-      padding: 8px 12px !important;
-      background: rgba(5, 7, 13, 0.94) !important;
-      flex-shrink: 0 !important;
-    }
-    .cc-nav-list {
-      display: flex !important;
-      flex-direction: row !important;
-      overflow-x: auto !important;
-      gap: 8px !important;
-      scrollbar-width: none !important;
-    }
-    .cc-nav-list::-webkit-scrollbar {
-      display: none !important;
-    }
-    .cc-tab-btn {
-      white-space: nowrap !important;
-      padding: 9px 14px !important;
-      font-size: 11.5px !important;
-      border-radius: 12px !important;
-      flex-shrink: 0 !important;
-    }
-    .cc-sidebar-footer {
-      display: none !important;
-    }
-    /* Просторный вид внутри вкладок («не как в самолете») */
-    .cc-main-view {
-      flex: 1 !important;
-      min-height: 0 !important;
-      overflow-y: auto !important;
-      padding: 16px 14px 44px 14px !important;
-      gap: 12px !important;
-      -webkit-overflow-scrolling: touch !important;
-    }
-    .cc-tab-pane {
-      gap: 12px !important;
-    }
-    .cc-glass-card {
-      padding: 14px !important;
-      border-radius: 16px !important;
-    }
-    .cc-Switch-row {
-      padding: 9px 0 !important;
-      font-size: 12px !important;
-    }
-    .cc-control-row {
-      font-size: 12px !important;
-      margin-bottom: 6px !important;
-    }
-    .cc-btn {
-      padding: 11px 12px !important;
-      font-size: 12px !important;
-      border-radius: 11px !important;
-    }
-    /* Аккуратные спойлеры для второстепенных ползунков */
-    details.cc-clean-drawer {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.10);
-      border-radius: 14px;
-      padding: 11px 14px;
-      transition: all 0.2s ease;
-    }
-    details.cc-clean-drawer[open] {
-      background: rgba(10, 14, 24, 0.75);
-      border-color: rgba(0, 245, 212, 0.32);
-    }
-    details.cc-clean-drawer summary {
-      font-size: 12px;
-      font-weight: 800;
-      color: #cbd5e1;
-      cursor: pointer;
-      list-style: none;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    details.cc-clean-drawer summary::-webkit-details-marker {
-      display: none;
-    }
-    details.cc-clean-drawer summary::after {
-      content: "Развернуть ▼";
-      font-size: 10px;
-      color: var(--cc-accent);
-      background: rgba(0, 245, 212, 0.12);
-      padding: 3px 8px;
-      border-radius: 999px;
-    }
-    details.cc-clean-drawer[open] summary::after {
-      content: "Свернуть ▲";
-    }
-    .cc-drawer-body {
-      margin-top: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    /* Карточки быстрых пресетов во вкладке ПРЕСЕТЫ */
-    .cc-preset-big-card {
-      background: linear-gradient(145deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
-      border: 1.5px solid rgba(255, 255, 255, 0.14);
-      border-radius: 16px;
-      padding: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    .cc-preset-big-card:active {
-      transform: scale(0.98);
-    }
-    .cc-preset-big-title {
-      font-size: 13.5px;
-      font-weight: 900;
-      color: #ffffff;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .cc-preset-big-desc {
-      font-size: 11.5px;
-      color: #cbd5e1;
-      line-height: 1.4;
+    @media (max-width:359px) {
+      #chesscoach-header { padding:0 10px !important; gap:6px !important; }
+      #chesscoach-panel .cc-brand { font-size:16px !important; }
+      #chesscoach-panel .cc-pill-btn { padding:8px !important; font-size:11px !important; }
+      #chesscoach-panel .cc-main-view { padding:12px !important; }
+      #chesscoach-panel .cc-mask-editor-grid,#cc-tele-settings-drawer { grid-template-columns:minmax(0,1fr) !important; }
     }
   `;
 
-  function bindReliableMobileTap(el, handler) {
-    if (!el) return;
-    let lastFire = 0;
-    let startX = 0;
-    let startY = 0;
-
-    el.addEventListener("touchstart", (e) => {
-      e.stopPropagation();
-      if (e.touches && e.touches.length === 1) {
-        startX = e.touches[0].clientX;
-        startY = e.touches[0].clientY;
-      }
-    }, { passive: true });
-
-    el.addEventListener("touchend", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      if (e.changedTouches && e.changedTouches.length === 1) {
-        const dx = Math.abs(e.changedTouches[0].clientX - startX);
-        const dy = Math.abs(e.changedTouches[0].clientY - startY);
-        if (dx > 18 || dy > 18) return;
-      }
-      const now = Date.now();
-      if (now - lastFire < 280) return;
-      lastFire = now;
-      handler(e);
-    }, { passive: false });
-
-    el.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      const now = Date.now();
-      if (now - lastFire < 280) return;
-      lastFire = now;
-      handler(e);
-    }, true);
-  }
-
-  function shieldFromBoardBleedThrough(el) {
-    if (!el) return;
-    ["touchstart", "touchmove", "touchend", "mousedown", "mousemove", "mouseup", "pointerdown", "pointerup", "click", "contextmenu"].forEach((ev) => {
-      el.addEventListener(ev, (e) => {
-        e.stopPropagation();
-      }, false);
-    });
-  }
-
-  function navigateToPlatform(platformKey, targetUrl, btnEl) {
-    vibrate(22);
-    if (btnEl) {
-      const sub = btnEl.querySelector(".cc-platform-card-sub");
-      if (sub) {
-        sub.textContent = "⏳ ЗАГРУЗКА ПЛАТФОРМЫ...";
-        sub.style.color = "#00f5d4";
-      }
+  const floatingHudCss = `
+    * { box-sizing: border-box; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+    button { min-width: 44px; min-height: 44px; cursor: pointer; touch-action: manipulation; }
+    button:focus-visible { outline: 3px solid #ffbe0b; outline-offset: 2px; }
+    .cc-overlay {
+      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right))
+        max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
+      background: rgba(5,8,15,.95); color: #f8fafc; pointer-events: auto; z-index: 2147483647;
     }
-    saveStatePatch({ cc_mobile_platform: platformKey });
-
-    try {
-      window.onbeforeunload = null;
-      window.addEventListener("beforeunload", (ev) => {
-        ev.stopImmediatePropagation();
-      }, true);
-    } catch (e) {}
-
-    try {
-      if (window.CCAndroidBridge && typeof window.CCAndroidBridge.switchPlatformUrl === "function") {
-        window.CCAndroidBridge.switchPlatformUrl(targetUrl);
-      }
-    } catch (e) {}
-
-    setTimeout(() => {
-      window.location.replace(targetUrl);
-    }, 40);
-  }
-
-  // 4. ПРИМЕНЕНИЕ ПРЕСЕТА ИЗ ОПРОСА ИЛИ КАРТОЧКИ (С ФИКСИРОВАННЫМИ 3000 ELO)
-  function applySmartPresetConfig({ mode = "legit", speed = "blitz", arrows = "curved_neon" }) {
-    vibrate(25);
-    const isHvh = mode === "hvh";
-    const isBalanced = mode === "balance";
-
-    const delayBySpeed = speed === "bullet" ? (isHvh ? 38 : 220) : (speed === "rapid" ? 680 : 440);
-    const jitterBySpeed = speed === "bullet" ? (isHvh ? 15 : 90) : (speed === "rapid" ? 320 : 210);
-
-    const patch = {
-      elo: 3000,
-      useStockfishWasm: true,
-      workMode: isHvh ? "hvh" : (isBalanced ? "all" : "legit"),
-      style: isHvh ? "balanced" : (isBalanced ? "hikaru" : "tal"),
-      autoMoveEnabled: true,
-      bulletTurboMode: Boolean(isHvh && speed === "bullet"),
-      legitAutoTiming: !isHvh,
-      premoveEnabled: isHvh || (isBalanced && speed === "bullet"),
-      showPremoveArrows: isHvh || isBalanced,
-      useAverageMoveSometimes: !isHvh,
-      averageMoveFrequency: isBalanced ? 18 : 28,
-      protectCriticalMoves: true,
-      autoMoveDelayMs: delayBySpeed,
-      autoMoveJitterMs: jitterBySpeed,
-      arrowStyle: arrows,
-      showArrows: true,
-      showEvalBar: true
-    };
-
-    saveStatePatch(patch);
-
-    // Мгновенно синхронизируем ползунки и кнопки внутри открытого меню без перезагрузки
-    if (mainHudShadow) {
-      const targetMode = currentPlatform === "chesscom" && isHvh ? "legit" : patch.workMode;
-      const modeBtn = mainHudShadow.querySelector(`.cc-mode-btn[data-mode="${targetMode}"]`);
-      if (modeBtn) modeBtn.click();
-
-      const eloSlider = mainHudShadow.getElementById("cc-elo-slider");
-      if (eloSlider) {
-        eloSlider.value = "3000";
-        eloSlider.dispatchEvent(new Event("input"));
-        eloSlider.dispatchEvent(new Event("change"));
-      }
-
-      const styleBtn = mainHudShadow.querySelector(`.cc-style-btn[data-style="${patch.style}"]`);
-      if (styleBtn) styleBtn.click();
-
-      const arrowSel = mainHudShadow.getElementById("cc-vis-arrow-style");
-      if (arrowSel) {
-        arrowSel.value = arrows;
-        arrowSel.dispatchEvent(new Event("change"));
-      }
-
-      const delaySlider = mainHudShadow.getElementById("cc-auto-delay-slider");
-      if (delaySlider) {
-        delaySlider.value = String(delayBySpeed);
-        delaySlider.dispatchEvent(new Event("input"));
-      }
-
-      const jitterSlider = mainHudShadow.getElementById("cc-auto-jitter-slider");
-      if (jitterSlider) {
-        jitterSlider.value = String(jitterBySpeed);
-        jitterSlider.dispatchEvent(new Event("input"));
-      }
+    .cc-modal-box {
+      width: min(100%,420px); max-height: calc(100dvh - 32px); overflow-y: auto;
+      overscroll-behavior: contain; background: rgba(12,16,28,.98); border: 1.5px solid rgba(0,245,212,.45);
+      border-radius: 22px; padding: 20px 18px; box-shadow: 0 24px 60px rgba(0,0,0,.85);
+      display: flex; flex-direction: column; gap: 13px;
     }
-  }
-
-  // 5. ПЕРЕХВАТ SHADOW ROOT И РЕОРГАНИЗАЦИЯ МЕНЮ НА ПРОСТОРНЫЕ ВКЛАДКИ
-  const origAttachShadow = Element.prototype.attachShadow;
-  Element.prototype.attachShadow = function (init) {
-    const sr = origAttachShadow.call(this, init);
-    if (this.id !== "cc-userscripts-host" && this.id !== "cc-floating-orb-host") {
-      mainHudShadow = sr;
-
-      const styleEl = document.createElement("style");
-      styleEl.id = "cc-inline-master-css";
-      styleEl.textContent = rawContentCss + "\n" + mobileOverrideCss;
-      sr.appendChild(styleEl);
-
-      const obs = new MutationObserver(() => {
-        const panel = sr.getElementById("chesscoach-panel");
-        if (panel && !sr.getElementById("cc-mobile-launcher-bar")) {
-          // Сразу применяем сохраненный режим видимости, чтобы ничего не моргнуло
-          if (uiViewMode !== "full") {
-            panel.classList.add("cc-mobile-hidden");
-          }
-          setupMobileSettingsHub(sr, panel);
-        }
-      });
-      obs.observe(sr, { childList: true });
+    #cc-daily-welcome-splash { flex-direction: column; text-align: center; }
+    .cc-welcome-emblem { font-size: 42px; }
+    .cc-welcome-title { color: #fff; font-size: 25px; font-weight: 900; }
+    .cc-welcome-sub { color: #a7b4c6; font-size: 13px; line-height: 1.45; max-width: 320px; }
+    .cc-welcome-progress { width: 210px; height: 5px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.1); }
+    .cc-welcome-progress::after { content: ""; display: block; height: 100%; background: linear-gradient(90deg,#00f5d4,#00bbf9,#c77dff); animation: cc-progress 1.8s linear forwards; }
+    @keyframes cc-progress { from { width: 0; } to { width: 100%; } }
+    .cc-step { align-self: flex-start; color: #04100e; background: #00f5d4; border-radius: 99px; padding: 5px 9px; font-size: 10px; font-weight: 900; }
+    .cc-question { color: #fff; font-size: 18px; line-height: 1.3; font-weight: 900; }
+    .cc-hint { color: #94a3b8; font-size: 11.5px; line-height: 1.4; }
+    .cc-options { display: flex; flex-direction: column; gap: 9px; }
+    .cc-option {
+      width: 100%; min-height: 62px; padding: 11px 13px; border-radius: 14px; text-align: left;
+      border: 1.5px solid rgba(255,255,255,.15); background: rgba(255,255,255,.05); color: #fff;
     }
-    return sr;
-  };
+    .cc-option strong, .cc-option span { display: block; }
+    .cc-option strong { color: #00f5d4; font-size: 13px; }
+    .cc-option span { margin-top: 3px; color: #cbd5e1; font-size: 11px; line-height: 1.35; }
+    .cc-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .cc-confirm-actions button { border-radius: 12px; border: 1px solid rgba(255,255,255,.18); font-weight: 900; }
+    #cc-auto-stay-off { background: rgba(255,255,255,.07); color: #f8fafc; }
+    #cc-auto-enable { background: linear-gradient(135deg,#00f5d4,#00bbf9); color: #04100e; border: 0; }
+    #cc-mini-hud-card {
+      position: fixed; top: 54px; left: 10px; width: min(286px,calc(100vw - 16px));
+      display: none; overflow: hidden; color: #f8fafc; background: rgba(8,12,20,.91);
+      border: 1.5px solid rgba(0,245,212,.55); border-radius: 16px;
+      box-shadow: 0 12px 32px rgba(0,0,0,.75); pointer-events: auto; touch-action: none; z-index: 2147483646;
+    }
+    .cc-mini-header { min-height: 52px; display: flex; justify-content: space-between; align-items: center; gap: 5px; padding: 4px 6px 4px 10px; background: rgba(4,7,13,.95); }
+    .cc-mini-status { min-width: 0; color: #00f5d4; font-size: 9.5px; font-weight: 900; display: flex; align-items: center; gap: 5px; }
+    .cc-mini-dot { width: 7px; height: 7px; border-radius: 50%; background: #00f5d4; box-shadow: 0 0 8px #00f5d4; flex: 0 0 auto; }
+    .cc-mini-actions { display: flex; gap: 3px; }
+    .cc-mini-btn { min-width: 44px; min-height: 44px; padding: 0 7px; border-radius: 9px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.08); color: #f1f5f9; font-size: 10px; font-weight: 900; }
+    #cc-mini-play-btn { color: #00f5d4; border-color: rgba(0,245,212,.5); }
+    #cc-mini-close-btn { color: #ff7bac; border-color: rgba(255,77,148,.45); }
+    .cc-mini-body { padding: 9px 10px 11px; display: flex; flex-direction: column; gap: 5px; }
+    .cc-mini-move-row { display: flex; justify-content: space-between; align-items: center; gap: 7px; }
+    #cc-mini-move-main { color: #fff; font: 900 13px ui-monospace,monospace; }
+    .cc-mini-badges { display: flex; gap: 4px; }
+    .cc-mini-badge { padding: 3px 6px; border-radius: 6px; background: rgba(255,255,255,.07); color: #cbd5e1; font: 800 9px ui-monospace,monospace; }
+    #cc-mini-eval-badge { color: #00f5d4; border: 1px solid rgba(0,245,212,.4); }
+    #cc-mini-tech-reason { color: #e2e8f0; font-size: 10.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    #cc-mini-pv-line { color: #00bbf9; font: 9.5px ui-monospace,monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #cc-corner-pill { position: fixed; top: 62px; right: 10px; display: none; gap: 5px; pointer-events: auto; z-index: 2147483646; }
+    .cc-corner-btn { min-height: 44px; border-radius: 13px; border: 1.5px solid #00f5d4; padding: 0 11px; background: rgba(8,12,20,.92); color: #fff; font-size: 10px; font-weight: 900; }
+    .cc-passthrough { pointer-events: none !important; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }
+  `;
 
-  function declutterAndReorganizeTabs(sr) {
-    const navList = sr.querySelector(".cc-nav-list");
-    const mainView = sr.querySelector(".cc-main-view");
-    if (!navList || !mainView || sr.getElementById("cc-pane-presets")) return;
+  function createFloatingHud() {
+    if (destroyed || hudHost?.isConnected) return;
+    const existing = document.getElementById("cc-mobile-launcher-host");
+    if (existing) existing.remove();
 
-    // Переименовываем старые вкладки покороче и понятнее
-    const tabLabels = {
-      automove: '<span class="cc-tab-icon">🤖</span> АВТОХОД',
-      rage: '<span class="cc-tab-icon">⚡</span> СТИЛЬ & ELO',
-      visuals: '<span class="cc-tab-icon">✦</span> СТРЕЛКИ',
-      misc: '<span class="cc-tab-icon">❖</span> КОНФИГИ'
-    };
-    Object.entries(tabLabels).forEach(([tabId, html]) => {
-      const btn = navList.querySelector(`.cc-tab-btn[data-tab="${tabId}"]`);
-      if (btn) btn.innerHTML = html;
-    });
-
-    // 5.1. Создаем новую первую вкладку «🎯 ПРЕСЕТЫ» (Быстрые профили + кнопка Опроса)
-    const presetsTabBtn = document.createElement("button");
-    presetsTabBtn.type = "button";
-    presetsTabBtn.className = "cc-tab-btn";
-    presetsTabBtn.dataset.tab = "presets";
-    presetsTabBtn.innerHTML = '<span class="cc-tab-icon">🎯</span> ПРЕСЕТЫ';
-    navList.prepend(presetsTabBtn);
-
-    const presetsPane = document.createElement("div");
-    presetsPane.className = "cc-tab-pane";
-    presetsPane.id = "cc-pane-presets";
-    presetsPane.innerHTML = `
-      <div class="cc-glass-card" style="border-left: 4px solid #00f5d4; background: linear-gradient(135deg, rgba(0,245,212,0.14), rgba(0,187,249,0.06));">
-        <div class="cc-section-title">
-          <span>🧭 АВТО-КАЛИБРОВКА ПОД ВАШ СТИЛЬ (3000 ELO)</span>
-        </div>
-        <div style="font-size:11.5px; color:#cbd5e1; line-height:1.42; margin-bottom:10px;">
-          Ответьте на 3 быстрых вопроса — и приложение само выставит идеальные тайминги, режим и визуал под вашу игру:
-        </div>
-        <button type="button" class="cc-btn cc-btn-primary" id="cc-run-survey-again-btn" style="width:100%;">
-          ✨ ЗАПУСТИТЬ ОПРОС-НАСТРОЙКУ
-        </button>
+    hudHost = document.createElement("div");
+    hudHost.id = "cc-mobile-launcher-host";
+    hudHost.style.cssText = "all:initial;position:fixed;inset:0;width:0;height:0;z-index:2147483647;pointer-events:none;";
+    document.documentElement.appendChild(hudHost);
+    hudShadow = hudHost.attachShadow({ mode: "open" });
+    hudShadow.innerHTML = `
+      <style>${floatingHudCss}</style>
+      <div id="cc-daily-welcome-splash" class="cc-overlay" role="dialog" aria-modal="true" aria-label="Приветствие" aria-hidden="true" tabindex="-1">
+        <div class="cc-welcome-emblem" aria-hidden="true">♟</div>
+        <div class="cc-welcome-title">ChessCoach готов</div>
+        <div class="cc-welcome-sub" id="cc-daily-welcome-sub"></div>
+        <div class="cc-welcome-progress" aria-hidden="true"></div>
       </div>
-
-      <div class="cc-preset-big-card" id="cc-quick-preset-legit" style="border-color: rgba(56, 176, 0, 0.55);">
-        <div class="cc-preset-big-title">
-          <span style="color:#70e000;">🛡 ПРЕСЕТ: LEGIT STEALTH (3000 ELO)</span>
-          <span class="cc-badge" style="background:#38b000; color:#fff;">БЕЗ БАНА</span>
-        </div>
-        <div class="cc-preset-big-desc">
-          Стиль Михаила Таля, плавные кривые Безье, живые паузы под часы и подмешивание 2-й линии для обхода античита.
+      <div id="cc-onboarding-modal" class="cc-overlay" role="dialog" aria-modal="true" aria-labelledby="cc-survey-q-title" aria-hidden="true">
+        <div class="cc-modal-box" role="document">
+          <span class="cc-step" id="cc-survey-step-tag"></span>
+          <div class="cc-question" id="cc-survey-q-title"></div>
+          <div class="cc-hint" id="cc-survey-q-hint"></div>
+          <div class="cc-options" id="cc-survey-opts-list"></div>
         </div>
       </div>
-
-      <div class="cc-preset-big-card" id="cc-quick-preset-hvh" style="border-color: rgba(255, 42, 133, 0.55);">
-        <div class="cc-preset-big-title">
-          <span style="color:#ff4d94;">⚡ ПРЕСЕТ: HvH РЕЗНЯ 1+0 (3000 ELO)</span>
-          <span class="cc-badge" style="background:#ff2a85; color:#fff;">ТУРБО</span>
-        </div>
-        <div class="cc-preset-big-desc">
-          Чистый Stockfish 3000 + таблицы Syzygy, мгновенный автоход 38 мс и умные SEE-премувы без потери времени.
+      <div id="cc-auto-confirm-modal" class="cc-overlay" role="dialog" aria-modal="true" aria-labelledby="cc-auto-confirm-title" aria-hidden="true">
+        <div class="cc-modal-box" role="document">
+          <span class="cc-step">ОТДЕЛЬНОЕ ПОДТВЕРЖДЕНИЕ</span>
+          <div class="cc-question" id="cc-auto-confirm-title">Включить автоматические ходы?</div>
+          <div class="cc-hint" id="cc-auto-confirm-text">
+            Профиль уже применён, но автоход оставлен выключенным. Автоматизация может противоречить правилам игровой платформы.
+          </div>
+          <div class="cc-confirm-actions">
+            <button type="button" id="cc-auto-stay-off">Оставить выкл.</button>
+            <button type="button" id="cc-auto-enable">Включить явно</button>
+          </div>
         </div>
       </div>
-
-      <div class="cc-preset-big-card" id="cc-quick-preset-balance" style="border-color: rgba(0, 245, 212, 0.55);">
-        <div class="cc-preset-big-title">
-          <span style="color:#00f5d4;">⚖️ ПРЕСЕТ: БАЛАНС LEGIT + HVH (3000 ELO)</span>
-          <span class="cc-badge">УНИВЕРСАЛ</span>
+      <section id="cc-mini-hud-card" role="region" aria-label="Краткий анализ ChessCoach" aria-hidden="true">
+        <div class="cc-mini-header" id="cc-mini-drag-handle">
+          <div class="cc-mini-status" aria-live="polite">
+            <span class="cc-mini-dot" id="cc-mini-dot" aria-hidden="true"></span>
+            <span id="cc-mini-turn-txt">АНАЛИЗ ДОСКИ</span>
+          </div>
+          <div class="cc-mini-actions">
+            <button type="button" class="cc-mini-btn" id="cc-mini-play-btn" aria-label="Сделать рекомендованный ход">ХОД</button>
+            <button type="button" class="cc-mini-btn" id="cc-mini-settings-btn" aria-label="Открыть настройки">МЕНЮ</button>
+            <button type="button" class="cc-mini-btn" id="cc-mini-close-btn" aria-label="Свернуть в кнопку">×</button>
+          </div>
         </div>
-        <div class="cc-preset-big-desc">
-          Стиль Хикару Накамуры для блица: быстрые человеческие ходы + страховка в критических позициях и цейтноте.
+        <div class="cc-mini-body">
+          <div class="cc-mini-move-row">
+            <span id="cc-mini-move-main">Ожидание...</span>
+            <span class="cc-mini-badges"><span class="cc-mini-badge" id="cc-mini-wdl-pill">W 50%</span><span class="cc-mini-badge" id="cc-mini-eval-badge">0.00</span></span>
+          </div>
+          <div id="cc-mini-tech-reason">Откройте партию или сделайте ход для расчёта.</div>
+          <div id="cc-mini-pv-line"></div>
         </div>
+      </section>
+      <div id="cc-corner-pill" role="group" aria-label="ChessCoach" aria-hidden="true">
+        <button type="button" class="cc-corner-btn" id="cc-corner-restore-hud-btn" aria-label="Развернуть мини-анализ"><span id="cc-corner-move-short">АНАЛИЗ</span></button>
+        <button type="button" class="cc-corner-btn" id="cc-corner-open-settings-btn" aria-label="Открыть настройки">МЕНЮ</button>
       </div>
     `;
-    mainView.prepend(presetsPane);
 
-    // 5.2. Создаем отдельную вкладку «🖼️ ОБОИ» и переносим туда карточки фона и темы из перегруженной вкладки Визуал
-    const wallTabBtn = document.createElement("button");
-    wallTabBtn.type = "button";
-    wallTabBtn.className = "cc-tab-btn";
-    wallTabBtn.dataset.tab = "wallpaper";
-    wallTabBtn.innerHTML = '<span class="cc-tab-icon">🖼️</span> ОБОИ & ТЕМЫ';
+    welcomeSplash = hudShadow.getElementById("cc-daily-welcome-splash");
+    onboardingModal = hudShadow.getElementById("cc-onboarding-modal");
+    autoConfirmModal = hudShadow.getElementById("cc-auto-confirm-modal");
+    miniHudCard = hudShadow.getElementById("cc-mini-hud-card");
+    cornerPill = hudShadow.getElementById("cc-corner-pill");
 
-    const visualsBtn = navList.querySelector('.cc-tab-btn[data-tab="visuals"]');
-    if (visualsBtn && visualsBtn.nextSibling) {
-      navList.insertBefore(wallTabBtn, visualsBtn.nextSibling);
-    } else {
-      navList.appendChild(wallTabBtn);
-    }
-
-    const wallPane = document.createElement("div");
-    wallPane.className = "cc-tab-pane";
-    wallPane.id = "cc-pane-wallpaper";
-    mainView.appendChild(wallPane);
-
-    const uploadBgBtn = sr.getElementById("cc-upload-bg-btn");
-    if (uploadBgBtn) {
-      const bgCard = uploadBgBtn.closest(".cc-glass-card");
-      if (bgCard) wallPane.appendChild(bgCard);
-    }
-    const themeSelect = sr.getElementById("cc-vis-theme");
-    if (themeSelect) {
-      const themeCard = themeSelect.closest(".cc-glass-card");
-      if (themeCard) wallPane.appendChild(themeCard);
-    }
-
-    // 5.3. Прячем сложные ползунки во вкладке АВТОХОД в аккуратный спойлер «Тонкая настройка»
-    const autoPane = sr.getElementById("cc-pane-automove");
-    if (autoPane) {
-      const delaySlider = sr.getElementById("cc-auto-delay-slider");
-      const avgChk = sr.getElementById("cc-auto-avg-chk");
-      if (delaySlider && avgChk) {
-        const cardA = delaySlider.closest(".cc-glass-card");
-        const cardB = avgChk.closest(".cc-glass-card");
-        if (cardA && cardB && cardA !== cardB) {
-          const drawer = document.createElement("details");
-          drawer.className = "cc-clean-drawer";
-          drawer.innerHTML = `<summary>🎛 Тонкая настройка задержек и 2-й линии</summary><div class="cc-drawer-body"></div>`;
-          const body = drawer.querySelector(".cc-drawer-body");
-          cardA.parentNode.insertBefore(drawer, cardB);
-          body.appendChild(cardB);
-        }
-      }
-    }
-
-    // 5.4. Прячем второстепенные технические галочки во вкладке СТИЛЬ & ELO в спойлер
-    const ragePane = sr.getElementById("cc-pane-rage");
-    if (ragePane) {
-      const wasmChk = sr.getElementById("cc-sf-wasm-chk");
-      const turnSel = sr.getElementById("cc-turn-select");
-      if (wasmChk && turnSel) {
-        const wasmCard = wasmChk.closest(".cc-glass-card");
-        const turnCard = turnSel.closest(".cc-glass-card");
-        if (wasmCard && turnCard) {
-          const drawer = document.createElement("details");
-          drawer.className = "cc-clean-drawer";
-          drawer.innerHTML = `<summary>📡 Доп. модули (WASM, Звук, Анти-Бан)</summary><div class="cc-drawer-body"></div>`;
-          const body = drawer.querySelector(".cc-drawer-body");
-          ragePane.appendChild(drawer);
-          body.appendChild(wasmCard);
-          body.appendChild(turnCard);
-          const avgCard = sr.getElementById("cc-show-avg-chk")?.closest(".cc-glass-card");
-          if (avgCard) body.appendChild(avgCard);
-        }
-      }
-    }
-
-    // Привязываем переключение для новых вкладок
-    const activateCustomTab = (targetBtn, targetPane) => {
-      sr.querySelectorAll(".cc-tab-btn").forEach((b) => b.classList.toggle("active", b === targetBtn));
-      sr.querySelectorAll(".cc-tab-pane").forEach((p) => p.classList.toggle("active", p === targetPane));
-    };
-
-    presetsTabBtn.addEventListener("click", () => activateCustomTab(presetsTabBtn, presetsPane));
-    wallTabBtn.addEventListener("click", () => activateCustomTab(wallTabBtn, wallPane));
-
-    sr.querySelectorAll(".cc-tab-btn").forEach((btn) => {
-      if (btn !== presetsTabBtn && btn !== wallTabBtn) {
-        btn.addEventListener("click", () => {
-          presetsTabBtn.classList.remove("active");
-          presetsPane.classList.remove("active");
-          wallTabBtn.classList.remove("active");
-          wallPane.classList.remove("active");
+    for (const overlay of [welcomeSplash, onboardingModal, autoConfirmModal, miniHudCard, cornerPill]) {
+      for (const eventName of ["pointerdown", "pointermove", "pointerup", "click", "dblclick", "contextmenu"]) {
+        listen(overlay, eventName, (event) => {
+          event.stopPropagation();
+          if (eventName === "contextmenu") event.preventDefault();
         });
       }
+    }
+
+    listen(hudShadow.getElementById("cc-mini-play-btn"), "click", () => {
+      vibrate(18);
+      if (document.visibilityState !== "visible" || !mainHudShadow) return;
+      const playButton = mainHudShadow.getElementById("cc-play-once");
+      if (playButton && !playButton.disabled) playButton.click();
+    });
+    listen(hudShadow.getElementById("cc-mini-settings-btn"), "click", () => setUiViewMode("full"));
+    listen(hudShadow.getElementById("cc-mini-close-btn"), "click", () => setUiViewMode("pill"));
+    listen(hudShadow.getElementById("cc-corner-restore-hud-btn"), "click", () => setUiViewMode("mini"));
+    listen(hudShadow.getElementById("cc-corner-open-settings-btn"), "click", () => setUiViewMode("full"));
+    listen(hudShadow.getElementById("cc-auto-stay-off"), "click", () => {
+      vibrate(10);
+      pendingAutomation = null;
+      hideOverlay(autoConfirmModal);
+      setUiViewMode(lastInGameSubMode);
+    });
+    listen(hudShadow.getElementById("cc-auto-enable"), "click", () => {
+      void confirmAutomationExplicitly();
     });
 
-    // Обработчики карточек во вкладке «🎯 ПРЕСЕТЫ»
-    bindReliableMobileTap(presetsPane.querySelector("#cc-run-survey-again-btn"), () => {
-      openOnboardingSurveyModal(true);
-    });
-    bindReliableMobileTap(presetsPane.querySelector("#cc-quick-preset-legit"), () => {
-      applySmartPresetConfig({ mode: "legit", speed: "blitz", arrows: "curved_neon" });
-      setUiViewMode(lastInGameSubMode);
-    });
-    bindReliableMobileTap(presetsPane.querySelector("#cc-quick-preset-hvh"), () => {
-      applySmartPresetConfig({ mode: "hvh", speed: "bullet", arrows: "sq_cyber_frame" });
-      setUiViewMode(lastInGameSubMode);
-    });
-    bindReliableMobileTap(presetsPane.querySelector("#cc-quick-preset-balance"), () => {
-      applySmartPresetConfig({ mode: "balance", speed: "blitz", arrows: "curved_neon" });
-      setUiViewMode(lastInGameSubMode);
+    installDragHandlers();
+    installModalKeyboardHandling();
+    applySavedMiniPosition();
+    syncVisibilityStates();
+  }
+
+  function showOverlay(overlay, focusTarget) {
+    if (!overlay || document.visibilityState !== "visible") return;
+    overlay.style.display = "flex";
+    overlay.setAttribute("aria-hidden", "false");
+    schedule(() => {
+      const target = focusTarget || overlay.querySelector("button,[href],input,select,[tabindex]:not([tabindex='-1'])") || overlay;
+      try { target.focus({ preventScroll: true }); } catch (e) { target.focus?.(); }
+    }, 0);
+  }
+
+  function hideOverlay(overlay) {
+    if (!overlay) return;
+    overlay.style.display = "none";
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
+  function isOverlayOpen(overlay) {
+    return Boolean(overlay && overlay.getAttribute("aria-hidden") === "false" && overlay.style.display !== "none");
+  }
+
+  function installModalKeyboardHandling() {
+    listen(hudShadow, "keydown", (event) => {
+      const activeModal = [autoConfirmModal, onboardingModal, welcomeSplash].find(isOverlayOpen);
+      if (!activeModal) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        handleAndroidBack();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(activeModal.querySelectorAll("button:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex='-1'])"));
+      if (!focusable.length) {
+        event.preventDefault();
+        activeModal.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && hudShadow.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && hudShadow.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     });
   }
 
-  function ensureNonAnalyzerTabSelected(sr) {
-    if (!sr) return;
-    const activeBtn = sr.querySelector(".cc-tab-btn.active");
-    if (!activeBtn || activeBtn.dataset.tab === "analyzer") {
-      const presetsBtn = sr.querySelector('.cc-tab-btn[data-tab="presets"]') || sr.querySelector('.cc-tab-btn[data-tab="automove"]');
-      if (presetsBtn) presetsBtn.click();
+  function getVisualViewportBounds() {
+    const viewport = window.visualViewport;
+    const left = viewport ? viewport.offsetLeft : 0;
+    const top = viewport ? viewport.offsetTop : 0;
+    const width = viewport ? viewport.width : window.innerWidth;
+    const height = viewport ? viewport.height : window.innerHeight;
+    return { left, top, right: left + width, bottom: top + height, width, height };
+  }
+
+  function fitSettingsViewport() {
+    if (!mainPanel) return;
+    const viewport = getVisualViewportBounds();
+    mainPanel.style.setProperty("--cc-mobile-viewport-left", `${viewport.left}px`);
+    mainPanel.style.setProperty("--cc-mobile-viewport-top", `${viewport.top}px`);
+    mainPanel.style.setProperty("--cc-mobile-viewport-width", `${viewport.width}px`);
+    mainPanel.style.setProperty("--cc-mobile-viewport-height", `${viewport.height}px`);
+  }
+
+  function clampMiniHud(savePosition = false) {
+    if (!miniHudCard) return;
+    const viewport = getVisualViewportBounds();
+    miniHudCard.style.maxWidth = `${Math.max(180, viewport.width - 8)}px`;
+    const rect = miniHudCard.getBoundingClientRect();
+    const width = rect.width || Math.min(286, Math.max(220, viewport.width - 16));
+    const height = rect.height || 132;
+    const currentLeft = Number.parseFloat(miniHudCard.style.left) || rect.left || viewport.left + 8;
+    const currentTop = Number.parseFloat(miniHudCard.style.top) || rect.top || viewport.top + 54;
+    const left = Math.max(viewport.left + 4, Math.min(viewport.right - width - 4, currentLeft));
+    const top = Math.max(viewport.top + 4, Math.min(viewport.bottom - height - 4, currentTop));
+    miniHudCard.style.left = `${left}px`;
+    miniHudCard.style.top = `${top}px`;
+    if (savePosition) {
+      void saveGlobalPatch({ cc_mobile_mini_hud_pos: { left, top } });
     }
   }
 
-  function setupMobileSettingsHub(sr, panel) {
-    shieldFromBoardBleedThrough(panel);
-    declutterAndReorganizeTabs(sr);
+  function applySavedMiniPosition() {
+    if (!miniHudCard) return;
+    const saved = initialStorage.cc_mobile_mini_hud_pos;
+    if (saved && Number.isFinite(Number(saved.left)) && Number.isFinite(Number(saved.top))) {
+      miniHudCard.style.left = `${Number(saved.left)}px`;
+      miniHudCard.style.top = `${Number(saved.top)}px`;
+    }
+    clampMiniHud(false);
+  }
 
+  function installDragHandlers() {
+    const handle = hudShadow.getElementById("cc-mini-drag-handle");
+    listen(handle, "pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest("button")) return;
+      const rect = miniHudCard.getBoundingClientRect();
+      dragState = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+      event.preventDefault();
+    });
+    listen(handle, "pointermove", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      miniHudCard.style.left = `${dragState.left + event.clientX - dragState.x}px`;
+      miniHudCard.style.top = `${dragState.top + event.clientY - dragState.y}px`;
+      clampMiniHud(false);
+      event.preventDefault();
+    });
+    const finishDrag = (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      dragState = null;
+      try { handle.releasePointerCapture(event.pointerId); } catch (e) {}
+      clampMiniHud(true);
+    };
+    listen(handle, "pointerup", finishDrag);
+    listen(handle, "pointercancel", finishDrag);
+  }
+
+  function setUiViewMode(newMode) {
+    if (!["full", "mini", "pill"].includes(newMode)) return;
+    const modeChanged = uiViewMode !== newMode;
+    vibrate(12);
+    uiViewMode = newMode;
+    const patch = { cc_mobile_ui_view_mode: newMode };
+    if (newMode === "mini" || newMode === "pill") {
+      lastInGameSubMode = newMode;
+      patch.cc_mobile_ingame_submode = newMode;
+    }
+    void saveGlobalPatch(patch);
+    syncVisibilityStates();
+    if (modeChanged) {
+      window.dispatchEvent(new CustomEvent("cc-mobile-lifecycle", {
+        detail: { state: newMode === "full" ? "settings" : "active", cancelPendingMoves: newMode === "full" }
+      }));
+    }
+  }
+
+  function syncVisibilityStates() {
+    window.__CC_ANDROID_SETTINGS_OPEN__ = uiViewMode === "full";
+    if (mainPanel) {
+      mainPanel.classList.toggle("cc-mobile-hidden", uiViewMode !== "full");
+      if (uiViewMode === "full") mainPanel.classList.remove("cc-minimized");
+    }
+    if (!miniHudCard || !cornerPill) return;
+    const showMini = uiViewMode === "mini" && document.visibilityState === "visible";
+    const showPill = uiViewMode === "pill" && document.visibilityState === "visible";
+    miniHudCard.style.display = showMini ? "block" : "none";
+    miniHudCard.setAttribute("aria-hidden", showMini ? "false" : "true");
+    cornerPill.style.display = showPill ? "flex" : "none";
+    cornerPill.setAttribute("aria-hidden", showPill ? "false" : "true");
+    if (showMini) clampMiniHud(false);
+  }
+
+  function stopHudDiscovery() {
+    documentHudObserver?.disconnect();
+    rootPanelObserver?.disconnect();
+    documentHudObserver = null;
+    rootPanelObserver = null;
+  }
+
+  function registerProvidedHud(root) {
+    if (destroyed || rootSetupComplete || !root || typeof root.getElementById !== "function") return false;
+    const host = root.host;
+    if (!host || !host.isConnected) return false;
+    mainHudHost = host;
+    mainHudShadow = root;
+    Object.defineProperty(window, "__CC_ANDROID_HUD_ROOT__", {
+      value: root, writable: true, configurable: true, enumerable: false
+    });
+    documentHudObserver?.disconnect();
+    documentHudObserver = null;
+    const panel = root.getElementById("chesscoach-panel");
+    if (panel) {
+      registerHudOnce(root, panel);
+      return true;
+    }
+    rootPanelObserver?.disconnect();
+    rootPanelObserver = new MutationObserver(() => {
+      const candidate = root.getElementById("chesscoach-panel");
+      if (candidate) registerHudOnce(root, candidate);
+    });
+    rootPanelObserver.observe(root, { childList: true, subtree: true });
+    schedule(() => {
+      rootPanelObserver?.disconnect();
+      rootPanelObserver = null;
+    }, 12000);
+    return true;
+  }
+
+  function mobileHudRegistrar(root) {
+    try { previousHudRegistrar?.(root); } catch (e) {}
+    registerProvidedHud(root);
+  }
+
+  window.__ChessCoachRegisterHudShadow = mobileHudRegistrar;
+
+  function tryRegisterExactHud() {
+    if (destroyed || rootSetupComplete) return true;
+    const retainedRoot = window.__CC_ANDROID_HUD_ROOT__;
+    if (retainedRoot?.host?.isConnected) return registerProvidedHud(retainedRoot);
+    const host = document.querySelector("#chesscoach-host");
+    const root = host?.shadowRoot;
+    if (!host || !root) return false;
+    return registerProvidedHud(root);
+  }
+
+  function startHudDiscovery() {
+    if (destroyed || rootSetupComplete || documentHudObserver) return;
+    if (tryRegisterExactHud()) return;
+    documentHudObserver = new MutationObserver(tryRegisterExactHud);
+    documentHudObserver.observe(document.documentElement, { childList: true, subtree: true });
+    schedule(() => {
+      documentHudObserver?.disconnect();
+      documentHudObserver = null;
+    }, 12000);
+  }
+
+  function registerHudOnce(root, panel) {
+    if (destroyed || rootSetupComplete || root !== mainHudShadow) return;
+    rootSetupComplete = true;
+    mainPanel = panel;
+    stopHudDiscovery();
+
+    if (!root.getElementById("cc-mobile-override-style")) {
+      const style = document.createElement("style");
+      style.id = "cc-mobile-override-style";
+      style.textContent = mobileOverrideCss;
+      root.prepend(style);
+    }
+    panel.dataset.ccMobileLauncher = "1";
+    fitSettingsViewport();
+    applyDeviceClasses();
+    setupMobileSettingsHub(root, panel);
+    installHudDataSync(root);
+    installCalibrationMarker(root);
+    disableAndroidUserScripts(root);
+    enforceInitialAutomationDefault();
+    if (deviceRecommendation.tier === "LOW") enforceLowTierRestrictions();
+    syncVisibilityStates();
+    maybeStartWelcomeSequence();
+  }
+
+  function applyDeviceClasses() {
+    if (!mainPanel) return;
+    mainPanel.classList.remove("cc-device-low", "cc-device-balanced", "cc-device-high", "cc-mobile-reduced-motion");
+    mainPanel.classList.add(`cc-device-${deviceRecommendation.tier.toLowerCase()}`);
+    if (!deviceRecommendation.animations || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      mainPanel.classList.add("cc-mobile-reduced-motion");
+    }
+    const chip = mainHudShadow?.getElementById("cc-mobile-device-chip");
+    if (chip) chip.textContent = `${deviceRecommendation.tier} · ${deviceRecommendation.model}`;
+    const recommendation = mainHudShadow?.getElementById("cc-mobile-recommendation-text");
+    if (recommendation) recommendation.textContent = `${deviceRecommendation.model}. Один поток Stockfish, без постоянных анимаций. Рекомендуемый предел: ${deviceRecommendation.maxElo} ELO.`;
+  }
+
+  function setupMobileSettingsHub(root, panel) {
+    if (root.getElementById("cc-mobile-launcher-bar")) return;
     const isChessCom = currentPlatform === "chesscom";
     const launcherBar = document.createElement("div");
     launcherBar.id = "cc-mobile-launcher-bar";
     launcherBar.innerHTML = `
-      <div class="cc-launcher-cards-row">
-        <button type="button" class="cc-platform-card ${!isChessCom ? "active-lichess" : ""}" id="cc-select-lichess-btn">
-          <div class="cc-platform-card-title">
-            <span>♟️ LICHESS.ORG</span>
-            <span style="font-size:9px; color:${!isChessCom ? "#00f5d4" : "#94a3b8"};">${!isChessCom ? "● ОТКРЫТ" : "ПЕРЕЙТИ ➔"}</span>
-          </div>
-          <div class="cc-platform-card-sub">⚡ HvH • Премувы • Legit</div>
+      <div class="cc-launcher-topline">
+        <span class="cc-device-chip" id="cc-mobile-device-chip">${deviceRecommendation.tier} · ${escapeHtml(deviceRecommendation.model)}</span>
+        <span class="cc-launcher-note">Лёгкий интерфейс</span>
+      </div>
+      <div class="cc-launcher-cards-row" role="navigation" aria-label="Шахматная платформа">
+        <button type="button" class="cc-platform-card" id="cc-select-lichess-btn" ${isChessCom ? "" : "aria-current=\"page\""}>
+          <span class="cc-platform-card-title">Lichess</span><span class="cc-platform-card-sub">${isChessCom ? "Перейти" : "Открыт"}</span>
         </button>
-
-        <button type="button" class="cc-platform-card ${isChessCom ? "active-chesscom" : ""}" id="cc-select-chesscom-btn">
-          <div class="cc-platform-card-title">
-            <span>🛡️ CHESS.COM</span>
-            <span style="font-size:9px; color:${isChessCom ? "#70e000" : "#94a3b8"};">${isChessCom ? "● ОТКРЫТ" : "ПЕРЕЙТИ ➔"}</span>
-          </div>
-          <div class="cc-platform-card-sub">🎯 Безье • T1% Лимитер</div>
+        <button type="button" class="cc-platform-card" id="cc-select-chesscom-btn" ${isChessCom ? "aria-current=\"page\"" : ""}>
+          <span class="cc-platform-card-title">Chess.com</span><span class="cc-platform-card-sub">${isChessCom ? "Открыт" : "Перейти"}</span>
         </button>
       </div>
-      <button type="button" id="cc-return-to-game-btn">
-        🎮 ВЕРНУТЬСЯ К ДОСКЕ ${isChessCom ? "CHESS.COM" : "LICHESS.ORG"}
-      </button>
     `;
+    const modeBar = root.getElementById("cc-mode-switcher-bar");
+    if (modeBar) panel.insertBefore(launcherBar, modeBar);
+    else panel.prepend(launcherBar);
 
-    const modeBar = sr.getElementById("cc-mode-switcher-bar");
-    if (modeBar) {
-      panel.insertBefore(launcherBar, modeBar);
-    } else {
-      panel.prepend(launcherBar);
-    }
+    addPresetPane(root);
+    installMobileNavigation(root, modeBar);
+    shieldPanelEvents(panel);
 
-    const headerCloseBtn = sr.getElementById("cc-toggle-btn");
-    if (headerCloseBtn) {
-      headerCloseBtn.textContent = "✕ К ДОСКЕ";
-      bindReliableMobileTap(headerCloseBtn, () => {
-        vibrate(14);
+    listen(root.getElementById("cc-select-lichess-btn"), "click", () => {
+      if (currentPlatform === "lichess") setUiViewMode(lastInGameSubMode);
+      else void navigateToPlatform("lichess", root.getElementById("cc-select-lichess-btn"));
+    });
+    listen(root.getElementById("cc-select-chesscom-btn"), "click", () => {
+      if (currentPlatform === "chesscom") setUiViewMode(lastInGameSubMode);
+      else void navigateToPlatform("chesscom", root.getElementById("cc-select-chesscom-btn"));
+    });
+
+    const headerClose = root.getElementById("cc-toggle-btn");
+    const brand = root.querySelector(".cc-brand > span:nth-child(2)");
+    if (brand) brand.textContent = "ChessCoach";
+    if (headerClose) {
+      headerClose.textContent = "К доске";
+      headerClose.setAttribute("aria-label", "Вернуться к доске");
+      listen(headerClose, "click", (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
         setUiViewMode(lastInGameSubMode);
+      }, true);
+    }
+    root.querySelectorAll('.cc-Switch-row input[type="checkbox"]').forEach((input) => {
+      const row = input.closest(".cc-Switch-row");
+      input.setAttribute("aria-label", compactText(row.textContent, 180));
+      listen(row, "click", (event) => {
+        if (input.disabled || event.target.closest("input,button,select,a,label")) return;
+        input.click();
+      });
+    });
+    const autoPane = root.getElementById("cc-pane-automove");
+    const autoCard = root.getElementById("cc-auto-master-chk")?.closest(".cc-glass-card");
+    const autoStatus = autoPane?.querySelector(".cc-auto-status-box");
+    if (autoCard && autoStatus) autoStatus.after(autoCard);
+  }
+
+  function shieldPanelEvents(panel) {
+    for (const type of ["pointerdown", "pointermove", "pointerup", "click", "dblclick", "contextmenu"]) {
+      listen(panel, type, (event) => {
+        event.stopPropagation();
+        if (type === "contextmenu") event.preventDefault();
       });
     }
-
-    bindReliableMobileTap(sr.getElementById("cc-return-to-game-btn"), () => {
-      vibrate(14);
-      setUiViewMode(lastInGameSubMode);
-    });
-
-    const lichessBtn = sr.getElementById("cc-select-lichess-btn");
-    bindReliableMobileTap(lichessBtn, () => {
-      if (!location.hostname.includes("lichess.org")) {
-        navigateToPlatform("lichess", "https://lichess.org/", lichessBtn);
-      } else {
-        vibrate(14);
-        setUiViewMode(lastInGameSubMode);
-      }
-    });
-
-    const chesscomBtn = sr.getElementById("cc-select-chesscom-btn");
-    bindReliableMobileTap(chesscomBtn, () => {
-      if (!location.hostname.includes("chess.com")) {
-        navigateToPlatform("chesscom", "https://www.chess.com/play/online", chesscomBtn);
-      } else {
-        vibrate(14);
-        setUiViewMode(lastInGameSubMode);
-      }
-    });
-
-    setTimeout(() => ensureNonAnalyzerTabSelected(sr), 20);
-    syncVisibilityStates();
   }
 
-  // 6. MINIHUD + УГЛОВАЯ КНОПКА + СПЛЭШ «ДОБРО ПОЖАЛОВАТЬ!» + ОПРОС-КАЛИБРОВКА
-  const hudHost = document.createElement("div");
-  hudHost.id = "cc-floating-orb-host";
-  hudHost.style.cssText = "all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none;";
-  document.documentElement.appendChild(hudHost);
-  const hudShadow = origAttachShadow.call(hudHost, { mode: "open" });
+  function addPresetPane(root) {
+    const nav = root.querySelector(".cc-nav-list");
+    const mainView = root.querySelector(".cc-main-view");
+    if (!nav || !mainView || root.getElementById("cc-pane-presets")) return;
 
-  const container = document.createElement("div");
-  container.id = "cc-ingame-layer";
-  hudShadow.innerHTML = `
-    <style>
-      * {
-        box-sizing: border-box;
-        user-select: none;
-        -webkit-user-select: none;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", Roboto, sans-serif;
-      }
-      @keyframes cc-welcome-bar-anim {
-        0% { width: 0%; }
-        100% { width: 100%; }
-      }
-      @keyframes cc-float-logo {
-        0%, 100% { transform: translateY(0px) scale(1); }
-        50% { transform: translateY(-6px) scale(1.04); }
-      }
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "cc-tab-btn";
+    tab.dataset.tab = "presets";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-controls", "cc-pane-presets");
+    tab.textContent = "ПРЕСЕТЫ";
+    nav.prepend(tab);
 
-      /* 1. ЕЖЕДНЕВНЫЙ ЭКРАН «ДОБРО ПОЖАЛОВАТЬ!» (1 РАЗ В ДЕНЬ НА 2.4 СЕК) */
-      #cc-daily-welcome-splash {
-        position: fixed;
-        inset: 0;
-        background: radial-gradient(circle at 50% 35%, #11192e 0%, #06080f 75%);
-        display: none;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        padding: 28px;
-        text-align: center;
-        pointer-events: auto;
-        z-index: 2147483647;
-        opacity: 1;
-        transition: opacity 0.45s cubic-bezier(0.16, 1, 0.3, 1), transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
-      }
-      #cc-daily-welcome-splash.cc-fade-out {
-        opacity: 0;
-        transform: scale(1.05);
-        pointer-events: none;
-      }
-      .cc-welcome-emblem {
-        width: 78px;
-        height: 78px;
-        border-radius: 24px;
-        background: linear-gradient(135deg, rgba(0, 245, 212, 0.22), rgba(199, 125, 255, 0.22));
-        border: 2px solid #00f5d4;
-        box-shadow: 0 0 40px rgba(0, 245, 212, 0.45);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 38px;
-        margin-bottom: 18px;
-        animation: cc-float-logo 2.2s ease-in-out infinite;
-      }
-      .cc-welcome-h1 {
-        font-size: 26px;
-        font-weight: 900;
-        color: #ffffff;
-        letter-spacing: 0.5px;
-        margin-bottom: 6px;
-        background: linear-gradient(90deg, #ffffff, #00f5d4, #c77dff);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-      }
-      .cc-welcome-subtext {
-        font-size: 13px;
-        color: #94a3b8;
-        font-weight: 600;
-        max-width: 280px;
-        line-height: 1.4;
-        margin-bottom: 24px;
-      }
-      .cc-welcome-progress-track {
-        width: 200px;
-        height: 5px;
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 999px;
-        overflow: hidden;
-      }
-      .cc-welcome-progress-fill {
-        height: 100%;
-        background: linear-gradient(90deg, #00f5d4, #00bbf9, #c77dff);
-        animation: cc-welcome-bar-anim 2.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-      }
-
-      /* 2. ОДНОРАЗОВЫЙ ОПРОС-КАЛИБРОВКА ПОСЛЕ УСТАНОВКИ (3000 ELO FIXED) */
-      #cc-onboarding-modal {
-        position: fixed;
-        inset: 0;
-        background: rgba(5, 8, 15, 0.94);
-        backdrop-filter: blur(22px);
-        -webkit-backdrop-filter: blur(22px);
-        display: none;
-        flex-direction: column;
-        justify-content: center;
-        padding: 20px;
-        pointer-events: auto;
-        z-index: 2147483647;
-      }
-      .cc-survey-box {
-        width: 100%;
-        max-width: 400px;
-        margin: 0 auto;
-        background: rgba(12, 16, 28, 0.96);
-        border: 1.5px solid rgba(0, 245, 212, 0.45);
-        border-radius: 22px;
-        padding: 20px 18px;
-        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.85), 0 0 30px rgba(0, 245, 212, 0.18);
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-      }
-      .cc-survey-step-badge {
-        align-self: flex-start;
-        font-size: 10px;
-        font-weight: 900;
-        color: #05070c;
-        background: linear-gradient(135deg, #00f5d4, #00bbf9);
-        padding: 3px 10px;
-        border-radius: 999px;
-      }
-      .cc-survey-question {
-        font-size: 18px;
-        font-weight: 900;
-        color: #ffffff;
-        line-height: 1.25;
-      }
-      .cc-survey-hint {
-        font-size: 11.5px;
-        color: #94a3b8;
-        margin-top: -6px;
-      }
-      .cc-survey-options {
-        display: flex;
-        flex-direction: column;
-        gap: 9px;
-      }
-      .cc-survey-opt-btn {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1.5px solid rgba(255, 255, 255, 0.14);
-        border-radius: 14px;
-        padding: 12px 14px;
-        color: #f8fafc;
-        text-align: left;
-        cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        transition: all 0.15s ease;
-      }
-      .cc-survey-opt-btn:active {
-        transform: scale(0.98);
-        border-color: #00f5d4;
-        background: rgba(0, 245, 212, 0.15);
-      }
-      .cc-survey-opt-title {
-        font-size: 13px;
-        font-weight: 900;
-        color: #00f5d4;
-      }
-      .cc-survey-opt-sub {
-        font-size: 11px;
-        color: #cbd5e1;
-        line-height: 1.35;
-      }
-
-      /* 3. ПЕРЕТЯГИВАЕМОЕ МИНИ-ОКНО ЛУЧШЕГО ХОДА И ОБОСНОВАНИЯ */
-      #cc-mini-hud-card {
-        position: fixed;
-        top: 54px;
-        left: 10px;
-        width: 274px;
-        background: rgba(8, 12, 20, 0.86);
-        backdrop-filter: blur(16px) saturate(180%);
-        -webkit-backdrop-filter: blur(16px) saturate(180%);
-        border: 1.5px solid rgba(0, 245, 212, 0.55);
-        border-radius: 15px;
-        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.8), 0 0 16px rgba(0, 245, 212, 0.2);
-        color: #f8fafc;
-        pointer-events: auto;
-        touch-action: none;
-        z-index: 2147483646;
-        overflow: hidden;
-        display: none;
-      }
-      .cc-mini-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 6px 9px;
-        background: rgba(4, 7, 13, 0.92);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.09);
-      }
-      .cc-mini-status {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        font-size: 9.5px;
-        font-weight: 900;
-        color: #00f5d4;
-      }
-      .cc-mini-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: #00f5d4;
-        box-shadow: 0 0 8px #00f5d4;
-      }
-      .cc-mini-actions {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-      }
-      .cc-mini-btn {
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        color: #f1f5f9;
-        border-radius: 7px;
-        height: 24px;
-        padding: 0 8px;
-        font-size: 10px;
-        font-weight: 900;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-      }
-      .cc-mini-btn-play {
-        background: rgba(0, 245, 212, 0.22);
-        border-color: #00f5d4;
-        color: #00f5d4;
-      }
-      .cc-mini-btn-close {
-        color: #ff4d94;
-        border-color: rgba(255, 77, 148, 0.4);
-      }
-      .cc-mini-body {
-        padding: 8px 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      .cc-mini-move-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 6px;
-      }
-      #cc-mini-move-main {
-        font-family: monospace;
-        font-size: 13.5px;
-        font-weight: 900;
-        color: #ffffff;
-      }
-      .cc-mini-badges {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-      }
-      #cc-mini-eval-badge {
-        font-family: monospace;
-        font-size: 11px;
-        font-weight: 900;
-        padding: 1.5px 6px;
-        border-radius: 6px;
-        background: rgba(0, 245, 212, 0.16);
-        border: 1px solid rgba(0, 245, 212, 0.45);
-        color: #00f5d4;
-      }
-      #cc-mini-wdl-pill {
-        font-family: monospace;
-        font-size: 9px;
-        font-weight: 800;
-        color: #cbd5e1;
-        background: rgba(255, 255, 255, 0.06);
-        padding: 2px 5px;
-        border-radius: 5px;
-      }
-      #cc-mini-tech-reason {
-        font-size: 10.5px;
-        line-height: 1.34;
-        color: #e2e8f0;
-        font-weight: 600;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-      }
-      #cc-mini-pv-line {
-        font-family: monospace;
-        font-size: 9.5px;
-        color: #00bbf9;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      /* 4. МАЛЕНЬКАЯ ПОЛУПРОЗРАЧНАЯ КНОПКА В УГЛУ (РЕЖИМ PILL) */
-      #cc-corner-pill {
-        position: fixed;
-        top: 62px;
-        right: 10px;
-        display: none;
-        align-items: center;
-        gap: 5px;
-        pointer-events: auto;
-        touch-action: none;
-        z-index: 2147483646;
-        opacity: 0.72;
-      }
-      .cc-corner-btn {
-        height: 40px;
-        padding: 0 11px;
-        border-radius: 13px;
-        background: rgba(8, 12, 20, 0.88);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border: 1.5px solid #00f5d4;
-        color: #ffffff;
-        font-size: 10.5px;
-        font-weight: 900;
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.75);
-        cursor: pointer;
-      }
-    </style>
-
-    <!-- Ежедневный экран приветствия (1 раз в сутки) -->
-    <div id="cc-daily-welcome-splash">
-      <div class="cc-welcome-emblem">♟️</div>
-      <div class="cc-welcome-h1">Добро пожаловать!</div>
-      <div class="cc-welcome-subtext" id="cc-daily-welcome-sub">
-        Инициализация тактического ядра ChessCoach 3000 ELO...
+    const pane = document.createElement("div");
+    pane.className = "cc-tab-pane";
+    pane.id = "cc-pane-presets";
+    pane.setAttribute("role", "tabpanel");
+    pane.innerHTML = `
+      <div class="cc-preset-hero">
+        <h2>Настройте под себя</h2>
+        <p class="cc-preset-lead">Готовый профиль в одно касание или точная настройка в разделах ниже.</p>
       </div>
-      <div class="cc-welcome-progress-track">
-        <div class="cc-welcome-progress-fill"></div>
+      <div class="cc-glass-card">
+        <label class="cc-preset-desc" for="cc-mobile-settings-search">Поиск по настройкам</label>
+        <input type="search" class="cc-text-input" id="cc-mobile-settings-search" placeholder="Например: задержка, стрелки, цвет" autocomplete="off" style="margin-top:7px;">
+        <div id="cc-mobile-search-results" aria-live="polite"></div>
       </div>
-    </div>
-
-    <!-- Одноразовый опрос-калибровка (1 раз после скачивания) -->
-    <div id="cc-onboarding-modal">
-      <div class="cc-survey-box">
-        <span class="cc-survey-step-badge" id="cc-survey-step-tag">ШАГ 1 ИЗ 3 • КАЛИБРОВКА 3000 ELO</span>
-        <div class="cc-survey-question" id="cc-survey-q-title">Как вы предпочитаете играть?</div>
-        <div class="cc-survey-hint" id="cc-survey-q-hint">На основе ваших ответов софт сам настроит тайминги и защиту (настройки всегда можно поменять).</div>
-        <div class="cc-survey-options" id="cc-survey-opts-list"></div>
+      <div class="cc-glass-card">
+        <div class="cc-section-title"><span>Подобрано для телефона</span><span>${deviceRecommendation.tier}</span></div>
+        <div class="cc-preset-desc" id="cc-mobile-recommendation-text">${escapeHtml(deviceRecommendation.model)}. Один поток Stockfish, без постоянных анимаций. Рекомендуемый предел: ${deviceRecommendation.maxElo} ELO.</div>
+        <button type="button" class="cc-btn cc-btn-primary" id="cc-run-survey-again-btn" style="width:100%;margin-top:12px;">Подобрать профиль</button>
       </div>
-    </div>
-
-    <!-- Перетягиваемое мини-окно анализа -->
-    <div id="cc-mini-hud-card">
-      <div class="cc-mini-header">
-        <div class="cc-mini-status">
-          <span class="cc-mini-dot" id="cc-mini-dot"></span>
-          <span id="cc-mini-turn-txt">АНАЛИЗ ДОСКИ</span>
-        </div>
-        <div class="cc-mini-actions">
-          <button type="button" class="cc-mini-btn cc-mini-btn-play" id="cc-mini-play-btn">⚡ ХОД</button>
-          <button type="button" class="cc-mini-btn" id="cc-mini-settings-btn">⚙️ МЕНЮ</button>
-          <button type="button" class="cc-mini-btn cc-mini-btn-close" id="cc-mini-close-btn">✕</button>
-        </div>
+      <div class="cc-preset-grid">
+        <button type="button" class="cc-preset-card" id="cc-quick-preset-legit">
+          <span class="cc-preset-title">Спокойный</span>
+          <span class="cc-preset-desc">Без лишних эффектов, с увеличенной паузой перед ходом.</span>
+          <span class="cc-preset-meta">Для вдумчивой игры</span>
+        </button>
+        <button type="button" class="cc-preset-card" id="cc-quick-preset-hvh">
+          <span class="cc-preset-title">Быстрый</span>
+          <span class="cc-preset-desc">Короткая задержка, простые отметки клеток, без тяжёлых эффектов.</span>
+          <span class="cc-preset-meta">Для коротких партий</span>
+        </button>
+        <button type="button" class="cc-preset-card" id="cc-quick-preset-balance">
+          <span class="cc-preset-title">Сбалансированный</span>
+          <span class="cc-preset-desc">Умеренный темп, понятные подсказки и защита критических ходов.</span>
+          <span class="cc-preset-meta">Для повседневной игры</span>
+        </button>
       </div>
-      <div class="cc-mini-body">
-        <div class="cc-mini-move-row">
-          <span id="cc-mini-move-main">♟️ Ожидание...</span>
-          <div class="cc-mini-badges">
-            <span id="cc-mini-wdl-pill">W:50%</span>
-            <span id="cc-mini-eval-badge">0.00</span>
-          </div>
-        </div>
-        <div id="cc-mini-tech-reason">Откройте партию или сделайте ход для мгновенного расчета.</div>
-        <div id="cc-mini-pv-line">◈ 3000 ELO • Готов</div>
-      </div>
-    </div>
+      <div id="cc-mobile-preset-status" role="status" aria-live="polite">Автоход по умолчанию выключен.</div>
+    `;
+    mainView.prepend(pane);
+    presetStatus = pane.querySelector("#cc-mobile-preset-status");
 
-    <!-- Свернутая угловая кнопка -->
-    <div id="cc-corner-pill">
-      <button type="button" class="cc-corner-btn" id="cc-corner-restore-hud-btn">
-        <span>👁️</span>
-        <span id="cc-corner-move-short">АНАЛИЗ</span>
-      </button>
-      <button type="button" class="cc-corner-btn" id="cc-corner-open-settings-btn" style="border-color:#c77dff; color:#c77dff;">
-        <span>⚙️</span>
-      </button>
-    </div>
-  `;
-  hudShadow.appendChild(container);
-
-  const welcomeSplash = hudShadow.getElementById("cc-daily-welcome-splash");
-  const onboardingModal = hudShadow.getElementById("cc-onboarding-modal");
-  const miniHudCard = hudShadow.getElementById("cc-mini-hud-card");
-  const cornerPill = hudShadow.getElementById("cc-corner-pill");
-
-  const miniPlayBtn = hudShadow.getElementById("cc-mini-play-btn");
-  const miniSettingsBtn = hudShadow.getElementById("cc-mini-settings-btn");
-  const miniCloseBtn = hudShadow.getElementById("cc-mini-close-btn");
-  const cornerRestoreBtn = hudShadow.getElementById("cc-corner-restore-hud-btn");
-  const cornerSettingsBtn = hudShadow.getElementById("cc-corner-open-settings-btn");
-
-  const miniDot = hudShadow.getElementById("cc-mini-dot");
-  const miniTurnTxt = hudShadow.getElementById("cc-mini-turn-txt");
-  const miniMoveMain = hudShadow.getElementById("cc-mini-move-main");
-  const miniEvalBadge = hudShadow.getElementById("cc-mini-eval-badge");
-  const miniWdlPill = hudShadow.getElementById("cc-mini-wdl-pill");
-  const miniTechReason = hudShadow.getElementById("cc-mini-tech-reason");
-  const miniPvLine = hudShadow.getElementById("cc-mini-pv-line");
-  const cornerMoveShort = hudShadow.getElementById("cc-corner-move-short");
-
-  // Защита от проваливания кликов сквозь все наши оверлеи на шахматный сайт
-  [welcomeSplash, onboardingModal, miniHudCard, cornerPill].forEach((node) => {
-    ["mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "click", "dblclick", "contextmenu"].forEach((evName) => {
-      node.addEventListener(evName, (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-      }, { passive: false });
+    const activatePresetTab = () => {
+      root.querySelectorAll(".cc-tab-btn").forEach((button) => {
+        const active = button === tab;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      root.querySelectorAll(".cc-tab-pane").forEach((candidate) => candidate.classList.toggle("active", candidate === pane));
+    };
+    listen(tab, "click", activatePresetTab);
+    root.querySelectorAll(".cc-tab-btn").forEach((button) => {
+      if (button === tab) return;
+      listen(button, "click", () => {
+        tab.classList.remove("active");
+        tab.setAttribute("aria-selected", "false");
+        pane.classList.remove("active");
+      });
     });
-  });
+    listen(pane.querySelector("#cc-run-survey-again-btn"), "click", () => openOnboardingSurveyModal(true));
+    listen(pane.querySelector("#cc-quick-preset-legit"), "click", () => {
+      void applySmartPresetConfig({ mode: "legit", speed: "blitz", arrows: "curved_neon" });
+    });
+    listen(pane.querySelector("#cc-quick-preset-hvh"), "click", () => {
+      void applySmartPresetConfig({ mode: "hvh", speed: "bullet", arrows: "sq_cyber_frame" });
+    });
+    listen(pane.querySelector("#cc-quick-preset-balance"), "click", () => {
+      void applySmartPresetConfig({ mode: "balance", speed: "blitz", arrows: "curved_neon" });
+    });
+    installSettingsSearch(root, pane);
+    activatePresetTab();
+  }
 
-  // 7. ЛОГИКА ЕЖЕДНЕВНОГО ПРИВЕТСТВИЯ (1 РАЗ В СУТКИ НА 2.4 СЕКУНДЫ)
-  function checkAndRunDailyWelcome() {
-    const now = new Date();
-    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const lastDate = initialStorage.cc_last_welcome_date || "";
+  function activateMobileTab(root, tabId) {
+    const pane = root.getElementById(`cc-pane-${tabId}`);
+    if (!pane) return;
+    if (tabId !== "presets" && tabId !== "more") {
+      root.querySelector(`.cc-tab-btn[data-tab="${tabId}"]`)?.click();
+    }
+    root.querySelectorAll(".cc-tab-pane").forEach((candidate) => candidate.classList.toggle("active", candidate === pane));
+    root.querySelectorAll(".cc-tab-btn").forEach((button) => {
+      const active = button.dataset.tab === tabId || (button.dataset.tab === "more" && ["visuals", "privacy", "misc"].includes(tabId));
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    root.querySelector(".cc-main-view").scrollTop = 0;
+    if (storageReady) void saveGlobalPatch({ cc_mobile_settings_tab: tabId });
+  }
 
-    if (lastDate === todayKey) {
-      checkAndRunFirstTimeSurvey();
+  function installMobileNavigation(root, modeBar) {
+    const nav = root.querySelector(".cc-nav-list");
+    const mainView = root.querySelector(".cc-main-view");
+    if (!nav || !mainView) return;
+    nav.setAttribute("role", "tablist");
+    nav.setAttribute("aria-label", "Разделы настроек");
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "cc-tab-btn";
+    more.dataset.tab = "more";
+    nav.appendChild(more);
+    const labels = { presets: "Настройки", analyzer: "Анализ", automove: "Автоход", rage: "Движок", more: "Ещё" };
+    const icons = {
+      presets: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
+      analyzer: '<path d="M4 19V5m0 14h16M7 14l4-5 4 3 5-7"/>',
+      automove: '<rect x="4" y="7" width="16" height="13" rx="4"/><path d="M12 3v4M8 12v2m8-2v2m-7 3h6"/>',
+      rage: '<path d="m13 3-9 11h7l-1 7 10-12h-7z"/>',
+      more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>'
+    };
+    const extraPane = document.createElement("div");
+    extraPane.id = "cc-pane-more";
+    extraPane.className = "cc-tab-pane";
+    extraPane.setAttribute("role", "tabpanel");
+    extraPane.innerHTML = '<div class="cc-preset-hero"><h2>Дополнительные настройки</h2><p class="cc-preset-lead">Оформление, сохранённые позиции и расширенные параметры.</p></div><div class="cc-mobile-links"></div><div class="cc-glass-card" id="cc-mobile-modes-card"><div class="cc-section-title">Набор доступных функций</div><p class="cc-preset-desc">Переключатель меняет видимость расширенных настроек. Используйте автоматику только там, где это разрешено.</p></div>';
+    mainView.appendChild(extraPane);
+    if (modeBar) extraPane.querySelector("#cc-mobile-modes-card").appendChild(modeBar);
+    const extras = { visuals: ["Оформление", "Стрелки, цвета и вид доски"], privacy: ["Запись и внешний вид", "Параметры отображения игроков"], misc: ["База и опыт", "Сохранённые позиции и настройки"] };
+    nav.querySelectorAll(".cc-tab-btn").forEach((button) => {
+      const id = button.dataset.tab;
+      if (labels[id]) {
+        button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[id]}</svg><span>${labels[id]}</span>`;
+        button.setAttribute("role", "tab");
+        button.setAttribute("aria-controls", `cc-pane-${id}`);
+      } else {
+        button.classList.add("cc-mobile-extra-tab");
+        const [label, description] = extras[id] || [compactText(button.textContent, 50), "Расширенные параметры"];
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "cc-mobile-link";
+        link.innerHTML = `<span>${escapeHtml(label)}<small>${escapeHtml(description)}</small></span><span class="cc-mobile-chevron" aria-hidden="true">›</span>`;
+        listen(link, "click", () => activateMobileTab(root, id));
+        extraPane.querySelector(".cc-mobile-links").appendChild(link);
+      }
+    });
+    listen(more, "click", () => activateMobileTab(root, "more"));
+    listen(nav, "click", (event) => {
+      const button = event.target.closest(".cc-tab-btn");
+      if (!button) return;
+      schedule(() => {
+        const pane = root.querySelector(".cc-tab-pane.active");
+        const tabId = pane?.id.replace("cc-pane-", "") || button.dataset.tab;
+        nav.querySelectorAll(".cc-tab-btn").forEach((candidate) => {
+          const active = candidate.dataset.tab === tabId || (candidate === more && Boolean(extras[tabId]));
+          candidate.classList.toggle("active", active);
+          candidate.setAttribute("aria-selected", String(active));
+        });
+        mainView.scrollTop = 0;
+        if (storageReady) void saveGlobalPatch({ cc_mobile_settings_tab: tabId });
+      }, 0);
+    });
+    activateMobileTab(root, initialStorage.cc_mobile_settings_tab || "presets");
+  }
+
+  function installSettingsSearch(root, pane) {
+    const search = pane.querySelector("#cc-mobile-settings-search");
+    const results = pane.querySelector("#cc-mobile-search-results");
+    listen(search, "input", () => {
+      results.replaceChildren();
+      const query = search.value.trim().toLocaleLowerCase("ru");
+      if (query.length < 2) return;
+      const seen = new Set();
+      const labels = { analyzer: "Анализ", automove: "Автоход", rage: "Движок", visuals: "Оформление", privacy: "Запись", misc: "База и опыт" };
+      for (const target of root.querySelectorAll(".cc-Switch-row,.cc-control-row,.cc-section-title")) {
+        const targetPane = target.closest(".cc-tab-pane");
+        const tabId = targetPane?.id.replace("cc-pane-", "");
+        if (!labels[tabId]) continue;
+        const text = compactText(target.textContent, 180);
+        if (!text.toLocaleLowerCase("ru").includes(query) || seen.has(text)) continue;
+        seen.add(text);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "cc-mobile-link";
+        button.innerHTML = `<span>${escapeHtml(text)}<small>${labels[tabId]}</small></span><span class="cc-mobile-chevron" aria-hidden="true">›</span>`;
+        button.addEventListener("click", () => {
+          search.blur();
+          activateMobileTab(root, tabId);
+          target.classList.add("cc-mobile-search-hit");
+          schedule(() => target.scrollIntoView({ block: "center" }), 120);
+          schedule(() => target.classList.remove("cc-mobile-search-hit"), 1800);
+        });
+        results.appendChild(button);
+        if (seen.size === 8) break;
+      }
+      if (!seen.size) results.textContent = "Настройки не найдены. Попробуйте другое слово.";
+    });
+  }
+
+  async function navigateToPlatform(platform, button) {
+    if (destroyed || !["lichess", "chesscom"].includes(platform)) return;
+    vibrate(20);
+    const subtitle = button?.querySelector(".cc-platform-card-sub");
+    if (button) button.disabled = true;
+    if (subtitle) subtitle.textContent = "Загрузка...";
+    await saveGlobalPatch({ cc_mobile_platform: platform });
+    try {
+      await nativeRequest("platform.switch", { platform: platform === "lichess" ? "LICHESS" : "CHESS_COM" });
+    } catch (e) {
+      if (button) button.disabled = false;
+      if (subtitle) subtitle.textContent = "Недоступно";
+    }
+  }
+
+  function dispatchInput(element, type) {
+    element.dispatchEvent(new Event(type, { bubbles: true, composed: true }));
+  }
+
+  function setCheckbox(id, checked, required = false) {
+    const element = mainHudShadow?.getElementById(id);
+    if (!element) return !required;
+    if (element.checked !== Boolean(checked)) {
+      element.checked = Boolean(checked);
+      dispatchInput(element, "change");
+    }
+    return element.checked === Boolean(checked);
+  }
+
+  function setInputValue(id, value, required = false) {
+    const element = mainHudShadow?.getElementById(id);
+    if (!element) return !required;
+    if (element.type === "range" && !Number.isFinite(Number(value))) return false;
+    const previous = element.value;
+    element.value = String(value);
+    const normalized = element.type === "range" ? element.value : String(value);
+    if (previous !== element.value) {
+      dispatchInput(element, "input");
+      dispatchInput(element, "change");
+    }
+    return element.value === normalized;
+  }
+
+  function clickSelector(selector, required = false) {
+    const element = mainHudShadow?.querySelector(selector);
+    if (!element) return !required;
+    element.click();
+    return true;
+  }
+
+  function buildPresetConfig({ mode, speed, arrows }) {
+    const isFast = mode === "hvh";
+    const isBalanced = mode === "balance";
+    const speedFactor = speed === "bullet" ? 0.7 : speed === "rapid" ? 1.45 : 1;
+    const minimumDelay = deviceRecommendation.tier === "LOW" ? 620 : 140;
+    const delay = Math.max(minimumDelay, Math.round(deviceRecommendation.delayMs * speedFactor));
+    const jitter = Math.max(25, Math.round(delay * (isFast ? 0.16 : 0.32)));
+    const desiredPremove = deviceRecommendation.premove && (isFast || (isBalanced && speed === "bullet"));
+    return {
+      mode,
+      workMode: "all",
+      elo: deviceRecommendation.maxElo,
+      style: isFast ? "balanced" : isBalanced ? "hikaru" : "tal",
+      useStockfishWasm: deviceRecommendation.useStockfish,
+      engineMaxMode: false,
+      autoMoveEnabled: false,
+      bulletTurboMode: false,
+      premoveEnabled: false,
+      showPremoveArrows: false,
+      legitAutoTiming: !isFast,
+      useAverageMoveSometimes: isBalanced,
+      averageMoveFrequency: isBalanced ? 18 : 0,
+      protectCriticalMoves: true,
+      safeAntiBanGuard: true,
+      autoMoveDelayMs: delay,
+      autoMoveJitterMs: jitter,
+      arrowStyle: arrows,
+      showArrows: true,
+      showEvalBar: true,
+      mobileAnimations: deviceRecommendation.animations,
+      mobileVisualEffects: deviceRecommendation.visualEffects,
+      desiredPremove
+    };
+  }
+
+  function applyConfigThroughUi(config) {
+    if (!mainHudShadow || document.visibilityState !== "visible") return false;
+    const targetMode = currentPlatform === "chesscom" && config.workMode === "hvh" ? "all" : config.workMode;
+    const requiredControls = ["cc-auto-master-chk", "cc-sf-wasm-chk", "cc-elo-slider", "cc-auto-delay-slider"];
+    if (requiredControls.some((id) => !mainHudShadow.getElementById(id))) return false;
+    if (!mainHudShadow.querySelector(`.cc-mode-btn[data-mode="${targetMode}"]`) ||
+        !mainHudShadow.querySelector(`.cc-style-btn[data-style="${config.style}"]`)) return false;
+    let ok = true;
+
+    ok = setCheckbox("cc-auto-master-chk", false, true) && ok;
+    ok = setCheckbox("cc-premove-chk", false, false) && ok;
+    ok = clickSelector(`.cc-mode-btn[data-mode="${targetMode}"]`, true) && ok;
+
+    ok = setCheckbox("cc-auto-master-chk", false, true) && ok;
+    ok = setCheckbox("cc-premove-chk", false, false) && ok;
+    ok = setCheckbox("cc-premove-arrows-chk", false, false) && ok;
+    ok = setCheckbox("cc-bullet-turbo-chk", false, false) && ok;
+    ok = setCheckbox("cc-engine-max-chk", false, false) && ok;
+    ok = setCheckbox("cc-sf-wasm-chk", config.useStockfishWasm, true) && ok;
+    ok = setInputValue("cc-elo-slider", config.elo, true) && ok;
+    ok = clickSelector(`.cc-style-btn[data-style="${config.style}"]`, true) && ok;
+    ok = setCheckbox("cc-legit-timing-chk", config.legitAutoTiming, false) && ok;
+    ok = setCheckbox("cc-auto-avg-chk", config.useAverageMoveSometimes, false) && ok;
+    ok = setInputValue("cc-auto-avg-freq-slider", config.averageMoveFrequency, false) && ok;
+    ok = setCheckbox("cc-auto-protect-chk", config.protectCriticalMoves, false) && ok;
+    ok = setCheckbox("cc-rage-antiban-chk", config.safeAntiBanGuard, false) && ok;
+    ok = setInputValue("cc-auto-delay-slider", config.autoMoveDelayMs, true) && ok;
+    ok = setInputValue("cc-auto-jitter-slider", config.autoMoveJitterMs, false) && ok;
+    ok = setInputValue("cc-vis-arrow-style", config.arrowStyle, false) && ok;
+    ok = setCheckbox("cc-vis-arrows-chk", config.showArrows, false) && ok;
+    ok = setCheckbox("cc-vis-eval-chk", config.showEvalBar, false) && ok;
+
+    if (!config.mobileVisualEffects) {
+      ok = setCheckbox("cc-vis-phonk-chk", false, false) && ok;
+      ok = setCheckbox("cc-audio-radar-chk", false, false) && ok;
+      ok = setCheckbox("cc-heatmap-always-chk", false, false) && ok;
+    }
+
+    const activeMode = mainHudShadow.querySelector(`.cc-mode-btn[data-mode="${targetMode}"].active`);
+    const activeStyle = mainHudShadow.querySelector(`.cc-style-btn[data-style="${config.style}"].active`);
+    const elo = mainHudShadow.getElementById("cc-elo-slider");
+    const stockfish = mainHudShadow.getElementById("cc-sf-wasm-chk");
+    const auto = mainHudShadow.getElementById("cc-auto-master-chk");
+    const engineMax = mainHudShadow.getElementById("cc-engine-max-chk");
+    for (const [field, id] of [
+      ["elo", "cc-elo-slider"],
+      ["autoMoveDelayMs", "cc-auto-delay-slider"],
+      ["autoMoveJitterMs", "cc-auto-jitter-slider"],
+      ["averageMoveFrequency", "cc-auto-avg-freq-slider"]
+    ]) {
+      const control = mainHudShadow.getElementById(id);
+      if (control && Number.isFinite(Number(control.value))) config[field] = Number(control.value);
+    }
+    return Boolean(ok && activeMode && activeStyle && elo?.value === String(config.elo) && stockfish?.checked && !auto?.checked && !engineMax?.checked);
+  }
+
+  function persistablePresetConfig(config) {
+    const { mode, desiredPremove, ...persisted } = config;
+    return persisted;
+  }
+
+  async function applySmartPresetConfig(selection) {
+    if (applyingPreset || destroyed) return false;
+    applyingPreset = true;
+    vibrate(22);
+    setPresetStatus("Применение профиля...", "#ffbe0b");
+    const config = buildPresetConfig(selection);
+    try {
+      const applied = applyConfigThroughUi(config);
+      if (!applied) {
+        setPresetStatus("Профиль не сохранён: core UI ещё не готов.", "#ff7b9f");
+        return false;
+      }
+      const saved = await savePlatformPatch(persistablePresetConfig(config));
+      if (!saved) {
+        setPresetStatus("Профиль применён только на текущую сессию: storage недоступен.", "#ffbe0b");
+        return false;
+      }
+      await saveGlobalPatch({ [calibrationKey]: true });
+      setPresetStatus(`Профиль ${deviceRecommendation.tier} применён. Автоход выключен.`, "#70e000");
+      pendingAutomation = {
+        autoMoveEnabled: true,
+        premoveEnabled: Boolean(config.desiredPremove && deviceRecommendation.tier !== "LOW"),
+        showPremoveArrows: Boolean(config.desiredPremove && deviceRecommendation.tier !== "LOW"),
+        bulletTurboMode: false
+      };
+      showAutoConfirmation();
+      return true;
+    } finally {
+      applyingPreset = false;
+    }
+  }
+
+  function setPresetStatus(text, color) {
+    if (!presetStatus) return;
+    presetStatus.textContent = text;
+    if (color) presetStatus.style.color = color;
+  }
+
+  function showAutoConfirmation() {
+    if (!pendingAutomation || !autoConfirmModal) return;
+    const text = hudShadow.getElementById("cc-auto-confirm-text");
+    if (text) {
+      text.textContent = pendingAutomation.premoveEnabled
+        ? "Профиль применён с выключенной автоматикой. Явное включение активирует автоход и премувы; это может противоречить правилам платформы."
+        : "Профиль применён с выключенной автоматикой. Явное включение активирует только автоход; это может противоречить правилам платформы.";
+    }
+    showOverlay(autoConfirmModal, hudShadow.getElementById("cc-auto-stay-off"));
+  }
+
+  async function confirmAutomationExplicitly() {
+    if (!pendingAutomation || document.visibilityState !== "visible" || !mainHudShadow) return;
+    const requested = pendingAutomation;
+    pendingAutomation = null;
+    hideOverlay(autoConfirmModal);
+    setUiViewMode(lastInGameSubMode);
+
+    let ok = setCheckbox("cc-auto-master-chk", true, true);
+    if (deviceRecommendation.tier === "LOW") {
+      requested.premoveEnabled = false;
+      requested.showPremoveArrows = false;
+      requested.bulletTurboMode = false;
+    }
+    ok = setCheckbox("cc-premove-chk", requested.premoveEnabled, false) && ok;
+    ok = setCheckbox("cc-premove-arrows-chk", requested.showPremoveArrows, false) && ok;
+    ok = setCheckbox("cc-bullet-turbo-chk", requested.bulletTurboMode, false) && ok;
+    const auto = mainHudShadow.getElementById("cc-auto-master-chk");
+    if (!ok || !auto?.checked) {
+      setPresetStatus("Автоматика не включена: core UI отклонил изменение.", "#ff7b9f");
       return;
     }
-
-    // Сразу записываем сегодняшнюю дату, чтобы в течение дня приветствие больше не появлялось
-    saveStatePatch({ cc_last_welcome_date: todayKey });
-
-    const hour = now.getHours();
-    const timeGreeting =
-      hour >= 5 && hour < 12 ? "Доброе утро! Ядро 3000 ELO заряжено на победы." :
-      hour >= 12 && hour < 18 ? "Продуктивного дня! Тактический радар готов к работе." :
-      hour >= 18 && hour < 23 ? "Добрый вечер! Все системы работают на максимуме." :
-      "Ночная сессия! Стелс-модули и Stockfish WASM активны.";
-
-    const subEl = hudShadow.getElementById("cc-daily-welcome-sub");
-    if (subEl) subEl.textContent = timeGreeting;
-
-    welcomeSplash.style.display = "flex";
-    vibrate(18);
-
-    setTimeout(() => {
-      welcomeSplash.classList.add("cc-fade-out");
-      setTimeout(() => {
-        welcomeSplash.style.display = "none";
-        welcomeSplash.classList.remove("cc-fade-out");
-        checkAndRunFirstTimeSurvey();
-      }, 450);
-    }, 2350);
+    const saved = await savePlatformPatch(requested);
+    setPresetStatus(
+      saved ? "Автоход включён после явного подтверждения." : "Автоход включён только для текущей сессии: storage недоступен.",
+      "#ffbe0b"
+    );
+    vibrate(24);
   }
 
-  // 8. ЛОГИКА ОДНОРАЗОВОГО ОПРОСА-КАЛИБРОВКИ (ТОЛЬКО 1 РАЗ ПОСЛЕ СКАЧИВАНИЯ)
-  const SURVEY_STEPS = [
-    {
-      stepTag: "ШАГ 1 ИЗ 3 • ВЫБОР РЕЖИМА (3000 ELO)",
-      question: "Как вы предпочитаете играть?",
-      hint: "Сила движка фиксирована на максимуме (3000 ELO). Выберите характер работы автохода:",
-      key: "mode",
-      options: [
-        {
-          value: "legit",
-          title: "🛡 Легитно (Стелс без бана)",
-          sub: "Плавные кривые Безье, живые человеческие паузы и защита от детекта T1%."
-        },
-        {
-          value: "hvh",
-          title: "⚡ HvH (Резня на максималках)",
-          sub: "Мгновенный ход за 38 мс, умные SEE-премувы и тотальное доминирование."
-        },
-        {
-          value: "balance",
-          title: "⚖️ Баланс (Переключение Legit / HvH)",
-          sub: "Универсальная настройка: легитный ритм + турбо-ускорение в цейтноте."
-        }
-      ]
-    },
-    {
-      stepTag: "ШАГ 2 ИЗ 3 • ТАЙМИНГИ ЧАСОВ",
-      question: "Какой контроль времени вы играете чаще?",
-      hint: "Подстроим скорость реакции и разброс времени руки:",
-      key: "speed",
-      options: [
-        {
-          value: "bullet",
-          title: "🚀 Пуля (1+0 / 2+1)",
-          sub: "Молниеносный отклик и активная помощь премувами."
-        },
-        {
-          value: "blitz",
-          title: "⚡ Блиц (3+0 / 3+2 / 5+0)",
-          sub: "Естественный темп сильного игрока с радаром ловушек."
-        },
-        {
-          value: "rapid",
-          title: "🕰 Рапид (10+0 и дольше)",
-          sub: "Вдумчивые паузы на сложных тактических позициях."
-        }
-      ]
-    },
-    {
-      stepTag: "ШАГ 3 ИЗ 3 • ВИЗУАЛ НА ДОСКЕ",
-      question: "Как отображать подсказки на доске?",
-      hint: "Выберите самый удобный визуальный стиль:",
-      key: "arrows",
-      options: [
-        {
-          value: "curved_neon",
-          title: "🌈 Неоновые дуги",
-          sub: "Красивые плавные векторные стрелки с анимацией потока."
-        },
-        {
-          value: "sq_cyber_frame",
-          title: "🔲 Рамки клеток (Без стрелок)",
-          sub: "Четкая подсветка квадратов ОТКУДА ➔ КУДА, не перекрывающая фигуры."
-        },
-        {
-          value: "sq_minimal_dots",
-          title: "⚫ Минималистичные стелс-точки",
-          sub: "Аккуратные точки на целевых клетках без лишнего шума."
-        }
-      ]
+  function installCalibrationMarker(root) {
+    const markManualChange = (event) => {
+      if (!event.isTrusted) return;
+      const target = event.target;
+      if (target?.id && ENGINE_CONTROL_IDS.has(target.id)) {
+        void saveGlobalPatch({ [calibrationKey]: true });
+      }
+    };
+    listen(root, "change", markManualChange, true);
+    listen(root, "input", markManualChange, true);
+  }
+
+  function enforceLowTierRestrictions() {
+    if (!mainHudShadow) return;
+    const ids = ["cc-premove-chk", "cc-premove-arrows-chk", "cc-vis-phonk-chk", "cc-audio-radar-chk", "cc-heatmap-always-chk"];
+    if (deviceRecommendation.tier !== "LOW") {
+      for (const id of ids) {
+        const control = mainHudShadow.getElementById(id);
+        if (control?.dataset.ccLowDisabled !== "1") continue;
+        control.disabled = false;
+        control.removeAttribute("aria-disabled");
+        control.removeAttribute("title");
+        delete control.dataset.ccLowDisabled;
+      }
+      return;
     }
-  ];
+    let changed = false;
+    for (const id of ids) {
+      const control = mainHudShadow.getElementById(id);
+      if (!control) continue;
+      if (control.checked) {
+        control.checked = false;
+        dispatchInput(control, "change");
+        changed = true;
+      }
+      if (!control.disabled) control.dataset.ccLowDisabled = "1";
+      control.disabled = true;
+      control.setAttribute("aria-disabled", "true");
+      control.title = "Отключено профилем LOW для стабильной работы устройства";
+    }
+    if (changed) {
+      void savePlatformPatch({
+        premoveEnabled: false,
+        showPremoveArrows: false,
+        phonkEditEnabled: false,
+        audioRadarEnabled: false,
+        heatmapAlwaysOn: false,
+        mobileAnimations: false,
+        mobileVisualEffects: false
+      });
+    }
+  }
+
+  function enforceInitialAutomationDefault() {
+    if (!storageReady || !forceAutomationOffOnBoot || !mainHudShadow) return;
+    setCheckbox("cc-auto-master-chk", false, false);
+    setCheckbox("cc-premove-chk", false, false);
+    setCheckbox("cc-premove-arrows-chk", false, false);
+    setCheckbox("cc-bullet-turbo-chk", false, false);
+    forceAutomationOffOnBoot = false;
+  }
+
+  const SURVEY_STEPS = Object.freeze([
+    Object.freeze({
+      tag: "ШАГ 1 ИЗ 3 · РЕЖИМ",
+      question: "Какой темп помощи вам нужен?",
+      hint: "Автоход останется выключенным до отдельного подтверждения.",
+      key: "mode",
+      options: Object.freeze([
+        Object.freeze({ value: "legit", title: "Спокойный", text: "Плавный темп и увеличенная задержка." }),
+        Object.freeze({ value: "hvh", title: "Быстрый", text: "Минимальная задержка в пределах профиля устройства." }),
+        Object.freeze({ value: "balance", title: "Сбалансированный", text: "Средний темп и защита критических ходов." })
+      ])
+    }),
+    Object.freeze({
+      tag: "ШАГ 2 ИЗ 3 · ВРЕМЯ",
+      question: "Какой контроль времени вы играете чаще?",
+      hint: "Задержка будет рассчитана от рекомендации устройства.",
+      key: "speed",
+      options: Object.freeze([
+        Object.freeze({ value: "bullet", title: "Пуля", text: "Короткая рекомендуемая задержка." }),
+        Object.freeze({ value: "blitz", title: "Блиц", text: "Базовая задержка профиля устройства." }),
+        Object.freeze({ value: "rapid", title: "Рапид", text: "Увеличенная пауза перед действием." })
+      ])
+    }),
+    Object.freeze({
+      tag: "ШАГ 3 ИЗ 3 · ПОДСКАЗКИ",
+      question: "Как показывать подсказки?",
+      hint: "На LOW тяжёлые эффекты и премувы отключены.",
+      key: "arrows",
+      options: Object.freeze([
+        Object.freeze({ value: "curved_neon", title: "Дуги", text: "Плавные стрелки, если устройство разрешает анимации." }),
+        Object.freeze({ value: "sq_cyber_frame", title: "Рамки", text: "Контрастные клетки без сложной траектории." }),
+        Object.freeze({ value: "sq_minimal_dots", title: "Точки", text: "Самый лёгкий визуальный режим." })
+      ])
+    })
+  ]);
 
   let surveyAnswers = { mode: "legit", speed: "blitz", arrows: "curved_neon" };
 
   function openOnboardingSurveyModal(forceOpen = false) {
-    if (!forceOpen && initialStorage.cc_onboarding_done) return;
-    let currentStepIdx = 0;
+    if (!onboardingModal || document.visibilityState !== "visible") return;
+    if (!forceOpen && initialStorage[calibrationKey]) return;
+    surveyAnswers = { mode: "legit", speed: "blitz", arrows: "curved_neon" };
 
-    const stepTagEl = hudShadow.getElementById("cc-survey-step-tag");
-    const qTitleEl = hudShadow.getElementById("cc-survey-q-title");
-    const qHintEl = hudShadow.getElementById("cc-survey-q-hint");
-    const optsListEl = hudShadow.getElementById("cc-survey-opts-list");
-
-    const renderStep = (idx) => {
-      const stepObj = SURVEY_STEPS[idx];
-      stepTagEl.textContent = stepObj.stepTag;
-      qTitleEl.textContent = stepObj.question;
-      qHintEl.textContent = stepObj.hint;
-      optsListEl.innerHTML = "";
-
-      stepObj.options.forEach((opt) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "cc-survey-opt-btn";
-        btn.innerHTML = `
-          <div class="cc-survey-opt-title">${opt.title}</div>
-          <div class="cc-survey-opt-sub">${opt.sub}</div>
-        `;
-        bindReliableMobileTap(btn, () => {
-          vibrate(15);
-          surveyAnswers[stepObj.key] = opt.value;
-          if (idx + 1 < SURVEY_STEPS.length) {
-            renderStep(idx + 1);
+    const tag = hudShadow.getElementById("cc-survey-step-tag");
+    const title = hudShadow.getElementById("cc-survey-q-title");
+    const hint = hudShadow.getElementById("cc-survey-q-hint");
+    const options = hudShadow.getElementById("cc-survey-opts-list");
+    const renderStep = (index) => {
+      const step = SURVEY_STEPS[index];
+      tag.textContent = step.tag;
+      title.textContent = step.question;
+      hint.textContent = step.hint;
+      options.replaceChildren();
+      for (const option of step.options) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "cc-option";
+        const strong = document.createElement("strong");
+        strong.textContent = option.title;
+        const description = document.createElement("span");
+        description.textContent = option.text;
+        button.append(strong, description);
+        button.addEventListener("click", () => {
+          vibrate(12);
+          surveyAnswers[step.key] = option.value;
+          if (index + 1 < SURVEY_STEPS.length) {
+            renderStep(index + 1);
+            options.querySelector("button")?.focus();
           } else {
-            onboardingModal.style.display = "none";
-            saveStatePatch({ cc_onboarding_done: true });
-            applySmartPresetConfig(surveyAnswers);
+            hideOverlay(onboardingModal);
+            void applySmartPresetConfig(surveyAnswers);
           }
-        });
-        optsListEl.appendChild(btn);
-      });
+        }, { once: true });
+        options.appendChild(button);
+      }
     };
-
-    onboardingModal.style.display = "flex";
     renderStep(0);
+    showOverlay(onboardingModal, options.querySelector("button"));
   }
 
-  function checkAndRunFirstTimeSurvey() {
-    if (!initialStorage.cc_onboarding_done) {
-      openOnboardingSurveyModal(false);
+  function maybeStartWelcomeSequence() {
+    if (!storageReady || !rootSetupComplete || !hudShadow || welcomeSequenceStarted || document.visibilityState !== "visible") return;
+    welcomeSequenceStarted = true;
+    if (!initialStorage[calibrationKey]) {
+      setPresetStatus("Выберите готовый профиль или откройте нужный раздел. Автоход включается отдельно.");
     }
   }
 
-  // 9. ПЕРЕТЯГИВАНИЕ МИНИ-ОКНА И СОХРАНЕНИЕ ЕГО КООРДИНАТ
-  if (initialStorage.cc_mini_hud_pos) {
-    const x = Math.max(6, Math.min(window.innerWidth - 280, Number(initialStorage.cc_mini_hud_pos.left) || 10));
-    const y = Math.max(24, Math.min(window.innerHeight - 110, Number(initialStorage.cc_mini_hud_pos.top) || 54));
-    miniHudCard.style.left = x + "px";
-    miniHudCard.style.top = y + "px";
+  function installHudDataSync(root) {
+    const ids = [
+      "cc-best-desc", "cc-best-eval", "cc-best-pv", "cc-enemy-turn-standby",
+      "cc-tele-threats-val", "cc-tele-wdl-val", "cc-auto-master-chk"
+    ];
+    hudDataObserver?.disconnect();
+    hudDataObserver = new MutationObserver(scheduleMiniHudUpdate);
+    for (const id of ids) {
+      const node = root.getElementById(id);
+      if (node) hudDataObserver.observe(node, { childList: true, subtree: true, characterData: true, attributes: true });
+    }
+    listen(root, "change", scheduleMiniHudUpdate, true);
+    listen(root, "input", scheduleMiniHudUpdate, true);
+    scheduleMiniHudUpdate();
   }
 
-  let draggingHud = false;
-  let dragStartX = 0;
-  let dragStartY = 0;
-  let cardStartLeft = 0;
-  let cardStartTop = 0;
+  function scheduleMiniHudUpdate() {
+    if (destroyed || document.visibilityState !== "visible" || miniUpdateRaf) return;
+    miniUpdateRaf = requestAnimationFrame(() => {
+      miniUpdateRaf = 0;
+      updateMiniHud();
+    });
+  }
 
-  miniHudCard.addEventListener("touchstart", (e) => {
-    e.stopPropagation();
-    const targetTag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : "";
-    if (targetTag === "BUTTON" || (e.target && e.target.closest("button"))) return;
-    if (e.touches.length !== 1) return;
+  function updateMiniHud() {
+    if (!mainHudShadow || !hudShadow) return;
+    const bestDesc = (mainHudShadow.getElementById("cc-best-desc")?.textContent || "").trim();
+    const bestEval = (mainHudShadow.getElementById("cc-best-eval")?.textContent || "0.00").trim();
+    const bestPv = (mainHudShadow.getElementById("cc-best-pv")?.textContent || "").trim();
+    const standby = mainHudShadow.getElementById("cc-enemy-turn-standby");
+    const threats = (mainHudShadow.getElementById("cc-tele-threats-val")?.textContent || "").trim();
+    const wdl = (mainHudShadow.getElementById("cc-tele-wdl-val")?.textContent || "").trim();
+    const autoOn = Boolean(mainHudShadow.getElementById("cc-auto-master-chk")?.checked);
+    const enemyTurn = Boolean(standby && getComputedStyle(standby).display !== "none");
+    const turn = hudShadow.getElementById("cc-mini-turn-txt");
+    const dot = hudShadow.getElementById("cc-mini-dot");
+    const move = hudShadow.getElementById("cc-mini-move-main");
+    const evaluation = hudShadow.getElementById("cc-mini-eval-badge");
+    const wdlPill = hudShadow.getElementById("cc-mini-wdl-pill");
+    const reason = hudShadow.getElementById("cc-mini-tech-reason");
+    const pv = hudShadow.getElementById("cc-mini-pv-line");
+    const corner = hudShadow.getElementById("cc-corner-move-short");
 
-    draggingHud = true;
-    dragStartX = e.touches[0].clientX;
-    dragStartY = e.touches[0].clientY;
-    const rect = miniHudCard.getBoundingClientRect();
-    cardStartLeft = rect.left;
-    cardStartTop = rect.top;
-  }, { passive: true });
+    turn.textContent = enemyTurn ? "ХОД СОПЕРНИКА" : autoOn ? "НАШ ХОД · АВТО" : "НАШ ХОД";
+    const dotColor = enemyTurn ? "#ffbe0b" : autoOn ? "#70e000" : "#00f5d4";
+    dot.style.background = dotColor;
+    dot.style.boxShadow = `0 0 8px ${dotColor}`;
 
-  miniHudCard.addEventListener("touchmove", (e) => {
-    if (!draggingHud || e.touches.length !== 1) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const dx = e.touches[0].clientX - dragStartX;
-    const dy = e.touches[0].clientY - dragStartY;
-    const nx = Math.max(4, Math.min(window.innerWidth - miniHudCard.offsetWidth - 4, cardStartLeft + dx));
-    const ny = Math.max(12, Math.min(window.innerHeight - miniHudCard.offsetHeight - 12, cardStartTop + dy));
-    miniHudCard.style.left = nx + "px";
-    miniHudCard.style.top = ny + "px";
-  }, { passive: false });
-
-  miniHudCard.addEventListener("touchend", (e) => {
-    e.stopPropagation();
-    if (draggingHud) {
-      draggingHud = false;
-      const rect = miniHudCard.getBoundingClientRect();
-      saveStatePatch({
-        cc_mini_hud_pos: { left: rect.left, top: rect.top }
-      });
+    const wdlMatch = wdl.match(/Поб:\s*(\d+%)/i);
+    if (wdlMatch) wdlPill.textContent = `W ${wdlMatch[1]}`;
+    if (bestEval && bestEval !== "--") {
+      evaluation.textContent = bestEval;
+      evaluation.style.color = bestEval.startsWith("-") ? "#ff7bac" : "#00f5d4";
     }
-  }, { passive: true });
-
-  // Кнопки переключения между 3 состояниями ("full" <-> "mini" <-> "pill") с запоминанием в память
-  bindReliableMobileTap(miniPlayBtn, () => {
-    vibrate(18);
-    if (mainHudShadow) {
-      const playOnceBtn = mainHudShadow.getElementById("cc-play-once");
-      if (playOnceBtn) playOnceBtn.click();
+    const moveMatch = bestDesc.match(/\b([a-h][1-8])\s*→\s*([a-h][1-8](?:=[QNBR])?)/i);
+    if (moveMatch) {
+      move.textContent = `${moveMatch[1]} → ${moveMatch[2]}`;
+      corner.textContent = `${moveMatch[1]}→${moveMatch[2]}`;
     }
-  });
+    if (enemyTurn) reason.textContent = threats || "Ожидание ответа соперника.";
+    else if (bestDesc) reason.textContent = bestDesc.includes("—") ? bestDesc.slice(bestDesc.indexOf("—") + 1).trim() : bestDesc;
+    pv.textContent = bestPv || `${deviceRecommendation.tier} · ${deviceRecommendation.maxElo} ELO`;
+  }
 
-  bindReliableMobileTap(miniSettingsBtn, () => {
-    vibrate(14);
-    setUiViewMode("full");
-  });
+  function disableAndroidUserScripts(root) {
+    window.__CC_ANDROID_DISABLE_USER_SCRIPTS__ = true;
+    disablePublicScriptApi();
+    const disableUi = () => {
+      const picker = root.getElementById("cc-script-file-picker");
+      const add = root.getElementById("cc-add-script-file-btn");
+      const reset = root.getElementById("cc-reset-script-files-btn");
+      const status = root.getElementById("cc-script-loader-status");
+      const unsupportedIds = [
+        "cc-bg-file-input", "cc-upload-bg-btn",
+        "cc-export-cfg-btn", "cc-import-cfg-btn", "cc-import-cfg-input",
+        "cc-export-db", "cc-import-db", "cc-import-file-input"
+      ];
+      const unsupported = unsupportedIds.map(id => root.getElementById(id)).filter(Boolean);
+      if (!picker && !add && !status && unsupported.length === 0) return false;
+      for (const input of [picker, ...unsupported.filter(node => node.tagName === "INPUT")]) {
+        if (!input) continue;
+        input.disabled = true;
+        input.value = "";
+        input.setAttribute("aria-disabled", "true");
+        if (input.dataset.ccAndroidDisabled !== "1") {
+          input.dataset.ccAndroidDisabled = "1";
+          listen(input, "change", (event) => {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            input.value = "";
+          }, true);
+        }
+      }
+      for (const button of [add, reset, ...unsupported.filter(node => node.tagName === "BUTTON")]) {
+        if (!button) continue;
+        button.disabled = true;
+        button.setAttribute("aria-disabled", "true");
+        button.title = "Недоступно в защищённой Android-сборке";
+        button.style.opacity = "0.55";
+        if (button.dataset.ccAndroidDisabled !== "1") {
+          button.dataset.ccAndroidDisabled = "1";
+          listen(button, "click", event => {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }, true);
+        }
+      }
+      if (status) {
+        status.textContent = "ОТКЛЮЧЕНО НА ANDROID";
+        status.style.color = "#ffbe0b";
+      }
+      return true;
+    };
+    if (disableUi()) return;
+    scriptsObserver?.disconnect();
+    scriptsObserver = new MutationObserver(() => {
+      if (disableUi()) {
+        scriptsObserver?.disconnect();
+        scriptsObserver = null;
+      }
+    });
+    scriptsObserver.observe(root, { childList: true, subtree: true });
+    schedule(() => {
+      scriptsObserver?.disconnect();
+      scriptsObserver = null;
+    }, 12000);
+  }
 
-  bindReliableMobileTap(miniCloseBtn, () => {
-    vibrate(12);
-    setUiViewMode("pill");
-  });
+  function setOverlayPassthrough(enabled) {
+    overlayPassthrough = Boolean(enabled && document.visibilityState === "visible" && !isOverlayOpen(onboardingModal) && !isOverlayOpen(autoConfirmModal) && !isOverlayOpen(welcomeSplash));
+    miniHudCard?.classList.toggle("cc-passthrough", overlayPassthrough);
+    cornerPill?.classList.toggle("cc-passthrough", overlayPassthrough);
+    mainPanel?.classList.toggle("cc-core-executing", overlayPassthrough);
+  }
 
-  bindReliableMobileTap(cornerRestoreBtn, () => {
-    vibrate(14);
-    setUiViewMode("mini");
-  });
+  function handleCoreExecutionState(event) {
+    const detail = event?.detail;
+    if (!detail || detail.source !== "chesscoach-core" || typeof detail.executing !== "boolean") return;
+    const canPassThrough = detail.allowOverlayPassthrough === true && !isOverlayOpen(onboardingModal) && !isOverlayOpen(autoConfirmModal) && !isOverlayOpen(welcomeSplash);
+    if (detail.executing && canPassThrough && uiViewMode === "full") {
+      setUiViewMode(lastInGameSubMode);
+    }
+    setOverlayPassthrough(detail.executing && detail.allowOverlayPassthrough === true);
+  }
 
-  bindReliableMobileTap(cornerSettingsBtn, () => {
-    vibrate(14);
-    setUiViewMode("full");
-  });
-
-  function syncVisibilityStates() {
+  function suspendAutomation(reason) {
+    pendingAutomation = null;
+    setOverlayPassthrough(false);
     if (!mainHudShadow) return;
-    const panel = mainHudShadow.getElementById("chesscoach-panel");
-    if (!panel) return;
-
-    if (uiViewMode === "full") {
-      panel.classList.remove("cc-mobile-hidden");
-      panel.classList.remove("cc-minimized");
-      ensureNonAnalyzerTabSelected(mainHudShadow);
-      miniHudCard.style.display = "none";
-      cornerPill.style.display = "none";
-    } else if (uiViewMode === "mini") {
-      panel.classList.add("cc-mobile-hidden");
-      miniHudCard.style.display = "block";
-      cornerPill.style.display = "none";
-    } else {
-      // Режим "pill" (максимально скрыто до маленькой угловой кнопки)
-      panel.classList.add("cc-mobile-hidden");
-      miniHudCard.style.display = "none";
-      cornerPill.style.display = "flex";
+    const auto = mainHudShadow.getElementById("cc-auto-master-chk");
+    const premove = mainHudShadow.getElementById("cc-premove-chk");
+    let changed = false;
+    if (auto?.checked) {
+      auto.checked = false;
+      dispatchInput(auto, "change");
+      changed = true;
     }
+    if (premove?.checked) {
+      premove.checked = false;
+      dispatchInput(premove, "change");
+      changed = true;
+    }
+    window.dispatchEvent(new CustomEvent("cc-mobile-lifecycle", {
+      detail: { state: reason, cancelPendingMoves: true }
+    }));
+    if (changed) void savePlatformPatch({ autoMoveEnabled: false, premoveEnabled: false, showPremoveArrows: false });
   }
 
-  window.__ccHandleAndroidBack = function () {
+  function handleVisibilityChange() {
+    if (document.visibilityState !== "visible") {
+      suspendAutomation("hidden");
+      clearScheduledWork();
+      stopHudDiscovery();
+      scriptsObserver?.disconnect();
+      scriptsObserver = null;
+      welcomeSequenceStarted = false;
+      hideOverlay(welcomeSplash);
+      hideOverlay(onboardingModal);
+      hideOverlay(autoConfirmModal);
+      syncVisibilityStates();
+      return;
+    }
+    startHudDiscovery();
+    fitSettingsViewport();
+    syncVisibilityStates();
+    clampMiniHud(false);
+    scheduleMiniHudUpdate();
+    if (rootSetupComplete && mainHudShadow) disableAndroidUserScripts(mainHudShadow);
+    maybeStartWelcomeSequence();
+  }
+
+  function handleAndroidBack() {
+    if (isOverlayOpen(autoConfirmModal)) {
+      pendingAutomation = null;
+      hideOverlay(autoConfirmModal);
+      return true;
+    }
+    if (isOverlayOpen(onboardingModal)) {
+      hideOverlay(onboardingModal);
+      return true;
+    }
+    if (isOverlayOpen(welcomeSplash)) {
+      welcomeDismissedByBack = true;
+      hideOverlay(welcomeSplash);
+      return true;
+    }
     if (uiViewMode === "full") {
       setUiViewMode(lastInGameSubMode);
       return true;
     }
     return false;
-  };
-
-  function patchMobileScriptFilePicker() {
-    if (!mainHudShadow) return;
-    const picker = mainHudShadow.getElementById("cc-script-file-picker");
-    const statusEl = mainHudShadow.getElementById("cc-script-loader-status");
-    if (!picker || picker.dataset.androidPatched === "1") return;
-
-    picker.dataset.androidPatched = "1";
-    picker.addEventListener("change", (e) => {
-      e.stopImmediatePropagation();
-      const files = Array.from(e.target.files || []);
-      files.forEach((file) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const code = String(reader.result || "");
-          if (!code.trim()) return;
-          try {
-            if (window.CCAndroidBridge && typeof window.CCAndroidBridge.saveUserScriptFile === "function") {
-              window.CCAndroidBridge.saveUserScriptFile(file.name, code);
-            }
-            const scriptTag = document.createElement("script");
-            scriptTag.textContent = code;
-            document.head.appendChild(scriptTag);
-            scriptTag.remove();
-            if (statusEl) {
-              statusEl.textContent = "✅ ЗАГРУЖЕН: " + file.name;
-              statusEl.style.color = "#38b000";
-            }
-          } catch (err) {}
-        };
-        reader.readAsText(file);
-      });
-    }, true);
   }
 
-  // 10. СИНХРОНИЗАЦИЯ ДАННЫХ МИНИ-ОКНА И СОХРАНЕННОГО ВИДА КАЖДЫЕ 200 МС
-  setInterval(() => {
+  window.__ccHandleAndroidBack = handleAndroidBack;
+
+  function removeInjectedSettingsUi() {
     if (!mainHudShadow) return;
+    const modeBar = mainHudShadow.getElementById("cc-mode-switcher-bar");
+    const workspace = mainHudShadow.getElementById("chesscoach-workspace");
+    if (modeBar && workspace) workspace.before(modeBar);
+    mainHudShadow.getElementById("cc-mobile-launcher-bar")?.remove();
+    mainHudShadow.getElementById("cc-pane-presets")?.remove();
+    mainHudShadow.getElementById("cc-pane-more")?.remove();
+    mainHudShadow.querySelector('.cc-tab-btn[data-tab="presets"]')?.remove();
+    mainHudShadow.querySelector('.cc-tab-btn[data-tab="more"]')?.remove();
+    mainHudShadow.querySelectorAll(".cc-mobile-extra-tab").forEach((tab) => tab.classList.remove("cc-mobile-extra-tab"));
+    mainHudShadow.getElementById("cc-mobile-override-style")?.remove();
+    if (mainPanel) {
+      mainPanel.classList.remove("cc-mobile-hidden", "cc-core-executing", "cc-device-low", "cc-device-balanced", "cc-device-high", "cc-mobile-reduced-motion");
+      delete mainPanel.dataset.ccMobileLauncher;
+    }
+  }
 
+  function cleanup(reason = "cleanup") {
+    if (destroyed) return true;
+    destroyed = true;
+    suspendAutomation(reason);
+    clearScheduledWork();
+    stopHudDiscovery();
+    hudDataObserver?.disconnect();
+    scriptsObserver?.disconnect();
+    hudDataObserver = null;
+    scriptsObserver = null;
+    for (const removeListener of listenerCleanups.splice(0)) removeListener();
+    removeInjectedSettingsUi();
+    window.__CC_ANDROID_SETTINGS_OPEN__ = false;
+    if (window.__CC_ANDROID_HUD_ROOT__ && !window.__CC_ANDROID_HUD_ROOT__.host?.isConnected) {
+      delete window.__CC_ANDROID_HUD_ROOT__;
+    }
+    hudHost?.remove();
+    hudHost = null;
+    hudShadow = null;
+    if (window.__ccHandleAndroidBack === handleAndroidBack) {
+      try { delete window.__ccHandleAndroidBack; } catch (e) { window.__ccHandleAndroidBack = null; }
+    }
+    if (window.__ChessCoachRegisterHudShadow === mobileHudRegistrar) {
+      window.__ChessCoachRegisterHudShadow = previousHudRegistrar;
+    }
+    if (window[INSTANCE_KEY]?.cleanup === cleanup) {
+      try { delete window[INSTANCE_KEY]; } catch (e) { window[INSTANCE_KEY] = null; }
+    }
+    window.__ccMobileLauncherOrbInitialized = false;
+    return true;
+  }
+
+  void storageRemove(["cc_custom_script_files", "lichess.cc_custom_script_files", "chesscom.cc_custom_script_files"]);
+  function disablePublicScriptApi() {
+    if (window.CC && typeof window.CC.loadScriptFile === "function") {
+      window.CC.loadScriptFile = async () => false;
+    }
+  }
+
+  createFloatingHud();
+  if (typeof queueMicrotask === "function") queueMicrotask(disablePublicScriptApi);
+  else Promise.resolve().then(disablePublicScriptApi);
+  schedule(disablePublicScriptApi, 0);
+  startHudDiscovery();
+  listen(document, "visibilitychange", handleVisibilityChange);
+  listen(window, "pagehide", () => cleanup("pagehide"), { once: true });
+  listen(window, "orientationchange", () => { fitSettingsViewport(); clampMiniHud(true); });
+  listen(window, "resize", () => { fitSettingsViewport(); clampMiniHud(false); });
+  listen(window.visualViewport, "resize", () => { fitSettingsViewport(); clampMiniHud(false); });
+  listen(window.visualViewport, "scroll", () => { fitSettingsViewport(); clampMiniHud(false); });
+  listen(window, "cc-core-state", handleCoreExecutionState);
+  listen(window, "cc:core-state", handleCoreExecutionState);
+  listen(window, "cc-device-profile-ready", () => {
+    deviceRecommendation = readDeviceRecommendation();
+    applyDeviceClasses();
+    enforceLowTierRestrictions();
+  });
+
+  void loadInitialStorage().then(() => {
+    if (destroyed) return;
+    applySavedMiniPosition();
     syncVisibilityStates();
-    patchMobileScriptFilePicker();
-
-    const bestDesc = (mainHudShadow.getElementById("cc-best-desc")?.textContent || "").trim();
-    const bestEval = (mainHudShadow.getElementById("cc-best-eval")?.textContent || "0.00").trim();
-    const bestPv = (mainHudShadow.getElementById("cc-best-pv")?.textContent || "").trim();
-    const standbyBox = mainHudShadow.getElementById("cc-enemy-turn-standby");
-    const isEnemyTurn = Boolean(standbyBox && standbyBox.style.display !== "none");
-    const threatsText = (mainHudShadow.getElementById("cc-tele-threats-val")?.textContent || "").trim();
-    const wdlText = (mainHudShadow.getElementById("cc-tele-wdl-val")?.textContent || "").trim();
-    const autoChk = mainHudShadow.getElementById("cc-auto-master-chk");
-    const isAutoOn = Boolean(autoChk && autoChk.checked);
-
-    const wMatch = wdlText.match(/Поб:\s*(\d+%)/i);
-    if (wMatch) {
-      miniWdlPill.textContent = "Поб " + wMatch[1];
-    }
-
-    if (bestEval && bestEval !== "--") {
-      miniEvalBadge.textContent = bestEval;
-      const isNeg = bestEval.startsWith("-");
-      miniEvalBadge.style.color = isNeg ? "#ff4d94" : "#00f5d4";
-      miniEvalBadge.style.borderColor = isNeg ? "rgba(255, 77, 148, 0.45)" : "rgba(0, 245, 212, 0.45)";
-      miniEvalBadge.style.background = isNeg ? "rgba(255, 77, 148, 0.15)" : "rgba(0, 245, 212, 0.16)";
-    }
-
-    if (isEnemyTurn) {
-      miniTurnTxt.textContent = isAutoOn ? "⏳ ВРАГ (АВТО ВКЛ)" : "⏳ ХОД СОПЕРНИКА";
-      miniDot.style.background = "#ffbe0b";
-      miniDot.style.boxShadow = "0 0 8px #ffbe0b";
-      miniTechReason.textContent = threatsText || "Ожидание ответа соперника, контроль угроз и премува...";
-    } else {
-      miniTurnTxt.textContent = isAutoOn ? "🤖 НАШ ХОД (АВТО)" : "🟢 НАШ ХОД";
-      miniDot.style.background = isAutoOn ? "#38b000" : "#00f5d4";
-      miniDot.style.boxShadow = isAutoOn ? "0 0 8px #38b000" : "0 0 8px #00f5d4";
-
-      const moveMatch = bestDesc.match(/([А-Яа-яA-Za-z]+\s+[a-h][1-8]\s*→\s*[a-h][1-8](?:=[QNBR])?)/);
-      const shortMatch = bestDesc.match(/\b([a-h][1-8])\s*→\s*([a-h][1-8])/i);
-
-      if (moveMatch) {
-        miniMoveMain.textContent = "✦ " + moveMatch[1];
-      } else if (shortMatch) {
-        miniMoveMain.textContent = `✦ ${shortMatch[1]} → ${shortMatch[2]}`;
-      }
-
-      if (shortMatch) {
-        cornerMoveShort.textContent = `${shortMatch[1]}→${shortMatch[2]} (${bestEval})`;
-      }
-
-      const dashIdx = bestDesc.indexOf("—");
-      if (dashIdx !== -1) {
-        miniTechReason.textContent = bestDesc.slice(dashIdx + 1).trim();
-      } else if (bestDesc) {
-        miniTechReason.textContent = bestDesc;
-      }
-
-      if (bestPv) {
-        miniPvLine.textContent = bestPv;
-      }
-    }
-  }, 200);
-
-  // Запускаем проверку ежедневного приветствия и одноразового опроса
-  checkAndRunDailyWelcome();
+    if (rootSetupComplete && mainHudShadow) activateMobileTab(mainHudShadow, initialStorage.cc_mobile_settings_tab || "presets");
+    enforceInitialAutomationDefault();
+    if (rootSetupComplete && deviceRecommendation.tier === "LOW") enforceLowTierRestrictions();
+    maybeStartWelcomeSequence();
+  });
 })();

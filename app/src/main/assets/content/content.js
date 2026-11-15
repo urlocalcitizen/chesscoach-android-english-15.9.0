@@ -1,9 +1,20 @@
 (function () {
-  console.log("[ChessCoach REWORK v15.0 — HvH/All/Legit Modes, .CHESS Configs, Live Telemetry 24/7 & Custom BG] Запущен!");
+  const CONTENT_INSTANCE_KEY = Symbol.for("cc.lichess.content.instance");
+  const previousContentInstance = window[CONTENT_INSTANCE_KEY];
+  try {
+    if (previousContentInstance?.isAlive?.()) return;
+    previousContentInstance?.shutdown?.();
+  } catch (e) {}
+  try { window.ChessFX?.revive?.(); } catch (e) {}
+  try { window.CC?.revive?.(); } catch (e) {}
+  try { window.ChessCoachEngine?.revive?.(); } catch (e) {}
+
+  console.log("[ChessCoach REWORK v15.8.1 — Engine Core 2, Full NNUE & Position-ID] Запущен!");
 
   function isStrictBrilliantMove(moveObj) {
     if (!moveObj) return false;
-    const evalNum = parseFloat(moveObj.evalPawns) || 0;
+    const scoreCp = getComparableMoveScoreCp(moveObj);
+    const evalNum = Number.isFinite(scoreCp) ? scoreCp / 100 : 0;
     return Boolean(
       moveObj.isMateInOne ||
       moveObj.isForcedMateInTwo ||
@@ -18,13 +29,6 @@
   if (window.ChessFX) {
     window.ChessFX.isBrilliantMove = isStrictBrilliantMove;
   }
-
-  const stealthChannelName = "cc_" + Math.random().toString(36).slice(2, 12) + "_" + Date.now().toString(36);
-  try {
-    document.documentElement.setAttribute("data-cc-hs", stealthChannelName);
-    window.dispatchEvent(new CustomEvent("cc-hs-init"));
-    document.documentElement.removeAttribute("data-cc-hs");
-  } catch (e) {}
 
   const ALL_STYLE_NAMES = {
     mogging: "⚡ Моггинг",
@@ -56,7 +60,9 @@
     gold: ["#ffbe0b", "#fb5607"],
     matrix: ["#38b000", "#ccff33"],
     titanium: ["#e0fbfc", "#98c1d9"],
-    obsidian: ["#f8fafc", "#94a3b8"]
+    obsidian: ["#f8fafc", "#94a3b8"],
+    nebula: ["#67e8f9", "#d946ef"],
+    grandmaster: ["#f8d477", "#6ee7b7"]
   };
 
   const DUBIOUS_GAMBIT_KEYWORDS = [
@@ -73,6 +79,20 @@
   ];
 
   const FILES = "abcdefgh";
+  const STORAGE_PREFIX = "lichess.";
+  const SETTINGS_KEYS = Object.freeze([
+    "workMode", "activeTabId", "panelLeft", "panelTop", "panelMinimized", "panelHidden",
+    "customBgDataUrl", "customBgDim", "customBgBlur",
+    "liveTelemetryEnabled", "teleShowClocks", "teleShowEngine", "teleShowWdl", "teleShowThreats",
+    "elo", "style", "showArrows", "showEvalBar", "showAverageMove", "showWorstMove", "turnMode", "forcedMyColor",
+    "useStockfishWasm", "engineMaxMode", "trapRadarEnabled", "audioRadarEnabled", "heatmapAlwaysOn",
+    "uiTheme", "arrowStyle", "arrowScale", "arrowOpacity", "enable3DPiecesShadow",
+    "phonkEditEnabled", "mateStyle", "roflMode", "safeAntiBanGuard", "welcomeBannerHidden",
+    "autoMoveEnabled", "bulletTurboMode", "legitAutoTiming", "autoMoveDelayMs", "autoMoveJitterMs", "autoMoveTriggerRate",
+    "useAverageMoveSometimes", "averageMoveFrequency", "protectCriticalMoves", "autoClickMethod",
+    "premoveEnabled", "premoveRiskLevel", "premoveOpeningMode", "showPremoveArrows"
+  ]);
+  const storageKey = key => `${STORAGE_PREFIX}${key}`;
 
   // Режим работы меню: "all" | "hvh" | "legit"
   let workMode = "all";
@@ -112,6 +132,7 @@
   let forcedMyColor = "auto";
 
   let useStockfishWasm = true;
+  let engineMaxMode = false;
   let trapRadarEnabled = true;
   let audioRadarEnabled = true;
   let heatmapAlwaysOn = false;
@@ -126,7 +147,7 @@
   let useAverageMoveSometimes = false;
   let averageMoveFrequency = 20;
   let protectCriticalMoves = true;
-  let autoClickMethod = "hybrid";
+  let autoClickMethod = "twoclick";
 
   let premoveEnabled = false;
   let premoveRiskLevel = 3;
@@ -141,13 +162,15 @@
   let phonkEditEnabled = true;
   let mateStyle = "phonk_skull";
   let roflMode = true;
-  let safeAntiBanGuard = false;
+  let safeAntiBanGuard = true;
   let welcomeBannerHidden = false;
 
   let castlingRights = { K: true, Q: true, k: true, q: true };
   let prevGridState = null;
   let prevBoardPartForHistory = "";
   let currentEpSquare = "-";
+  let halfmoveClock = 0;
+  let fullmoveNumber = 1;
   let lastPathname = location.pathname;
   let lastRealEnemyMove = null;
   let lastOurExecutedMove = null;
@@ -156,7 +179,18 @@
   let committedEnemyBoardKey = "";
   let lastPremoveSentBoardKey = "";
   let analysisRequestId = 0;
+  let activeEngineBoardKey = "";
+  const analysisSessionId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  let positionId = 0;
+  let positionAnalysisId = 0;
+  let positionRequestId = 0;
+  let currentPositionKey = "";
+  let boardDirty = true;
+  let analysisRetryCount = 0;
+  let finalEngineRetryCount = 0;
+  let pendingAnalysisRetry = null;
   let premoveReqId = 0;
+  let ponderRequestId = 0;
   let cachedMoves = {
     best: null,
     average: null,
@@ -178,11 +212,16 @@
   let lastRecordedGraphBoardKey = "";
   let recentPositionHistory = [];
   let gameStartedFromInitial = false;
+  let lastObservedPly = null;
 
   let autoMoveTimer = null;
   let premoveTimer = null;
+  const premoveStepTimers = new Set();
   let animRetryTimer = null;
   let isExecutingMove = false;
+  let activeNativeMove = null;
+  let nativeMoveFailureKey = "";
+  let nativeMoveFailures = 0;
   let moveCooldownUntil = 0;
   let currentTurnDecision = {
     boardKey: "",
@@ -196,6 +235,7 @@
 
   let sessionMoveHistory = [];
   let peerExtensionDetected = false;
+  let peerBeaconDisabled = false;
   let suspectEngineStreak = 0;
   let lastBeaconCheckTime = 0;
   let uciHistoryList = [];
@@ -203,192 +243,14 @@
 
   let shadowRoot = null;
   let extensionInvalidated = false;
+  let contentInstanceHandle = null;
   let mainIntervalId = null;
   let neuralCanvasRafId = null;
+  let uiAbortController = null;
 
-  const StockfishWasmEngine = (function () {
-    let worker = null;
-    let isReady = false;
-    let isInitializing = false;
-    let activeJob = null;
-    let awaitingReadySync = false;
-
-    async function initWorker() {
-      if (worker || isInitializing || extensionInvalidated || !isContextValid()) return;
-      isInitializing = true;
-      try {
-        const scriptUrl = chrome.runtime.getURL("lib/stockfish-local.js");
-        const resp = await fetch(scriptUrl);
-        if (!resp.ok) throw new Error("Не удалось загрузить stockfish-local.js");
-        const codeText = await resp.text();
-        const blob = new Blob([codeText], { type: "application/javascript" });
-        const blobUrl = URL.createObjectURL(blob);
-
-        worker = new Worker(blobUrl);
-        worker.onmessage = (e) => handleEngineLine(String(e.data || ""));
-        worker.onerror = () => {
-          isReady = false;
-          isInitializing = false;
-        };
-
-        worker.postMessage("uci");
-        worker.postMessage("setoption name Threads value 1");
-        worker.postMessage("setoption name Hash value 16");
-        worker.postMessage("setoption name MultiPV value 3");
-        worker.postMessage("isready");
-      } catch (err) {
-        isInitializing = false;
-        worker = null;
-      }
-    }
-
-    function handleEngineLine(line) {
-      if (!line) return;
-      if (line.includes("uciok")) {
-        isReady = true;
-        isInitializing = false;
-        return;
-      }
-      if (line.includes("readyok")) {
-        isReady = true;
-        isInitializing = false;
-        if (awaitingReadySync && activeJob) {
-          awaitingReadySync = false;
-          try {
-            worker.postMessage(`setoption name MultiPV value ${activeJob.multiPv}`);
-            if (activeJob.useStartposMoves && activeJob.uciMoves && activeJob.uciMoves.length > 0) {
-              worker.postMessage(`position startpos moves ${activeJob.uciMoves.join(" ")}`);
-            } else {
-              worker.postMessage(`position fen ${activeJob.fen}`);
-            }
-            worker.postMessage(`go movetime ${activeJob.movetimeMs}`);
-          } catch (e) {}
-        }
-        return;
-      }
-
-      if (!activeJob || awaitingReadySync) return;
-
-      if (line.startsWith("info ") && line.includes(" pv ")) {
-        const depthMatch = line.match(/\bdepth\s+(\d+)/);
-        const mpvMatch = line.match(/\bmultipv\s+(\d+)/);
-        const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/);
-        const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/);
-        const pvSplit = line.split(" pv ");
-
-        if (pvSplit.length > 1) {
-          const moves = pvSplit[1].trim().split(/\s+/);
-          const firstUci = moves[0] || "";
-          if (firstUci.length >= 4) {
-            const mpvIdx = mpvMatch ? parseInt(mpvMatch[1], 10) : 1;
-            const depth = depthMatch ? parseInt(depthMatch[1], 10) : 1;
-            let scoreCp = 0;
-            let isMate = false;
-            let mateIn = null;
-
-            if (mateMatch) {
-              mateIn = parseInt(mateMatch[1], 10);
-              isMate = true;
-              scoreCp = mateIn > 0 ? (30000 - mateIn * 20) : (-30000 - mateIn * 20);
-            } else if (cpMatch) {
-              scoreCp = parseInt(cpMatch[1], 10);
-            }
-
-            activeJob.lines[mpvIdx] = {
-              uci: firstUci,
-              from: firstUci.slice(0, 2),
-              to: firstUci.slice(2, 4),
-              promo: firstUci.length > 4 ? firstUci[4].toLowerCase() : null,
-              depth,
-              scoreCp,
-              isMate,
-              mateIn,
-              pvChain: moves.slice(0, 4).map(u => `${u.slice(0, 2)}→${u.slice(2, 4)}`).join(" ➔ ")
-            };
-          }
-        }
-      } else if (line.startsWith("bestmove ")) {
-        const job = activeJob;
-        activeJob = null;
-        if (job.timer) clearTimeout(job.timer);
-        const parts = line.split(/\s+/);
-        const bestUci = parts[1] && parts[1] !== "(none)" ? parts[1] : null;
-        job.resolve({
-          bestUci,
-          lines: job.lines
-        });
-      }
-    }
-
-    function analyze(fen, movetimeMs = 190, multiPv = 3, uciMoves = [], useStartposMoves = false) {
-      return new Promise((resolve) => {
-        if (!useStockfishWasm || extensionInvalidated) {
-          resolve(null);
-          return;
-        }
-        if (!worker) {
-          initWorker();
-          resolve(null);
-          return;
-        }
-        if (!isReady) {
-          resolve(null);
-          return;
-        }
-
-        if (activeJob) {
-          if (activeJob.timer) clearTimeout(activeJob.timer);
-          activeJob.resolve(null);
-          activeJob = null;
-        }
-
-        const job = {
-          fen,
-          movetimeMs,
-          multiPv,
-          uciMoves: Array.isArray(uciMoves) ? uciMoves.slice() : [],
-          useStartposMoves: Boolean(useStartposMoves),
-          lines: {},
-          resolve,
-          timer: setTimeout(() => {
-            if (activeJob === job) {
-              try { worker.postMessage("stop"); } catch (e) {}
-              activeJob = null;
-              awaitingReadySync = false;
-              resolve({ bestUci: job.lines[1]?.uci || null, lines: job.lines });
-            }
-          }, movetimeMs + 160)
-        };
-
-        activeJob = job;
-        awaitingReadySync = true;
-        try {
-          worker.postMessage("stop");
-          worker.postMessage("isready");
-        } catch (e) {
-          clearTimeout(job.timer);
-          activeJob = null;
-          awaitingReadySync = false;
-          resolve(null);
-        }
-      });
-    }
-
-    function terminate() {
-      if (worker) {
-        try { worker.terminate(); } catch (e) {}
-        worker = null;
-        isReady = false;
-      }
-    }
-
-    return {
-      initWorker,
-      analyze,
-      terminate,
-      isReady: () => isReady
-    };
-  })();
+  const StockfishWasmEngine = window.ChessCoachEngine.create({
+    isEnabled: () => useStockfishWasm && !extensionInvalidated && isContextValid()
+  });
 
   function isContextValid() {
     try {
@@ -398,25 +260,66 @@
     }
   }
 
+  function handleEngineVisibilityChange(event) {
+    cancelNativeMove("visibility");
+    clearAnalysisRetry();
+    analysisRequestId++;
+    positionAnalysisId++;
+    activeEngineBoardKey = "";
+    StockfishWasmEngine.cancel?.();
+    resetTurnDecision();
+    if (event?.type === "visibilitychange" && !document.hidden) {
+      committedBoardKey = "";
+      committedEnemyBoardKey = "";
+      boardDirty = true;
+      triggerDebouncedCycle();
+    }
+  }
+
   function shutdownOrphanedScript() {
+    if (extensionInvalidated) return;
     extensionInvalidated = true;
-    StockfishWasmEngine.terminate();
+    cancelNativeMove("shutdown");
+    clearAnalysisRetry();
+    try { StockfishWasmEngine.terminate(); } catch (e) {}
     if (mainIntervalId) { clearInterval(mainIntervalId); mainIntervalId = null; }
     if (neuralCanvasRafId) { cancelAnimationFrame(neuralCanvasRafId); neuralCanvasRafId = null; }
     if (autoMoveTimer) { clearTimeout(autoMoveTimer); autoMoveTimer = null; }
     if (premoveTimer) { clearTimeout(premoveTimer); premoveTimer = null; }
+    for (const timerId of premoveStepTimers) clearTimeout(timerId);
+    premoveStepTimers.clear();
     if (animRetryTimer) { clearTimeout(animRetryTimer); animRetryTimer = null; }
-    if (window.ChessFX && shadowRoot) {
-      window.ChessFX.stopPhonkEdit(shadowRoot);
-    }
+    if (uiAbortController) { uiAbortController.abort(); uiAbortController = null; }
+    try {
+      if (window.ChessFX?.shutdown) window.ChessFX.shutdown(shadowRoot);
+      else if (window.ChessFX?.stopPhonkEdit && shadowRoot) window.ChessFX.stopPhonkEdit(shadowRoot);
+    } catch (e) {}
+    try {
+      const cleanupScriptApi = window.CC?.destroy || window.CC?.cleanup;
+      if (typeof cleanupScriptApi === "function") cleanupScriptApi.call(window.CC);
+    } catch (e) {}
     const pageStyle = document.getElementById("cc-lichess-board-3d-style");
     if (pageStyle) pageStyle.remove();
     window.removeEventListener("scroll", syncVisualPosition);
     window.removeEventListener("resize", syncVisualPosition);
+    document.removeEventListener?.("visibilitychange", handleEngineVisibilityChange);
+    window.removeEventListener("pagehide", handleEngineVisibilityChange);
+    window.removeEventListener("cc-mobile-lifecycle", handleMobileMoveLifecycle);
     try {
       if (domObserver) domObserver.disconnect();
     } catch (e) {}
+    if (shadowRoot?.host?.isConnected) shadowRoot.host.remove();
+    shadowRoot = null;
+    if (window[CONTENT_INSTANCE_KEY] === contentInstanceHandle) {
+      try { delete window[CONTENT_INSTANCE_KEY]; } catch (e) {}
+    }
   }
+
+  contentInstanceHandle = Object.freeze({
+    isAlive: () => !extensionInvalidated && isContextValid(),
+    shutdown: () => shutdownOrphanedScript()
+  });
+  Object.defineProperty(window, CONTENT_INSTANCE_KEY, { value: contentInstanceHandle, configurable: true });
 
   function safeSendMessage(payload, callback) {
     if (extensionInvalidated || !isContextValid()) {
@@ -426,14 +329,17 @@
     try {
       chrome.runtime.sendMessage(payload, (res) => {
         try {
-          if (chrome.runtime.lastError) return;
+          if (chrome.runtime.lastError) {
+            if (callback) callback({ error: chrome.runtime.lastError.message, status: "error", meta: payload.meta || null });
+            return;
+          }
           if (callback) callback(res);
         } catch (err) {
           shutdownOrphanedScript();
         }
       });
     } catch (err) {
-      shutdownOrphanedScript();
+      if (callback) callback({ error: String(err?.message || err), status: "error", meta: payload.meta || null });
     }
   }
 
@@ -444,6 +350,9 @@
     host.style.cssText = "all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483646;";
     document.documentElement.appendChild(host);
     shadowRoot = host.attachShadow({ mode: "closed" });
+    if (typeof window.__ChessCoachRegisterHudShadow === "function") {
+      window.__ChessCoachRegisterHudShadow(shadowRoot);
+    }
 
     if (isContextValid()) {
       const linkEl = document.createElement("link");
@@ -462,10 +371,21 @@
     if (extensionInvalidated || !isContextValid()) return;
     try {
       if (chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set(obj);
+        const scoped = Object.fromEntries(Object.entries(obj || {}).map(([key, value]) => [storageKey(key), value]));
+        const writeResult = chrome.storage.local.set(scoped, () => {
+          try {
+            const writeError = chrome.runtime?.lastError;
+            if (writeError) console.warn("[ChessCoach] Настройки не сохранены:", writeError.message);
+          } catch (e) {}
+        });
+        if (writeResult && typeof writeResult.catch === "function") {
+          writeResult.catch((error) => {
+            console.warn("[ChessCoach] Настройки не сохранены:", error?.message || error);
+          });
+        }
       }
     } catch (e) {
-      shutdownOrphanedScript();
+      console.warn("[ChessCoach] Настройки не сохранены:", e?.message || e);
     }
   }
 
@@ -565,14 +485,15 @@
       showWorstMove = false;
       useAverageMoveSometimes = false;
       protectCriticalMoves = true;
-      bulletTurboMode = true;
+      engineMaxMode = true;
+      bulletTurboMode = false;
       legitAutoTiming = false;
       autoMoveEnabled = true;
-      premoveEnabled = true;
-      showPremoveArrows = true;
-      premoveRiskLevel = 3;
-      autoMoveDelayMs = 42;
-      autoMoveJitterMs = 15;
+      premoveEnabled = false;
+      showPremoveArrows = false;
+      premoveRiskLevel = 1;
+      autoMoveDelayMs = 90;
+      autoMoveJitterMs = 25;
       autoMoveTriggerRate = 100;
       StockfishWasmEngine.initWorker();
 
@@ -586,31 +507,33 @@
           showWorstMove: false,
           useAverageMoveSometimes: false,
           protectCriticalMoves: true,
-          bulletTurboMode: true,
+          engineMaxMode: true,
+          bulletTurboMode: false,
           legitAutoTiming: false,
           autoMoveEnabled: true,
-          premoveEnabled: true,
-          showPremoveArrows: true,
-          premoveRiskLevel: 3,
-          autoMoveDelayMs: 42,
-          autoMoveJitterMs: 15,
+          premoveEnabled: false,
+          showPremoveArrows: false,
+          premoveRiskLevel: 1,
+          autoMoveDelayMs: 90,
+          autoMoveJitterMs: 25,
           autoMoveTriggerRate: 100
         });
       }
-      setAutoStatusText("⚡ ПРОФИЛЬ HvH АКТИВЕН (3000 ELO • РЕЗНЯ + ПРЕМУВ)", "#ff2a85");
+      setAutoStatusText("♚ ENGINE MAX АКТИВЕН • ЖДЕМ PRIMARY STOCKFISH", "#64cdb9");
     } else if (mode === "legit") {
       currentElo = 3000;
       currentStyle = "tal";
       useStockfishWasm = true;
-      showAverageMove = true;
+      showAverageMove = false;
       showWorstMove = false;
+      engineMaxMode = false;
       bulletTurboMode = false;
       premoveEnabled = false;
       showPremoveArrows = false;
       legitAutoTiming = true;
       protectCriticalMoves = true;
-      useAverageMoveSometimes = true;
-      averageMoveFrequency = 15;
+      useAverageMoveSometimes = false;
+      averageMoveFrequency = 0;
       autoMoveDelayMs = 460;
       autoMoveJitterMs = 220;
       StockfishWasmEngine.initWorker();
@@ -621,23 +544,25 @@
           elo: 3000,
           style: "tal",
           useStockfishWasm: true,
-          showAverageMove: true,
+          showAverageMove: false,
           showWorstMove: false,
+          engineMaxMode: false,
           bulletTurboMode: false,
           premoveEnabled: false,
           showPremoveArrows: false,
           legitAutoTiming: true,
           protectCriticalMoves: true,
-          useAverageMoveSometimes: true,
-          averageMoveFrequency: 15,
+          useAverageMoveSometimes: false,
+          averageMoveFrequency: 0,
           autoMoveDelayMs: 460,
           autoMoveJitterMs: 220
         });
       }
       setAutoStatusText("🛡 ПРОФИЛЬ LEGIT АКТИВЕН (3000 ELO • ТАЛЬ • ЖИВОЙ ДЖИТТЕР)", "#38b000");
     } else {
+      engineMaxMode = false;
       if (triggerSave) {
-        saveSetting({ workMode: "all" });
+        saveSetting({ workMode: "all", engineMaxMode: false });
       }
       setAutoStatusText("◈ ПОЛНЫЙ РЕЖИМ «ВСЕ ФУНКЦИИ» АКТИВЕН", "#00f5d4");
     }
@@ -667,10 +592,15 @@
   }
 
   function initNeuralCanvasBackground(panel) {
+    if (window.__CC_ANDROID_RUNTIME__) return;
     const canvas = $("cc-neural-canvas");
     if (!canvas || !panel) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
 
     let width = 600;
     let height = 560;
@@ -694,7 +624,7 @@
       mouse.y = -999;
     });
 
-    const particles = Array.from({ length: 26 }, () => ({
+    const particles = Array.from({ length: 20 }, () => ({
       x: Math.random() * width,
       y: Math.random() * height,
       vx: (Math.random() - 0.5) * 0.45,
@@ -702,12 +632,24 @@
       r: Math.random() * 1.8 + 0.9
     }));
 
-    const renderFrame = () => {
+    let lastFrameAt = 0;
+    const renderFrame = (timestamp = 0) => {
       if (extensionInvalidated) return;
       if (panel.classList.contains("cc-minimized") || panel.style.display === "none") {
         neuralCanvasRafId = requestAnimationFrame(renderFrame);
         return;
       }
+      const performanceMode = window.ChessCoachEngine.getPerformanceMode?.() || "normal";
+      if (performanceMode === "critical") {
+        neuralCanvasRafId = requestAnimationFrame(renderFrame);
+        return;
+      }
+      const frameInterval = performanceMode === "constrained" ? 80 : 42;
+      if (timestamp - lastFrameAt < frameInterval) {
+        neuralCanvasRafId = requestAnimationFrame(renderFrame);
+        return;
+      }
+      lastFrameAt = timestamp;
 
       if (canvas.width !== panel.clientWidth || canvas.height !== panel.clientHeight) {
         updateSize();
@@ -765,27 +707,28 @@
     try {
       if (chrome.storage && chrome.storage.local) {
         chrome.storage.local.get(
-          [
-            "workMode", "activeTabId", "panelLeft", "panelTop", "panelMinimized", "panelHidden",
-            "customBgDataUrl", "customBgDim", "customBgBlur",
-            "liveTelemetryEnabled", "teleShowClocks", "teleShowEngine", "teleShowWdl", "teleShowThreats",
-            "elo", "style", "showArrows", "showEvalBar", "showAverageMove", "showWorstMove",
-            "useStockfishWasm", "trapRadarEnabled", "audioRadarEnabled", "heatmapAlwaysOn",
-            "uiTheme", "arrowStyle", "arrowScale", "arrowOpacity", "enable3DPiecesShadow",
-            "phonkEditEnabled", "mateStyle", "roflMode", "safeAntiBanGuard", "welcomeBannerHidden",
-            "autoMoveEnabled", "bulletTurboMode", "legitAutoTiming", "autoMoveDelayMs", "autoMoveJitterMs", "autoMoveTriggerRate",
-            "useAverageMoveSometimes", "averageMoveFrequency", "protectCriticalMoves", "autoClickMethod",
-            "premoveEnabled", "premoveRiskLevel", "premoveOpeningMode", "showPremoveArrows"
-          ],
+          [...SETTINGS_KEYS, ...SETTINGS_KEYS.map(storageKey)],
           (res) => {
             if (!isContextValid() || !res) return;
+            const rawSettings = res;
+            const migratedSettings = {};
+            res = {};
+            for (const key of SETTINGS_KEYS) {
+              const scopedName = storageKey(key);
+              if (Object.hasOwn(rawSettings, scopedName)) {
+                res[key] = rawSettings[scopedName];
+              } else if (Object.hasOwn(rawSettings, key)) {
+                res[key] = rawSettings[key];
+                migratedSettings[key] = rawSettings[key];
+              }
+            }
+            if (Object.keys(migratedSettings).length > 0) saveSetting(migratedSettings);
             if (res.workMode) workMode = res.workMode;
             if (res.activeTabId) activeTabId = res.activeTabId;
             if (typeof res.panelLeft === "number") panelLeft = res.panelLeft;
             if (typeof res.panelTop === "number") panelTop = res.panelTop;
             if (typeof res.panelMinimized === "boolean") panelMinimized = res.panelMinimized;
-            // Всегда открываем панель при входе на страницу, чтобы она не исчезала
-            panelHidden = false;
+            if (typeof res.panelHidden === "boolean") panelHidden = res.panelHidden;
 
             if (typeof res.customBgDataUrl === "string") customBgDataUrl = res.customBgDataUrl;
             if (res.customBgDim !== undefined) customBgDim = Number(res.customBgDim);
@@ -797,13 +740,19 @@
             if (typeof res.teleShowWdl === "boolean") teleShowWdl = res.teleShowWdl;
             if (typeof res.teleShowThreats === "boolean") teleShowThreats = res.teleShowThreats;
 
-            if (res.elo) currentElo = Number(res.elo);
-            if (res.style) currentStyle = res.style;
+            if (res.elo !== undefined) {
+              const storedElo = Number(res.elo);
+              if (Number.isFinite(storedElo)) currentElo = Math.max(400, Math.min(3000, storedElo));
+            }
+            if (typeof res.style === "string" && Object.hasOwn(ALL_STYLE_NAMES, res.style)) currentStyle = res.style;
             if (typeof res.showArrows === "boolean") showArrows = res.showArrows;
             if (typeof res.showEvalBar === "boolean") showEvalBar = res.showEvalBar;
             if (typeof res.showAverageMove === "boolean") showAverageMove = res.showAverageMove;
             if (typeof res.showWorstMove === "boolean") showWorstMove = res.showWorstMove;
+            if (["my", "auto", "w", "b"].includes(res.turnMode)) turnMode = res.turnMode;
+            if (["auto", "w", "b"].includes(res.forcedMyColor)) forcedMyColor = res.forcedMyColor;
             if (typeof res.useStockfishWasm === "boolean") useStockfishWasm = res.useStockfishWasm;
+            if (typeof res.engineMaxMode === "boolean") engineMaxMode = res.engineMaxMode;
             if (typeof res.trapRadarEnabled === "boolean") trapRadarEnabled = res.trapRadarEnabled;
             if (typeof res.audioRadarEnabled === "boolean") audioRadarEnabled = res.audioRadarEnabled;
             if (typeof res.heatmapAlwaysOn === "boolean") heatmapAlwaysOn = res.heatmapAlwaysOn;
@@ -828,15 +777,25 @@
             if (typeof res.useAverageMoveSometimes === "boolean") useAverageMoveSometimes = res.useAverageMoveSometimes;
             if (res.averageMoveFrequency !== undefined) averageMoveFrequency = Number(res.averageMoveFrequency);
             if (typeof res.protectCriticalMoves === "boolean") protectCriticalMoves = res.protectCriticalMoves;
-            if (res.autoClickMethod) autoClickMethod = res.autoClickMethod;
+            if (["twoclick", "drag"].includes(res.autoClickMethod)) autoClickMethod = res.autoClickMethod;
+            else if (res.autoClickMethod === "hybrid") autoClickMethod = "twoclick";
 
             if (typeof res.premoveEnabled === "boolean") premoveEnabled = res.premoveEnabled;
             if (res.premoveRiskLevel !== undefined) premoveRiskLevel = Number(res.premoveRiskLevel);
             if (res.premoveOpeningMode !== undefined) premoveOpeningMode = res.premoveOpeningMode;
             if (typeof res.showPremoveArrows === "boolean") showPremoveArrows = res.showPremoveArrows;
 
-            if (useStockfishWasm) {
-              StockfishWasmEngine.initWorker();
+            if (workMode === "hvh" && typeof res.engineMaxMode !== "boolean") engineMaxMode = true;
+            if (engineMaxMode) {
+              useStockfishWasm = true;
+              currentElo = 3000;
+              currentStyle = "balanced";
+              showAverageMove = false;
+              useAverageMoveSometimes = false;
+              bulletTurboMode = false;
+              premoveEnabled = false;
+              legitAutoTiming = false;
+              autoMoveTriggerRate = 100;
             }
 
             ensurePanel();
@@ -872,18 +831,20 @@
     if (!card) return;
     card.style.display = liveTelemetryEnabled ? "flex" : "none";
     if (!liveTelemetryEnabled) return;
+    const telemetry = lastTelemetryData || {};
 
     const mySecs = getMyRemainingSeconds();
     const enSecs = getEnemyRemainingSeconds();
-    const diffSecs = (mySecs < 900 && enSecs < 900) ? Math.round(mySecs - enSecs) : 0;
-    const diffStr = diffSecs > 0 ? `+${diffSecs}с` : `${diffSecs}с`;
+    const clocksKnown = Number.isFinite(mySecs) && Number.isFinite(enSecs);
+    const diffSecs = clocksKnown ? Math.round(mySecs - enSecs) : 0;
+    const diffStr = clocksKnown ? (diffSecs > 0 ? `+${diffSecs}с` : `${diffSecs}с`) : "—";
 
     const boxClocks = $("cc-tele-box-clocks");
     if (boxClocks) {
       boxClocks.style.display = teleShowClocks ? "block" : "none";
       const valEl = $("cc-tele-clocks-val");
       if (valEl) {
-        valEl.innerHTML = `<span style="color:#00f5d4;">${formatClockMMSS(mySecs)}</span> vs <span style="color:#ff4d94;">${formatClockMMSS(enSecs)}</span> <small style="color:#ffbe0b;">(${diffStr})</small>`;
+        valEl.innerHTML = `<span style="color:var(--cc-positive);">${formatClockMMSS(mySecs)}</span> vs <span style="color:var(--cc-negative);">${formatClockMMSS(enSecs)}</span> <small style="color:var(--cc-warning);">(${diffStr})</small>`;
       }
     }
 
@@ -892,20 +853,21 @@
       boxEngine.style.display = teleShowEngine ? "block" : "none";
       const valEl = $("cc-tele-engine-val");
       if (valEl) {
-        const wasmBadge = useStockfishWasm ? "SF WASM" : "JS CORE";
-        valEl.textContent = `${wasmBadge} • ${lastTelemetryData.serverSource || "OK"}`;
+        const wasmBadge = useStockfishWasm ? "SF LOCAL" : "JS CORE";
+        const source = telemetry.serverSource || "OK";
+        valEl.textContent = source.startsWith("SF LOCAL") ? source : `${wasmBadge} • ${source}`;
       }
     }
 
     const boxWdl = $("cc-tele-box-wdl");
     if (boxWdl) {
       boxWdl.style.display = teleShowWdl ? "block" : "none";
-      const w = lastTelemetryData.myWin ?? 50;
-      const d = lastTelemetryData.draw ?? 30;
-      const l = lastTelemetryData.enemyWin ?? 20;
+      const w = telemetry.myWin ?? 50;
+      const d = telemetry.draw ?? 30;
+      const l = telemetry.enemyWin ?? 20;
       const valEl = $("cc-tele-wdl-val");
       if (valEl) {
-        valEl.innerHTML = `<span style="color:#00f5d4;">Поб: ${w}%</span> • <span style="color:#cbd5e1;">Нич: ${d}%</span> • <span style="color:#ff4d94;">Пор: ${l}%</span>`;
+        valEl.innerHTML = `<span style="color:var(--cc-positive);">Поб: ${w}%</span> • <span style="color:var(--cc-text-secondary);">Нич: ${d}%</span> • <span style="color:var(--cc-negative);">Пор: ${l}%</span>`;
       }
       if ($("cc-wdl-fill-w")) $("cc-wdl-fill-w").style.width = `${w}%`;
       if ($("cc-wdl-fill-d")) $("cc-wdl-fill-d").style.width = `${d}%`;
@@ -917,7 +879,7 @@
       boxThreats.style.display = teleShowThreats ? "block" : "none";
       const valEl = $("cc-tele-threats-val");
       if (valEl) {
-        valEl.textContent = lastTelemetryData.nearestThreatText || "Угроз не обнаружено";
+        valEl.textContent = telemetry.nearestThreatText || "Угроз не обнаружено";
       }
     }
   }
@@ -931,10 +893,7 @@
       btn.classList.toggle("active", btn.dataset.mode === workMode);
     });
 
-    const allThemes = [
-      "theme-minimal", "theme-cyberpunk", "theme-aurora", "theme-hologram",
-      "theme-crimson", "theme-gold", "theme-matrix", "theme-titanium", "theme-obsidian"
-    ];
+    const allThemes = Object.keys(THEME_ACCENT_COLORS).map(name => `theme-${name}`);
     allThemes.forEach((cls) => panel.classList.remove(cls));
     panel.classList.add(`theme-${uiTheme}`);
 
@@ -955,13 +914,20 @@
       }
       const wasmChip = $("cc-welcome-chip-wasm");
       if (wasmChip) {
-        wasmChip.textContent = useStockfishWasm ? "⚡ SF WASM + Syzygy: ВКЛ" : "⚙ Локальный JS + Syzygy";
+        wasmChip.textContent = useStockfishWasm ? "⚡ SF LOCAL + Syzygy: ВКЛ" : "⚙ Локальный JS + Syzygy";
       }
     }
 
     if ($("cc-elo-slider")) $("cc-elo-slider").value = currentElo;
     if ($("cc-elo-val")) $("cc-elo-val").textContent = `${currentElo} ELO`;
     if ($("cc-elo-badge")) $("cc-elo-badge").textContent = `${currentElo} ELO`;
+    const enginePower = $("cc-engine-power");
+    if (enginePower && (!cachedMoves.engineMeta || !useStockfishWasm)) {
+      const resources = StockfishWasmEngine.getResourceProfile?.() || { dualWorker: false, totalHashMb: 64 };
+      enginePower.textContent = useStockfishWasm
+        ? `${resources.fullNnue ? "SF FULL" : "SF"} ${resources.dualWorker ? 2 : 1}C · H${resources.totalHashMb}M`
+        : "JS CORE";
+    }
 
     const styleLabel = ALL_STYLE_NAMES[currentStyle] || "✦ Таль";
     const bestMv = cachedMoves.best;
@@ -990,6 +956,7 @@
     if ($("cc-show-worst-chk")) $("cc-show-worst-chk").checked = showWorstMove;
 
     if ($("cc-sf-wasm-chk")) $("cc-sf-wasm-chk").checked = useStockfishWasm;
+    if ($("cc-engine-max-chk")) $("cc-engine-max-chk").checked = engineMaxMode;
     if ($("cc-trap-radar-chk")) $("cc-trap-radar-chk").checked = trapRadarEnabled;
     if ($("cc-audio-radar-chk")) $("cc-audio-radar-chk").checked = audioRadarEnabled;
     if ($("cc-heatmap-always-chk")) $("cc-heatmap-always-chk").checked = heatmapAlwaysOn;
@@ -1036,7 +1003,7 @@
     if ($("cc-auto-avg-freq-slider")) $("cc-auto-avg-freq-slider").value = averageMoveFrequency;
     if ($("cc-auto-avg-freq-val")) $("cc-auto-avg-freq-val").textContent = `${averageMoveFrequency}%`;
     if ($("cc-auto-protect-chk")) $("cc-auto-protect-chk").checked = protectCriticalMoves;
-    setSelectSafe($("cc-auto-method-select"), autoClickMethod, "hybrid");
+    setSelectSafe($("cc-auto-method-select"), autoClickMethod, "twoclick");
 
     setSelectSafe($("cc-vis-theme"), uiTheme, "cyberpunk");
     setSelectSafe($("cc-vis-arrow-style"), arrowStyle, "curved_neon");
@@ -1073,11 +1040,71 @@
     }
   }
 
+  function setMoveExecutionState(executing, reason = "") {
+    isExecutingMove = Boolean(executing);
+    window.dispatchEvent(new CustomEvent("cc-core-state", {
+      detail: { source: "chesscoach-core", platform: "lichess", executing: isExecutingMove, allowOverlayPassthrough: isExecutingMove, reason }
+    }));
+  }
+
+  function cancelNativeMove(reason) {
+    if (!activeNativeMove) return;
+    const action = activeNativeMove;
+    action.controller.abort();
+    if (action.failureKey === nativeMoveFailureKey && action.attempt === nativeMoveFailures) nativeMoveFailures = Math.max(0, nativeMoveFailures - 1);
+    try { window.__CC_ANDROID_RUNTIME__?.nativeRequest("input.cancel", {}).catch(() => {}); } catch (e) {}
+    activeNativeMove = null;
+    setMoveExecutionState(false, reason);
+  }
+
+  function handleMobileMoveLifecycle(event) {
+    const detail = event?.detail;
+    if (detail?.cancelPendingMoves === true || detail?.state === "settings") {
+      resetTurnDecision();
+      cancelNativeMove("mobile-pause");
+      if (autoMoveEnabled) setAutoStatusText(detail?.state === "settings" ? "Автоход на паузе: открыты настройки" : "Автоход приостановлен", "#ffbe0b");
+    } else if (detail?.state === "active") {
+      scheduleAutoMoveIfNeeded();
+    }
+  }
+
+  function clearAnalysisRetry() {
+    if (pendingAnalysisRetry) clearTimeout(pendingAnalysisRetry.timer);
+    pendingAnalysisRetry = null;
+  }
+
+  function scheduleAnalysisRetry(state, delayMs) {
+    clearAnalysisRetry();
+    const retry = { positionId: state.positionId, positionKey: state.positionKey, url: location.href, notBefore: Date.now() + delayMs, timer: null };
+    pendingAnalysisRetry = retry;
+    committedBoardKey = state.boardKey;
+    retry.timer = setTimeout(() => {
+      if (pendingAnalysisRetry !== retry) return;
+      pendingAnalysisRetry = null;
+      if (extensionInvalidated || document.hidden || location.href !== retry.url ||
+          positionId !== retry.positionId || currentPositionKey !== retry.positionKey) return;
+      // Only the owned retry timer may unlock this position; polling must not consume retries.
+      committedBoardKey = "";
+      runCycle(false);
+    }, delayMs);
+  }
+
+  function schedulePremoveStep(callback, delayMs) {
+    const timerId = setTimeout(() => {
+      premoveStepTimers.delete(timerId);
+      callback();
+    }, delayMs);
+    premoveStepTimers.add(timerId);
+    return timerId;
+  }
+
   function resetTurnDecision() {
     clearTimeout(autoMoveTimer);
     autoMoveTimer = null;
     clearTimeout(premoveTimer);
     premoveTimer = null;
+    for (const timerId of premoveStepTimers) clearTimeout(timerId);
+    premoveStepTimers.clear();
     currentTurnDecision = {
       boardKey: "",
       decided: false,
@@ -1089,11 +1116,119 @@
     };
   }
 
-  function forceRecalculate() {
+  function clearPositionPresentation(label = "СИНХРОНИЗАЦИЯ ПОЗИЦИИ...") {
+    if (autoMoveTimer) { clearTimeout(autoMoveTimer); autoMoveTimer = null; }
+    if (premoveTimer) { clearTimeout(premoveTimer); premoveTimer = null; }
+    for (const timerId of premoveStepTimers) clearTimeout(timerId);
+    premoveStepTimers.clear();
+    cachedMoves = { best: null, average: null, worst: null, heatmap: [], boardKey: "", positionId: -1, qualityRank: -1 };
     committedBoardKey = "";
     committedEnemyBoardKey = "";
+    activeEngineBoardKey = "";
+    resetTurnDecision();
+    hideArrows();
+    renderEvalBar(null, 0);
+    const activeBox = $("cc-my-turn-active");
+    if (activeBox) activeBox.style.display = "flex";
+    if ($("cc-best-desc")) $("cc-best-desc").textContent = label;
+    if ($("cc-best-eval")) $("cc-best-eval").textContent = "--";
+    if ($("cc-best-pv")) $("cc-best-pv").textContent = "Ожидаем стабильную доску";
+    if ($("cc-avg-box")) $("cc-avg-box").style.display = "none";
+    if ($("cc-worst-box")) $("cc-worst-box").style.display = "none";
+    for (const id of ["cc-mate-banner", "cc-time-sniper-banner", "cc-roast-box"]) {
+      const node = $(id); if (node) node.style.display = "none";
+    }
+    if ($("cc-opening-name")) $("cc-opening-name").textContent = "◈ ОБНОВЛЕНИЕ ПОЗИЦИИ";
+    if ($("cc-opening-plan")) $("cc-opening-plan").textContent = "Ожидаем новый анализ";
+    if ($("cc-tele-threats-val")) $("cc-tele-threats-val").textContent = "Синхронизация позиции...";
+    lastTelemetryData = null;
+    updateEvalMoodAndEngineBadge(null, null);
+  }
+
+  function markBoardDirty(reason = "DOM") {
+    if (boardDirty && reason !== "BOARD_REPLACED") return;
+    boardDirty = true;
+    hideArrows();
+    // Style/clock mutations require recapturing, not another engine search.
+    if (reason !== "BOARD_REPLACED" && reason !== "NO_BOARD") return;
+    clearAnalysisRetry();
+    positionAnalysisId++;
+    analysisRequestId++;
+    StockfishWasmEngine.cancel?.();
+    clearPositionPresentation("СИНХРОНИЗАЦИЯ ПОЗИЦИИ...");
+  }
+
+  function adoptPositionState(state) {
+    if (!state?.positionKey) return null;
+    const restoreArrows = boardDirty && state.positionKey === currentPositionKey && cachedMoves.boardKey === state.boardKey;
+    if (state.positionKey !== currentPositionKey) {
+      clearAnalysisRetry();
+      if (currentPositionKey) {
+        analysisRequestId++;
+        StockfishWasmEngine.cancel?.();
+        clearPositionPresentation("НОВАЯ ПОЗИЦИЯ • АНАЛИЗ...");
+      }
+      currentPositionKey = state.positionKey;
+      positionId++;
+      positionAnalysisId++;
+      analysisRetryCount = 0;
+      finalEngineRetryCount = 0;
+    }
+    boardDirty = false;
+    state.sessionId = analysisSessionId;
+    state.positionId = positionId;
+    state.positionKey = currentPositionKey;
+    if (window.__CHESSCOACH_BOARD_STATE__) {
+      window.__CHESSCOACH_BOARD_STATE__.positionId = positionId;
+      window.__CHESSCOACH_BOARD_STATE__.positionKey = currentPositionKey;
+    }
+    if (restoreArrows) renderArrowsOverlay(state, cachedMoves);
+    return state;
+  }
+
+  function createAnalysisMeta(state, pass, analysisId) {
+    return {
+      sessionId: analysisSessionId,
+      positionId: state.positionId,
+      analysisId,
+      requestId: ++positionRequestId,
+      pass,
+      positionKey: state.positionKey,
+      analysisKey: state.boardKey,
+      elo: currentElo,
+      engineMaxMode
+    };
+  }
+
+  function isCurrentAnalysisMeta(meta) {
+    if (boardDirty && meta?.sessionId === analysisSessionId && meta.positionId === positionId && meta.analysisId === positionAnalysisId) {
+      const fresh = captureBoardState(true);
+      if (!fresh || fresh.animating) {
+        // A discarded animation-time response must not strand an empty committed cache.
+        committedBoardKey = "";
+        activeEngineBoardKey = "";
+        return false;
+      }
+      adoptPositionState(fresh);
+    }
+    return Boolean(meta && !boardDirty && meta.sessionId === analysisSessionId && meta.positionId === positionId && meta.analysisId === positionAnalysisId && meta.positionKey === currentPositionKey);
+  }
+
+  function isCachedAnalysisCurrent(state = null) {
+    const hasVisual = Boolean(cachedMoves?.best || cachedMoves?.heatmap?.length);
+    if (!currentPositionKey) return Boolean(hasVisual && (!state || !cachedMoves.boardKey || cachedMoves.boardKey === state.boardKey));
+    return Boolean(!boardDirty && hasVisual && cachedMoves.positionId === positionId && (!state || state.positionKey === currentPositionKey));
+  }
+
+  function forceRecalculate() {
+    cancelNativeMove("recalculate");
+    clearAnalysisRetry();
+    committedBoardKey = "";
+    committedEnemyBoardKey = "";
+    finalEngineRetryCount = 0;
     lastPremoveSentBoardKey = "";
     preparedLookahead = null;
+    positionAnalysisId++;
     resetTurnDecision();
     runCycle(true);
   }
@@ -1117,7 +1252,7 @@
   function buildCurrentConfigPayload(configName = "My_ChessCoach", includeBg = true) {
     return {
       signature: "CHESSCOACH_CONFIG_V15",
-      version: "15.0.0",
+      version: "15.8.0",
       name: configName,
       exportedAt: new Date().toISOString(),
       settings: {
@@ -1131,6 +1266,7 @@
         turnMode,
         forcedMyColor,
         useStockfishWasm,
+        engineMaxMode,
         trapRadarEnabled,
         audioRadarEnabled,
         heatmapAlwaysOn,
@@ -1174,18 +1310,22 @@
     const s = (rawObj.signature === "CHESSCOACH_CONFIG_V15" && rawObj.settings) ? rawObj.settings : rawObj;
     if (!s || typeof s !== "object") return false;
 
-    if (typeof s.workMode === "string") workMode = s.workMode;
-    if (s.elo !== undefined) currentElo = Math.max(400, Math.min(3000, Number(s.elo) || 2000));
+    if (["all", "hvh", "legit"].includes(s.workMode)) workMode = s.workMode;
+    if (s.elo !== undefined) {
+      const importedElo = Number(s.elo);
+      if (Number.isFinite(importedElo)) currentElo = Math.max(400, Math.min(3000, Math.round(importedElo)));
+    }
     if (typeof s.style === "string" && ALL_STYLE_NAMES[s.style]) currentStyle = s.style;
 
     if (typeof s.showArrows === "boolean") showArrows = s.showArrows;
     if (typeof s.showEvalBar === "boolean") showEvalBar = s.showEvalBar;
     if (typeof s.showAverageMove === "boolean") showAverageMove = s.showAverageMove;
     if (typeof s.showWorstMove === "boolean") showWorstMove = s.showWorstMove;
-    if (typeof s.turnMode === "string") turnMode = s.turnMode;
-    if (typeof s.forcedMyColor === "string") forcedMyColor = s.forcedMyColor;
+    if (["my", "auto", "w", "b"].includes(s.turnMode)) turnMode = s.turnMode;
+    if (["auto", "w", "b"].includes(s.forcedMyColor)) forcedMyColor = s.forcedMyColor;
 
     if (typeof s.useStockfishWasm === "boolean") useStockfishWasm = s.useStockfishWasm;
+    if (typeof s.engineMaxMode === "boolean") engineMaxMode = s.engineMaxMode;
     if (typeof s.trapRadarEnabled === "boolean") trapRadarEnabled = s.trapRadarEnabled;
     if (typeof s.audioRadarEnabled === "boolean") audioRadarEnabled = s.audioRadarEnabled;
     if (typeof s.heatmapAlwaysOn === "boolean") heatmapAlwaysOn = s.heatmapAlwaysOn;
@@ -1205,7 +1345,8 @@
     if (typeof s.useAverageMoveSometimes === "boolean") useAverageMoveSometimes = s.useAverageMoveSometimes;
     if (s.averageMoveFrequency !== undefined) averageMoveFrequency = Number(s.averageMoveFrequency);
     if (typeof s.protectCriticalMoves === "boolean") protectCriticalMoves = s.protectCriticalMoves;
-    if (typeof s.autoClickMethod === "string") autoClickMethod = s.autoClickMethod;
+    if (["twoclick", "drag"].includes(s.autoClickMethod)) autoClickMethod = s.autoClickMethod;
+    else if (s.autoClickMethod === "hybrid") autoClickMethod = "twoclick";
 
     if (typeof s.premoveEnabled === "boolean") premoveEnabled = s.premoveEnabled;
     if (s.premoveRiskLevel !== undefined) premoveRiskLevel = Number(s.premoveRiskLevel);
@@ -1240,7 +1381,10 @@
       showEvalBar,
       showAverageMove,
       showWorstMove,
+      turnMode,
+      forcedMyColor,
       useStockfishWasm,
+      engineMaxMode,
       trapRadarEnabled,
       audioRadarEnabled,
       heatmapAlwaysOn,
@@ -1300,6 +1444,7 @@
           <span class="cc-brand-dot"></span>
           <span>CHESSCOACH // VISION v15</span>
           <span class="cc-badge" id="cc-elo-badge">${currentElo} ELO</span>
+          <span class="cc-engine-power" id="cc-engine-power">JS CORE</span>
           <span class="cc-deep-status" id="cc-deep-status">⚡ ДОРАСЧЕТ...</span>
         </div>
         <div class="cc-header-controls">
@@ -1374,7 +1519,7 @@
               <div class="cc-welcome-chips">
                 <span class="cc-welcome-chip" id="cc-welcome-chip-mode">◈ Режим: Все функции</span>
                 <span class="cc-welcome-chip" id="cc-welcome-chip-cpu">🧠 CPU: Мульти-анализ</span>
-                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF WASM + Syzygy: ВКЛ</span>
+                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF LOCAL + Syzygy: ВКЛ</span>
               </div>
             </div>
 
@@ -1397,7 +1542,7 @@
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-engine">
                   <div class="cc-tele-box-title">🛰️ ДВИЖОК / СЕРВЕР</div>
-                  <div class="cc-tele-box-val" id="cc-tele-engine-val" style="color:#c77dff;">SF WASM • ГОТОВ</div>
+                  <div class="cc-tele-box-val" id="cc-tele-engine-val" style="color:#c77dff;">SF LOCAL • ГОТОВ</div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-wdl" style="grid-column: span 2;">
                   <div class="cc-tele-box-title" style="display:flex; justify-content:space-between;">
@@ -1459,7 +1604,7 @@
               <div id="cc-eval-graph-card">
                 <div class="cc-graph-header">
                   <span>📈 ЖИВОЙ ГРАФИК ПЕРЕВЕСА</span>
-                  <span id="cc-eval-graph-label" style="color:var(--cc-accent); font-family:monospace;">0.00</span>
+                  <span class="cc-graph-meta"><span id="cc-eval-mood-label">РАВНО</span><span id="cc-eval-graph-label">0.00</span></span>
                 </div>
                 <canvas id="cc-eval-graph-canvas" width="410" height="42"></canvas>
               </div>
@@ -1617,8 +1762,7 @@
               <div class="cc-control-row" style="margin-top:5px; margin-bottom:0;">
                 <span>Канал отправки:</span>
                 <select class="cc-select" id="cc-auto-method-select" style="width:210px;">
-                  <option value="hybrid" selected>⚡ MAIN WebSocket + 2-Клик</option>
-                  <option value="twoclick">🎯 Чистый 2-Клик по доске</option>
+                  <option value="twoclick" selected>🎯 Безопасный 2-Клик по доске</option>
                   <option value="drag">🖐 Перетаскивание (Drag & Drop)</option>
                 </select>
               </div>
@@ -1641,11 +1785,15 @@
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>🧠 ГИБРИДНЫЙ STOCKFISH WASM + ТЕЛЕМЕТРИЯ 24/7</span>
+                <span>🧠 ГИБРИДНЫЙ STOCKFISH 19 LOCAL + ТЕЛЕМЕТРИЯ 24/7</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>🧠 Фоновый WebWorker Stockfish WASM (Честные 3000+ ELO)</span>
+                <span>🧠 Фоновый WebWorker Stockfish 19 Local</span>
                 <input type="checkbox" id="cc-sf-wasm-chk" checked>
+              </div>
+              <div class="cc-Switch-row">
+                <span>♚ ENGINE MAX: ждать primary SF, без average и turbo</span>
+                <input type="checkbox" id="cc-engine-max-chk">
               </div>
               <div class="cc-Switch-row">
                 <span>📡 Положение партии 24/7 (Часы, WDL%, Сервер в ход врага)</span>
@@ -1743,7 +1891,7 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>✦ ТЕМА МЕНЮ (9 СТИЛЕЙ VISION GLASS)</span></div>
+              <div class="cc-section-title"><span>✦ ТЕМА МЕНЮ (11 СТИЛЕЙ VISION GLASS)</span></div>
               <select class="cc-select" id="cc-vis-theme">
                 <option value="cyberpunk">🌌 Liquid Cyan Wave (Неоновая волна)</option>
                 <option value="minimal">⚪ Pure Minimal (Чистый минимализм)</option>
@@ -1754,6 +1902,8 @@
                 <option value="matrix">🧪 Matrix Toxic (Кибер-Матрица)</option>
                 <option value="titanium">❄️ Vision Pro Titanium (Матовый титан)</option>
                 <option value="obsidian">🌑 Obsidian Stealth (Темный обсидиан)</option>
+                <option value="nebula">🌠 Nebula Director (Космическая студия)</option>
+                <option value="grandmaster">♛ Grandmaster Club (Изумруд и золото)</option>
               </select>
             </div>
 
@@ -1908,6 +2058,9 @@
     applyCustomBackgroundToPanel();
     applyPersistentPanelGeometry();
     updateUIValues();
+    if (uiAbortController) uiAbortController.abort();
+    uiAbortController = new AbortController();
+    const uiSignal = uiAbortController.signal;
 
     const header = $("chesscoach-header");
     let dragging = false, ox = 0, oy = 0;
@@ -1926,13 +2079,13 @@
       panel.style.right = "auto";
       panelLeft = nx;
       panelTop = ny;
-    });
+    }, { signal: uiSignal });
     window.addEventListener("mouseup", () => {
       if (dragging) {
         dragging = false;
         saveSetting({ panelLeft, panelTop });
       }
-    });
+    }, { signal: uiSignal });
 
     getShadow().querySelectorAll(".cc-mode-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -1951,6 +2104,7 @@
     });
 
     window.addEventListener("keydown", (e) => {
+      if (extensionInvalidated) return;
       if (e.key === "Insert") {
         panelHidden = !panelHidden;
         saveSetting({ panelHidden });
@@ -1961,7 +2115,7 @@
         const st = captureBoardState(true);
         if (st && !st.animating) renderArrowsOverlay(st, cachedMoves);
       }
-    });
+    }, { signal: uiSignal });
 
     window.addEventListener("keyup", (e) => {
       if (e.key === "Alt" && isAltPressed) {
@@ -1969,7 +2123,7 @@
         const st = captureBoardState(true);
         if (st && !st.animating) renderArrowsOverlay(st, cachedMoves);
       }
-    });
+    }, { signal: uiSignal });
 
     window.addEventListener("blur", () => {
       if (isAltPressed) {
@@ -1977,7 +2131,7 @@
         const st = captureBoardState(true);
         if (st && !st.animating) renderArrowsOverlay(st, cachedMoves);
       }
-    });
+    }, { signal: uiSignal });
 
     // Управление полями Живой телеметрии 24/7
     $("cc-tele-gear-btn").addEventListener("click", () => {
@@ -2098,13 +2252,16 @@
       if (forcedMyColor === "auto") forcedMyColor = "w";
       else if (forcedMyColor === "w") forcedMyColor = "b";
       else forcedMyColor = "auto";
+      saveSetting({ forcedMyColor });
       updateUIValues();
       forceRecalculate();
     });
 
     const toggleAutoMoveMaster = (newState) => {
       autoMoveEnabled = newState;
+      if (newState) { nativeMoveFailureKey = ""; nativeMoveFailures = 0; }
       if (!newState) {
+        cancelNativeMove("automation-disabled");
         bulletTurboMode = false;
       }
       saveSetting({ autoMoveEnabled, bulletTurboMode });
@@ -2244,7 +2401,28 @@
     $("cc-sf-wasm-chk").addEventListener("change", (e) => {
       useStockfishWasm = e.target.checked;
       if (useStockfishWasm) StockfishWasmEngine.initWorker();
+      else StockfishWasmEngine.terminate();
       saveSetting({ useStockfishWasm });
+      updateUIValues();
+      forceRecalculate();
+    });
+    $("cc-engine-max-chk").addEventListener("change", (e) => {
+      engineMaxMode = e.target.checked;
+      if (engineMaxMode) {
+        currentElo = 3000;
+        currentStyle = "balanced";
+        useStockfishWasm = true;
+        showAverageMove = false;
+        useAverageMoveSometimes = false;
+        bulletTurboMode = false;
+        premoveEnabled = false;
+        showPremoveArrows = false;
+        legitAutoTiming = false;
+        autoMoveTriggerRate = 100;
+        StockfishWasmEngine.initWorker();
+      }
+      saveSetting({ engineMaxMode, elo: currentElo, style: currentStyle, useStockfishWasm, showAverageMove, useAverageMoveSometimes, bulletTurboMode, premoveEnabled, showPremoveArrows, legitAutoTiming, autoMoveTriggerRate });
+      setAutoStatusText(engineMaxMode ? "♚ ENGINE MAX: ОЖИДАНИЕ PRIMARY STOCKFISH" : "ENGINE MAX ВЫКЛЮЧЕН", engineMaxMode ? "#64cdb9" : "#94a3b8");
       updateUIValues();
       forceRecalculate();
     });
@@ -2287,13 +2465,17 @@
 
     $("cc-play-once").addEventListener("click", () => {
       const state = captureBoardState(true);
-      if (state && !state.animating && cachedMoves.best) {
+      if (state && !state.animating && isCachedAnalysisCurrent(state)) {
         setAutoStatusText(`Выполняем ход: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
         executeMoveOnBoard(cachedMoves.best, state, true, false);
       }
     });
 
     $("cc-auto-test-best").addEventListener("click", () => {
+      if (engineMaxMode && !cachedMoves.engineMeta && !cachedMoves.best?.fromSyzygy) {
+        setAutoStatusText("♚ ENGINE MAX: дождитесь завершения primary Stockfish", "#d9ad58");
+        return;
+      }
       const state = captureBoardState(true);
       if (state && !state.animating && cachedMoves.best) {
         setAutoStatusText(`Лучший ход: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
@@ -2302,9 +2484,10 @@
     });
 
     $("cc-auto-test-avg").addEventListener("click", () => {
+      if (engineMaxMode) return;
       const state = captureBoardState(true);
       const move = cachedMoves.average || cachedMoves.best;
-      if (state && !state.animating && move) {
+      if (state && !state.animating && move && isCachedAnalysisCurrent(state)) {
         setAutoStatusText(`Средний ход: ${move.from}→${move.to}`, "#ffbe0b");
         executeMoveOnBoard(move, state, true, false);
       }
@@ -2332,6 +2515,7 @@
 
     $("cc-turn-select").addEventListener("change", (e) => {
       turnMode = e.target.value;
+      saveSetting({ turnMode });
       forceRecalculate();
     });
 
@@ -2409,7 +2593,7 @@
       showEvalBar = e.target.checked;
       saveSetting({ showEvalBar });
       const st = captureBoardState(true);
-      if (st && !st.animating) renderEvalBar(st, cachedMoves.best?.whitePerspectiveEval || 0);
+      if (st && !st.animating) renderEvalBar(st, cachedMoves.best?.whitePerspectiveEval ?? 0);
     });
 
     $("cc-vis-shadow-chk").addEventListener("change", (e) => {
@@ -2568,7 +2752,7 @@
 
   function parseLichessClockElement(selector) {
     const clockEl = document.querySelector(selector);
-    if (!clockEl) return 999;
+    if (!clockEl) return Number.POSITIVE_INFINITY;
     const raw = (clockEl.innerText || clockEl.textContent || "").trim().replace(/\s+/g, "");
     const parts = raw.split(":");
     if (parts.length === 2) {
@@ -2576,7 +2760,13 @@
       const secs = parseFloat(parts[1]) || 0;
       return mins * 60 + secs;
     }
-    return 999;
+    if (parts.length === 3) {
+      const hours = parseInt(parts[0], 10) || 0;
+      const mins = parseInt(parts[1], 10) || 0;
+      const secs = parseFloat(parts[2]) || 0;
+      return hours * 3600 + mins * 60 + secs;
+    }
+    return Number.POSITIVE_INFINITY;
   }
 
   function getMyRemainingSeconds() {
@@ -2588,8 +2778,14 @@
   }
   
   function formatClockMMSS(sec) {
-    if (sec === undefined || sec === null || sec >= 900) return "--:--";
+    if (!Number.isFinite(sec)) return "--:--";
     const s = Math.max(0, sec);
+    if (s >= 3600) {
+      const hours = Math.floor(s / 3600);
+      const mins = Math.floor((s % 3600) / 60);
+      const secs = Math.floor(s % 60);
+      return `${hours}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    }
     const mins = Math.floor(s / 60);
     const rem = s - mins * 60;
     if (mins === 0 && rem < 10) {
@@ -2630,12 +2826,69 @@
     }
   }
 
-  function recordEvalPoint(boardKey, whiteEvalPawns, dropPawns = 0) {
-    if (!boardKey || boardKey === lastRecordedGraphBoardKey) return;
-    lastRecordedGraphBoardKey = boardKey;
+  function updateEvalMoodAndEngineBadge(state, res) {
+    const panel = $("chesscoach-panel");
+    const moodLabel = $("cc-eval-mood-label");
+    const powerBadge = $("cc-engine-power");
+    if (!state || !res?.best) {
+      if (panel) panel.dataset.evalMood = "neutral";
+      if (moodLabel) moodLabel.textContent = "ОЖИДАНИЕ";
+      if (powerBadge) {
+        powerBadge.textContent = "ENGINE IDLE";
+        delete powerBadge.dataset.consensus;
+      }
+      return;
+    }
 
-    const numEval = Math.max(-10, Math.min(10, parseFloat(whiteEvalPawns) || 0));
-    const numDrop = parseFloat(dropPawns) || 0;
+    let whiteEval = Number(res.best.whitePerspectiveEval);
+    if (!Number.isFinite(whiteEval)) {
+      const sideScoreCp = getComparableMoveScoreCp(res.best);
+      const sideEval = Number.isFinite(sideScoreCp) ? sideScoreCp / 100 : 0;
+      whiteEval = state.sideToAnalyze === "w" ? sideEval : -sideEval;
+    }
+    const myEval = state.myColor === "w" ? whiteEval : -whiteEval;
+    const mood = res.isDangerPosition || myEval <= -2.5
+      ? "critical"
+      : myEval >= 0.75 ? "ahead" : myEval <= -0.75 ? "behind" : "neutral";
+    if (panel) panel.dataset.evalMood = mood;
+    if (moodLabel) {
+      moodLabel.textContent = mood === "critical" ? "КРИТИЧНО" : mood === "ahead" ? "ПЕРЕВЕС" : mood === "behind" ? "ПОД ДАВЛЕНИЕМ" : "РАВНО";
+    }
+
+    if (powerBadge) {
+      const meta = res.engineMeta;
+      if (meta) {
+        powerBadge.textContent = `${meta.fullNnue ? "SF FULL" : "SF"} ${meta.workers || 1}C · H${meta.hashMb || "?"}M · D${meta.depth || "?"}`;
+        powerBadge.title = `${meta.consensus || "primary"} · seldepth ${meta.selDepth || meta.depth || "?"} · NPS ${meta.nps ? Math.round(meta.nps / 1000) + "k" : "—"}`;
+        powerBadge.dataset.consensus = meta.consensus || "primary-only";
+      } else if (res.best.fromCloud) {
+        powerBadge.textContent = `CLOUD · D${res.best.cloudDepth || "?"}`;
+        delete powerBadge.dataset.consensus;
+      } else {
+        powerBadge.textContent = "JS CORE";
+        delete powerBadge.dataset.consensus;
+      }
+    }
+  }
+
+  function recordEvalPoint(boardKey, whiteEvalPawns, dropPawns = 0) {
+    if (!boardKey) return;
+    const parsedEval = Number.parseFloat(whiteEvalPawns);
+    const parsedDrop = Number.parseFloat(dropPawns);
+    const numEval = Math.max(-10, Math.min(10, Number.isFinite(parsedEval) ? parsedEval : 0));
+    const numDrop = Number.isFinite(parsedDrop) ? parsedDrop : 0;
+
+    if (boardKey === lastRecordedGraphBoardKey && evalGraphHistory.length > 0) {
+      evalGraphHistory[evalGraphHistory.length - 1] = {
+        boardKey,
+        evalVal: numEval,
+        isBlunder: numDrop >= 1.5,
+        drop: numDrop
+      };
+      renderLiveEvalGraph();
+      return;
+    }
+    lastRecordedGraphBoardKey = boardKey;
 
     evalGraphHistory.push({
       boardKey,
@@ -2670,14 +2923,21 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    if (evalGraphHistory.length === 0) return;
+    if (evalGraphHistory.length === 0) {
+      const emptyLabel = $("cc-eval-graph-label");
+      if (emptyLabel) {
+        emptyLabel.textContent = "0.00";
+        delete emptyLabel.dataset.tone;
+      }
+      return;
+    }
 
     const lastPt = evalGraphHistory[evalGraphHistory.length - 1];
     const lbl = $("cc-eval-graph-label");
     if (lbl && lastPt) {
       const sign = lastPt.evalVal > 0 ? "+" : "";
       lbl.textContent = `${sign}${lastPt.evalVal.toFixed(2)}`;
-      lbl.style.color = lastPt.evalVal >= 0 ? "#00f5d4" : "#ff4d94";
+      lbl.dataset.tone = lastPt.evalVal >= 0 ? "positive" : "negative";
     }
 
     const [accent1, accent2] = THEME_ACCENT_COLORS[uiTheme] || THEME_ACCENT_COLORS.cyberpunk;
@@ -2795,31 +3055,49 @@
       candidateOpenings = window.ChessOpenings.database.filter((op) => !isDubiousGambitOpening(op));
     }
 
+    const continuations = [];
     for (const op of candidateOpenings) {
       const opMoves = op.moves.trim().split(/\s+/);
       if (plyCount + 2 > opMoves.length) continue;
 
       const prefixStr = opMoves.slice(0, plyCount).join(" ");
       if (plyCount === 0 || prefixStr === historyStr) {
-        const replyUci = opMoves[plyCount + 1];
-        const replyFrom = replyUci.slice(0, 2);
-        const replyTo = replyUci.slice(2, 4);
-        if (
-          state &&
-          state.grid &&
-          (!hasMyPieceOnSquare(state.grid, state.myColor, replyFrom) ||
-            isDestinationBlockedByOwnPiece(state.grid, state.myColor, replyTo))
-        ) {
-          continue;
-        }
+        continuations.push({ op, enemyUci: opMoves[plyCount], replyUci: opMoves[plyCount + 1] });
+      }
+    }
+
+    if (continuations.length > 0) {
+      const pairCounts = new Map();
+      const enemyCounts = new Map();
+      for (const continuation of continuations) {
+        const key = `${continuation.enemyUci}:${continuation.replyUci}`;
+        const pair = pairCounts.get(key) || { ...continuation, count: 0 };
+        pair.count++;
+        pairCounts.set(key, pair);
+        enemyCounts.set(continuation.enemyUci, (enemyCounts.get(continuation.enemyUci) || 0) + 1);
+      }
+      const bestPair = [...pairCounts.values()].sort((a, b) => b.count - a.count)[0];
+      const replyFrom = bestPair.replyUci.slice(0, 2);
+      const replyTo = bestPair.replyUci.slice(2, 4);
+      if (
+        state && state.grid &&
+        hasMyPieceOnSquare(state.grid, state.myColor, replyFrom) &&
+        !isDestinationBlockedByOwnPiece(state.grid, state.myColor, replyTo)
+      ) {
+        const enemySupport = (enemyCounts.get(bestPair.enemyUci) || 0) / continuations.length;
+        const replySupport = bestPair.count / Math.max(1, enemyCounts.get(bestPair.enemyUci) || 0);
+        const confidence = Math.min(94, Math.round(62 + 32 * enemySupport * replySupport));
         if (badgeEl) {
-          badgeEl.textContent = `📖 ПО КНИГЕ: ${op.name.slice(0, 18)}`;
+          badgeEl.textContent = `📖 ПО КНИГЕ: ${bestPair.op.name.slice(0, 18)}`;
           badgeEl.style.color = "#00f5d4";
         }
         return {
-          bookOpeningName: op.name,
-          bookEnemyUci: opMoves[plyCount],
-          bookMyReplyUci: replyUci
+          bookOpeningName: bestPair.op.name,
+          bookEnemyUci: bestPair.enemyUci,
+          bookMyReplyUci: bestPair.replyUci,
+          confidence,
+          predictionConfidence: Math.round(enemySupport * 100),
+          bookLines: continuations.length
         };
       }
     }
@@ -2837,6 +3115,16 @@
   function computeLocalInstantPremovePlan(state) {
     if (!state || !state.grid) return null;
 
+    if (
+      preparedLookahead &&
+      preparedLookahead.canPremove &&
+      preparedLookahead.premove &&
+      (!preparedLookahead.forMoveUci || preparedLookahead.forMoveUci === lastOurExecutedMove?.uci) &&
+      hasMyPieceOnSquare(state.grid, state.myColor, preparedLookahead.premove.from)
+    ) {
+      return preparedLookahead;
+    }
+
     const bookPlan = getOpeningBookPremovePlan(state);
     if (bookPlan && bookPlan.bookEnemyUci && bookPlan.bookMyReplyUci) {
       const bFrom = bookPlan.bookMyReplyUci.slice(0, 2);
@@ -2846,22 +3134,15 @@
       if (hasMyPieceOnSquare(state.grid, state.myColor, bFrom)) {
         return {
           canPremove: true,
-          confidence: 94,
+          confidence: bookPlan.confidence,
+          predictionConfidence: bookPlan.predictionConfidence,
+          validatedBranches: 1,
           predictionType: "opening_book",
-          reasonText: `📖 ДЕБЮТНЫЙ ПРЕМУВ: ${bookPlan.bookOpeningName}`,
+          reasonText: `📖 ДЕБЮТНЫЙ ПРОГНОЗ ${bookPlan.predictionConfidence}%: ${bookPlan.bookOpeningName}`,
           predictedEnemyMove: { from: eFrom, to: eTo, uci: bookPlan.bookEnemyUci },
           premove: { from: bFrom, to: bTo, uci: bookPlan.bookMyReplyUci, piece: "p" }
         };
       }
-    }
-
-    if (
-      preparedLookahead &&
-      preparedLookahead.canPremove &&
-      preparedLookahead.premove &&
-      hasMyPieceOnSquare(state.grid, state.myColor, preparedLookahead.premove.from)
-    ) {
-      return preparedLookahead;
     }
 
     return null;
@@ -2869,26 +3150,81 @@
 
   function shouldTriggerPremoveByRisk(premovePlan) {
     if (!premovePlan || !premovePlan.canPremove || !premovePlan.premove) return false;
-    if (bulletTurboMode) return true;
-
     const { confidence, predictionType } = premovePlan;
-    const myRemainingSecs = getMyRemainingSeconds();
-    const effectiveRisk = myRemainingSecs <= 15 ? 4 : premoveRiskLevel;
+    const effectiveRisk = premoveRiskLevel;
+
+    if (bulletTurboMode) {
+      return confidence >= 70 || predictionType === "forced_single" || predictionType === "mate_premove";
+    }
 
     if (effectiveRisk === 1) {
       return confidence >= 94 || (predictionType === "recapture" && confidence >= 92);
     }
     if (effectiveRisk === 2) {
-      return predictionType === "opening_book" || confidence >= 85;
+      return confidence >= 86;
     }
     if (effectiveRisk === 3) {
-      return confidence >= 76;
+      return confidence >= 78;
     }
-    return confidence >= 65;
+    return confidence >= 70;
+  }
+
+  function getStructuredMateIn(moveObj) {
+    if (!moveObj) return null;
+    const value = Number(moveObj.engineMateIn ?? moveObj.mateIn);
+    return Number.isFinite(value) && value !== 0 ? value : null;
+  }
+
+  function isLosingMateMove(moveObj) {
+    const mateIn = getStructuredMateIn(moveObj);
+    return Boolean(moveObj && (moveObj.isLosingMate || moveObj.blundersMate || (mateIn !== null && mateIn < 0)));
+  }
+
+  function getComparableMoveScoreCp(moveObj) {
+    if (!moveObj) return null;
+    const mateIn = getStructuredMateIn(moveObj);
+    if (mateIn !== null) {
+      return mateIn > 0 ? 30000 - mateIn * 20 : -30000 + Math.abs(mateIn) * 20;
+    }
+    const structuredScore = Number(moveObj.trueScore ?? moveObj.pureSearchScore);
+    if (Number.isFinite(structuredScore)) return structuredScore;
+    const numericDisplayScore = Number(moveObj.evalPawns);
+    return Number.isFinite(numericDisplayScore) ? numericDisplayScore * 100 : null;
+  }
+
+  function canUseAverageAutoMove(res) {
+    if (
+      !res?.best ||
+      !res.average ||
+      res.average.uci === res.best.uci ||
+      isLosingMateMove(res.average) ||
+      res.average.causesStalemate ||
+      res.average.isRepetitionDrawRisk ||
+      res.average.underDirectAttack ||
+      res.average.ignoredHangingPiece ||
+      res.average.ruinedCastling
+    ) {
+      return false;
+    }
+    const bestScoreCp = getComparableMoveScoreCp(res.best);
+    const averageScoreCp = getComparableMoveScoreCp(res.average);
+    return Boolean(
+      Number.isFinite(bestScoreCp) &&
+      Number.isFinite(averageScoreCp) &&
+      bestScoreCp >= averageScoreCp &&
+      Math.abs(bestScoreCp - averageScoreCp) <= 40
+    );
   }
 
   function chooseAutoMoveOnce(res) {
     if (!res || !res.best) return null;
+    if (engineMaxMode) return { move: res.best, typeLabel: "♚ ENGINE MAX / PRIMARY SF", choiceKind: "engine-max" };
+    if (currentElo >= 2000) {
+      return { move: res.best, typeLabel: currentElo >= 3000 ? "3000 ELO / ЛУЧШИЙ" : "2000+ ELO / ЛУЧШИЙ", choiceKind: "best" };
+    }
+    if (getStructuredMateIn(res.best) !== null) {
+      return { move: res.best, typeLabel: "ФОРСИРОВАННЫЙ МАТ / ЛУЧШИЙ", choiceKind: "best" };
+    }
 
     if (protectCriticalMoves || bulletTurboMode || res.isDangerPosition) {
       if (
@@ -2904,33 +3240,18 @@
         const label = res.isDangerPosition
           ? "🛡 ЗАЩИТА ОТ МАТА"
           : (res.best.fromSyzygy ? "🔮 SYZYGY БОГ" : (bulletTurboMode ? "🔥 РЕЗНЯ 1+0" : "ЛУЧШИЙ"));
-        return { move: res.best, typeLabel: label };
+        return { move: res.best, typeLabel: label, choiceKind: "best" };
       }
     }
 
-    if (
-      useAverageMoveSometimes &&
-      res.average &&
-      res.average.uci !== res.best.uci &&
-      !res.average.blundersMate &&
-      !res.average.causesStalemate &&
-      !res.average.isRepetitionDrawRisk &&
-      !res.average.underDirectAttack &&
-      !res.average.ignoredHangingPiece &&
-      !res.average.ruinedCastling
-    ) {
-      const bestEval = parseFloat(res.best.evalPawns) || 0;
-      const avgEval = parseFloat(res.average.evalPawns) || 0;
-      const evalDiff = Math.abs(bestEval - avgEval);
-      if (bestEval >= avgEval && evalDiff <= 0.40) {
-        const roll = Math.random() * 100;
-        if (roll < averageMoveFrequency) {
-          return { move: res.average, typeLabel: "СРЕДНИЙ (2-Я ЛИНИЯ)" };
-        }
+    if (useAverageMoveSometimes && canUseAverageAutoMove(res)) {
+      const roll = Math.random() * 100;
+      if (roll < averageMoveFrequency) {
+        return { move: res.average, typeLabel: "СРЕДНИЙ (2-Я ЛИНИЯ)", choiceKind: "average" };
       }
     }
 
-    return { move: res.best, typeLabel: "ЛУЧШИЙ" };
+    return { move: res.best, typeLabel: "ЛУЧШИЙ", choiceKind: "best" };
   }
 
   function computeLegitHumanDelayMs(moveObj, mySecs, isDanger) {
@@ -2966,18 +3287,41 @@
     return Math.round(minMs + blend * (maxMs - minMs));
   }
 
+  function hasFinalAutoAnalysis(res) {
+    return Boolean(res && (res.engineMeta || res.syzygyActive || res.best?.fromSyzygy));
+  }
+
   function scheduleAutoMoveIfNeeded() {
-    if (!autoMoveEnabled || extensionInvalidated) return;
+    if (!autoMoveEnabled || extensionInvalidated || document.hidden) return;
+    if (window.__CC_ANDROID_SETTINGS_OPEN__ === true) {
+      setAutoStatusText("Автоход на паузе: открыты настройки", "#ffbe0b");
+      return;
+    }
     if (isExecutingMove || Date.now() < moveCooldownUntil) return;
     if (autoMoveTimer) return;
 
     const state = captureBoardState(false);
     if (!state || state.animating || state.actualTurn !== state.myColor) return;
-    if (!cachedMoves || !cachedMoves.best || cachedMoves.boardKey !== state.boardKey) return;
+    if (safeAntiBanGuard && isRatedGameAgainstHuman()) {
+      setAutoStatusText("Автоход заблокирован: рейтинговая партия против человека. Сходите вручную.", "#ffbe0b");
+      return;
+    }
+    if (boardDirty || state.positionKey !== currentPositionKey || !isCachedAnalysisCurrent(state) || cachedMoves.boardKey !== state.boardKey) return;
+    if (cachedMoves.analysisIncomplete && !hasFinalAutoAnalysis(cachedMoves)) {
+      setAutoStatusText("Автоход на паузе: ждём завершённый анализ Stockfish.", "#ffbe0b");
+      return;
+    }
+    if ((engineMaxMode || currentElo >= 2000) && !hasFinalAutoAnalysis(cachedMoves)) {
+      setAutoStatusText(
+        engineMaxMode ? "♚ ENGINE MAX: ЖДЕМ PRIMARY STOCKFISH..." : "🧠 2000+ ELO: ЖДЕМ ФИНАЛЬНЫЙ STOCKFISH...",
+        "#64cdb9"
+      );
+      return;
+    }
 
     if (currentTurnDecision.boardKey !== state.boardKey || !currentTurnDecision.decided) {
       const triggerRoll = Math.random() * 100;
-      if (!bulletTurboMode && autoMoveTriggerRate < 100 && triggerRoll > autoMoveTriggerRate) {
+      if (currentElo < 2000 && !engineMaxMode && !bulletTurboMode && autoMoveTriggerRate < 100 && triggerRoll > autoMoveTriggerRate) {
         currentTurnDecision = {
           boardKey: state.boardKey,
           decided: true,
@@ -3001,7 +3345,10 @@
       let totalDelay = 35;
       let modeLabel = picked.typeLabel;
 
-      if (isBulletPanic) {
+      if (engineMaxMode) {
+        totalDelay = 75 + Math.floor(Math.random() * 31);
+        modeLabel = "♚ ENGINE MAX";
+      } else if (isBulletPanic) {
         totalDelay = 35 + Math.floor(Math.random() * 18);
         modeLabel = "🔥 ТУРБО 1+0";
       } else if (workMode === "legit" || legitAutoTiming) {
@@ -3015,10 +3362,13 @@
 
       currentTurnDecision = {
         boardKey: state.boardKey,
+        sessionId: analysisSessionId,
+        positionId,
         decided: true,
         skip: false,
         move: picked.move,
         typeLabel: modeLabel,
+        choiceKind: picked.choiceKind || "policy",
         totalDelay,
         attempts: 0
       };
@@ -3039,19 +3389,21 @@
     );
 
     const expectedBoardKey = state.boardKey;
+    const expectedPositionId = positionId;
 
     autoMoveTimer = setTimeout(() => {
       autoMoveTimer = null;
-      if (!autoMoveEnabled || extensionInvalidated) return;
+      if (!autoMoveEnabled || extensionInvalidated || document.hidden || window.__CC_ANDROID_SETTINGS_OPEN__ === true || boardDirty || expectedPositionId !== positionId) return;
 
       const fresh = captureBoardState(false);
       if (!fresh || fresh.animating) {
         scheduleAutoMoveIfNeeded();
         return;
       }
-      if (fresh.actualTurn !== fresh.myColor || fresh.boardKey !== expectedBoardKey) {
+      if (fresh.actualTurn !== fresh.myColor || fresh.boardKey !== expectedBoardKey || fresh.positionKey !== currentPositionKey) {
         return;
       }
+      if (cachedMoves.analysisIncomplete && !hasFinalAutoAnalysis(cachedMoves)) return;
 
       currentTurnDecision.attempts++;
       const moveNow = currentTurnDecision.move || cachedMoves.best;
@@ -3077,8 +3429,18 @@
   }
 
   function executeVisualPremoveOnBoard(premoveObj, state) {
-    if (!premoveObj || !premoveObj.from || !premoveObj.to || !state || !state.grid) return;
-    if (safeAntiBanGuard && isRatedGameAgainstHuman()) return;
+    if (!premoveObj || !/^[a-h][1-8]$/.test(premoveObj.from || "") || !/^[a-h][1-8]$/.test(premoveObj.to || "") ||
+        premoveObj.from === premoveObj.to || !state || !state.grid || document.hidden || window.__CC_ANDROID_SETTINGS_OPEN__ === true) return;
+    if (safeAntiBanGuard && isRatedGameAgainstHuman()) {
+      setAutoStatusText("Премув заблокирован: рейтинговая партия против человека.", "#ffbe0b");
+      return;
+    }
+
+    const premovePromo = String(premoveObj.promo || premoveObj.uci?.[4] || "").toLowerCase();
+    if (premovePromo && premovePromo !== "q") {
+      setAutoStatusText(`Премув отменён: безопасный выбор превращения ${premovePromo.toUpperCase()} недоступен`, "#ff2a85");
+      return;
+    }
 
     if (!hasMyPieceOnSquare(state.grid, state.myColor, premoveObj.from)) {
       return;
@@ -3090,6 +3452,37 @@
     if (cgBoard.querySelector("square.current-premove")) {
       return;
     }
+
+    if (window.__CC_ANDROID_RUNTIME__) {
+      executeAndroidMoveOnBoard(premoveObj, state, false, null, true);
+      return;
+    }
+
+    for (const timerId of premoveStepTimers) clearTimeout(timerId);
+    premoveStepTimers.clear();
+    const expectedPositionId = state.positionId;
+    const expectedPositionKey = state.positionKey;
+    const expectedBoardKey = state.boardKey;
+    const isPremoveStillCurrent = () => {
+      if (
+        extensionInvalidated ||
+        boardDirty ||
+        positionId !== expectedPositionId ||
+        currentPositionKey !== expectedPositionKey ||
+        !cgBoard.isConnected
+      ) {
+        return false;
+      }
+      const fresh = captureBoardState(true);
+      return Boolean(
+        fresh &&
+        !fresh.animating &&
+        fresh.positionId === expectedPositionId &&
+        fresh.positionKey === expectedPositionKey &&
+        fresh.boardKey === expectedBoardKey &&
+        fresh.actualTurn !== fresh.myColor
+      );
+    };
 
     clearStaleSelectedSquare(cgBoard);
 
@@ -3130,18 +3523,22 @@
 
     fireDragMouse(cgBoard, "mousedown", p1.x, p1.y, 1);
 
-    setTimeout(() => {
+    schedulePremoveStep(() => {
+      if (!isPremoveStillCurrent()) return;
       fireDragMouse(document, "mousemove", Math.round((p1.x + p2.x) / 2), Math.round((p1.y + p2.y) / 2), 1);
       fireDragMouse(document, "mousemove", p2.x, p2.y, 1);
 
-      setTimeout(() => {
+      schedulePremoveStep(() => {
+        if (!isPremoveStillCurrent()) return;
         fireDragMouse(document, "mouseup", p2.x, p2.y, 0);
         fireDragMouse(cgBoard, "mouseup", p2.x, p2.y, 0);
 
-        setTimeout(() => {
+        schedulePremoveStep(() => {
+          if (!isPremoveStillCurrent()) return;
           if (!cgBoard.querySelector("square.current-premove")) {
             fireDragMouse(cgBoard, "mousedown", p2.x, p2.y, 1);
-            setTimeout(() => {
+            schedulePremoveStep(() => {
+              if (!isPremoveStillCurrent()) return;
               fireDragMouse(cgBoard, "mouseup", p2.x, p2.y, 0);
             }, 15);
           }
@@ -3151,15 +3548,164 @@
     }, 18);
   }
 
+  async function executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece, isPremove = false) {
+    if (isExecutingMove || document.hidden || extensionInvalidated || (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true)) return;
+    const runtime = window.__CC_ANDROID_RUNTIME__;
+    const failureKey = `${location.href}|${state.positionId}|${state.positionKey}|${isPremove ? "premove" : "move"}`;
+    if (nativeMoveFailureKey !== failureKey) { nativeMoveFailureKey = failureKey; nativeMoveFailures = 0; }
+    if (!manualClick && nativeMoveFailures >= 3) {
+      setAutoStatusText("Нативный ввод не подтверждён после 3 попыток. Сходите вручную.", "#ffbe0b");
+      return;
+    }
+    const attempt = ++nativeMoveFailures;
+    const action = { controller: new AbortController(), failureKey, attempt };
+    activeNativeMove = action;
+    const pageUrl = location.href;
+    const previousMove = lastOurExecutedMove;
+    let boardEl = null;
+    let layoutFrame = null;
+    let completed = false;
+    const fromCol = FILES.indexOf(moveObj.from[0]);
+    const fromRow = 8 - Number(moveObj.from[1]);
+    const toCol = FILES.indexOf(moveObj.to[0]);
+    const toRow = 8 - Number(moveObj.to[1]);
+    const movingPiece = state.grid[fromRow]?.[fromCol];
+    const expectedPiece = promoPiece ? (state.myColor === "w" ? promoPiece.toUpperCase() : promoPiece) : movingPiece;
+    const wait = ms => new Promise((resolve, reject) => {
+      const signal = action.controller.signal;
+      if (signal.aborted) { reject(new Error("Ввод отменён")); return; }
+      const onAbort = () => { clearTimeout(timer); reject(new Error("Ввод отменён")); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const requireVisibleContext = () => {
+      if (activeNativeMove !== action || action.controller.signal.aborted || extensionInvalidated || document.hidden ||
+          location.href !== pageUrl || !boardEl?.isConnected || runtime.disposed ||
+          (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true) ||
+          (!manualClick && !(isPremove ? premoveEnabled || bulletTurboMode : autoMoveEnabled))) throw new Error("Контекст хода изменился");
+      if ((document.querySelector(".main-board cg-board") || document.querySelector("cg-board")) !== boardEl) throw new Error("Доска была заменена");
+      if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) throw new Error("Рейтинговая партия против человека: автоход заблокирован");
+    };
+    const requireCurrentPosition = () => {
+      requireVisibleContext();
+      // Selecting a square may dirty the DOM without changing the chess position.
+      const fresh = captureBoardState(true);
+      if (!fresh || fresh.animating || fresh.positionKey !== state.positionKey || fresh.boardKey !== state.boardKey ||
+          fresh.myColor !== state.myColor || fresh.isBlackOrientation !== state.isBlackOrientation ||
+          (isPremove ? fresh.actualTurn === fresh.myColor : fresh.actualTurn !== fresh.myColor) ||
+          !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) throw new Error("Позиция или очередь хода изменилась");
+      return fresh;
+    };
+    const pointFor = square => {
+      const rect = boardEl.getBoundingClientRect();
+      if (rect.width < 50 || rect.height < 50) throw new Error("Доска недоступна");
+      const file = FILES.indexOf(square[0]);
+      const rank = Number(square[1]) - 1;
+      const col = state.isBlackOrientation ? 7 - file : file;
+      const row = state.isBlackOrientation ? rank : 7 - rank;
+      return { x: rect.left + (col + 0.5) * rect.width / 8, y: rect.top + (row + 0.5) * rect.height / 8 };
+    };
+    const sendGesture = async (actionType, points, target = boardEl) => {
+      requireVisibleContext();
+      for (const point of points) {
+        const hit = document.elementFromPoint(point.x, point.y);
+        if (!hit || (hit !== target && !target.contains(hit))) throw new Error("Доска перекрыта меню или другим элементом");
+      }
+      const result = await runtime.nativeRequest("input.gesture", { action: actionType, points, durationMs: actionType === "tap" ? 80 : 180 });
+      if (result?.ok !== true || result?.dispatched !== true) throw new Error("Android не подтвердил отправку касания");
+    };
+    const moveConfirmed = fresh => Boolean(fresh && fresh.boardKey !== state.boardKey &&
+      fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === expectedPiece);
+    setMoveExecutionState(true, isPremove ? "premove-start" : "move-start");
+    setAutoStatusText(`Нативный ввод: ${moveObj.from} -> ${moveObj.to}...`, "#00f5d4");
+    try {
+      const layout = new Promise(resolve => {
+        layoutFrame = requestAnimationFrame(() => { layoutFrame = requestAnimationFrame(resolve); });
+      });
+      await Promise.race([layout, wait(400).then(() => { throw new Error("Меню не успело освободить доску"); })]);
+      boardEl = document.querySelector(".main-board cg-board") || document.querySelector("cg-board");
+      requireCurrentPosition();
+      const selected = boardEl.querySelector("square.selected:not(.current-premove)");
+      if (selected) {
+        const rect = selected.getBoundingClientRect();
+        await sendGesture("tap", [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }]);
+        requireCurrentPosition();
+      }
+      const p1 = pointFor(moveObj.from);
+      const p2 = pointFor(moveObj.to);
+      if (isPremove || autoClickMethod === "drag" || attempt > 1) {
+        await sendGesture("drag", [p1, { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, p2]);
+      } else {
+        await sendGesture("tap", [p1]);
+        requireCurrentPosition();
+        await sendGesture("tap", [pointFor(moveObj.to)]);
+      }
+      if (promoPiece) {
+        const chooserDeadline = Date.now() + 900;
+        while (Date.now() < chooserDeadline) {
+          requireVisibleContext();
+          const fresh = captureBoardState(true);
+          if (moveConfirmed(fresh)) break;
+          if (fresh && fresh.boardKey !== state.boardKey &&
+              !(fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === movingPiece)) {
+            throw new Error("Позиция изменилась до выбора превращения");
+          }
+          const promotionClass = { q: "queen", r: "rook", b: "bishop", n: "knight" }[promoPiece];
+          const root = document.querySelector("#promotion-choice, .promotion-choice");
+          const node = root?.querySelector(`piece.${promotionClass}, .piece.${promotionClass}`);
+          const rect = node?.getBoundingClientRect();
+          if (rect?.width > 0 && rect.height > 0) {
+            await sendGesture("tap", [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }], node);
+            break;
+          }
+          await wait(60);
+        }
+      }
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        requireVisibleContext();
+        const fresh = captureBoardState(true);
+        if (isPremove ? fresh?.positionKey === state.positionKey && boardEl.querySelector("square.current-premove") :
+            moveConfirmed(fresh) && !boardEl.querySelector("piece.anim, piece.dragging")) {
+          completed = true;
+          break;
+        }
+        if (isPremove && fresh?.positionKey !== state.positionKey) throw new Error("Позиция изменилась до подтверждения премува");
+        await wait(75);
+      }
+      if (!completed) throw new Error(promoPiece ? "Превращение не подтверждено на доске" : "Касания отправлены, но ход на доске не подтверждён");
+      if (!isPremove) {
+        lastOurExecutedMove = moveObj;
+        preparedLookahead = (premoveEnabled || bulletTurboMode) && moveObj.nextPremove?.canPremove ? moveObj.nextPremove : null;
+      }
+      setAutoStatusText(`${isPremove ? "Премув установлен" : "Ход подтверждён"}: ${moveObj.from} -> ${moveObj.to}`, "#00f5d4");
+    } catch (error) {
+      if (activeNativeMove === action) {
+        lastOurExecutedMove = previousMove;
+        setAutoStatusText(`Нативный ввод: ${error.message || "ошибка"}${error.code ? ` [${error.code}]` : ""}`, "#ffbe0b");
+      }
+    } finally {
+      if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+      action.controller.abort();
+      if (activeNativeMove === action) {
+        activeNativeMove = null;
+        moveCooldownUntil = Date.now() + (completed ? 180 : 350);
+        setMoveExecutionState(false, completed ? "confirmed" : "failed");
+        triggerDebouncedCycle();
+      }
+    }
+  }
+
   function executeMoveOnBoard(moveObj, state, manualClick = false, isPremoveAction = false) {
+    if (!state || !state.grid || boardDirty || state.positionId !== positionId || state.positionKey !== currentPositionKey) return;
     if (isPremoveAction) {
       executeVisualPremoveOnBoard(moveObj, state);
       return;
     }
-    if (!moveObj || !moveObj.from || !moveObj.to || !state || !state.grid) return;
+    if (!moveObj || !/^[a-h][1-8]$/.test(moveObj.from || "") || !/^[a-h][1-8]$/.test(moveObj.to || "") || moveObj.from === moveObj.to) return;
 
     if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Блок Анти-Бана в Rated игре!", "#ff2a85");
+      setAutoStatusText("Автоход заблокирован: рейтинговая партия против человека. Сходите вручную.", "#ffbe0b");
       return;
     }
 
@@ -3170,8 +3716,26 @@
       return;
     }
 
-    const isPromotion = moveObj.piece === "p" && (toSq[1] === "8" || toSq[1] === "1");
-    const promoPiece = isPromotion ? (moveObj.promo || "q") : null;
+    const fromCol = FILES.indexOf(fromSq[0]);
+    const fromRow = 8 - Number(fromSq[1]);
+    const movingPiece = state.grid[fromRow]?.[fromCol]?.toLowerCase();
+    const isPromotion = movingPiece === "p" && (toSq[1] === "8" || toSq[1] === "1");
+    const promoPiece = isPromotion ? String(moveObj.promo || moveObj.uci?.[4] || "q").toLowerCase() : null;
+    if (isPromotion && !["q", "r", "b", "n"].includes(promoPiece)) {
+      setAutoStatusText(`Автоход отменён: неизвестное превращение «${promoPiece}»`, "#ff2a85");
+      return;
+    }
+
+    if (window.__CC_ANDROID_RUNTIME__) {
+      const uci = `${fromSq}${toSq}${promoPiece || ""}`;
+      if (state.actualTurn !== state.myColor ||
+          (Array.isArray(cachedMoves.legalUcis) && cachedMoves.legalUcis.length && !cachedMoves.legalUcis.includes(uci))) {
+        setAutoStatusText("Ход отменён: очередь хода или список легальных ходов изменились.", "#ffbe0b");
+        return;
+      }
+      executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece);
+      return;
+    }
 
     lastOurExecutedMove = moveObj;
     if ((premoveEnabled || bulletTurboMode) && moveObj.nextPremove && moveObj.nextPremove.canPremove) {
@@ -3180,42 +3744,26 @@
       preparedLookahead = null;
     }
 
-    isExecutingMove = true;
+    setMoveExecutionState(true, "move-start");
     moveCooldownUntil = Date.now() + (bulletTurboMode ? 180 : 320);
-    const beforeKey = state.boardKey;
+    const actionPositionId = positionId;
 
     setAutoStatusText(`Отправка хода: ${fromSq} → ${toSq}...`, "#00f5d4");
 
-    if (autoClickMethod === "hybrid") {
-      window.dispatchEvent(
-        new CustomEvent(stealthChannelName, {
-          detail: JSON.stringify({
-            from: fromSq,
-            to: toSq,
-            promo: promoPiece
-          })
-        })
-      );
-    }
-
     setTimeout(() => {
-      const checkAfterWs = captureBoardState(true);
-      if (checkAfterWs && (checkAfterWs.boardKey !== beforeKey || checkAfterWs.actualTurn !== state.myColor)) {
-        isExecutingMove = false;
-        setAutoStatusText(`Сделан ход (WS): ${fromSq} → ${toSq}`, "#00f5d4");
-        triggerDebouncedCycle();
+      if (positionId !== actionPositionId) {
+        setMoveExecutionState(false, "position-changed");
         return;
       }
-
       const cgBoard = document.querySelector(".main-board cg-board") || document.querySelector("cg-board");
       if (!cgBoard) {
-        isExecutingMove = false;
+        setMoveExecutionState(false, "board-unavailable");
         return;
       }
 
       const r = cgBoard.getBoundingClientRect();
       if (r.width < 50) {
-        isExecutingMove = false;
+        setMoveExecutionState(false, "board-unavailable");
         return;
       }
 
@@ -3234,16 +3782,24 @@
       const p1 = sqToClientCoords(fromSq);
       const p2 = sqToClientCoords(toSq);
 
-      performCleanDomMove(cgBoard, p1, p2, promoPiece, () => {
-        isExecutingMove = false;
+      performCleanDomMove(cgBoard, p1, p2, promoPiece, actionPositionId, (completed = true) => {
+        setMoveExecutionState(false, completed ? "dispatched" : "failed");
+        if (!completed) {
+          setAutoStatusText(
+            promoPiece ? `Автоход отменён: не удалось безопасно выбрать превращение ${promoPiece.toUpperCase()}` : "Ход отменён: позиция уже изменилась",
+            "#d9ad58"
+          );
+          return;
+        }
         setAutoStatusText(`Сделан ход: ${fromSq} → ${toSq}`, "#00f5d4");
         triggerDebouncedCycle();
       });
-    }, autoClickMethod === "hybrid" ? 95 : 10);
+    }, 10);
   }
 
-  function performCleanDomMove(cgBoard, p1, p2, promoPiece, onDone) {
+  function performCleanDomMove(cgBoard, p1, p2, promoPiece, expectedPositionId, onDone) {
     const fireMouse = (target, type, x, y, buttons) => {
+      if (positionId !== expectedPositionId || !cgBoard.isConnected) return;
       target.dispatchEvent(
         new MouseEvent(type, {
           bubbles: true,
@@ -3260,16 +3816,54 @@
       );
     };
 
+    const finishPromotionChoice = (attempt = 0) => {
+      if (positionId !== expectedPositionId || !cgBoard.isConnected) {
+        if (onDone) onDone(false);
+        return;
+      }
+      const promotionClass = { q: "queen", r: "rook", b: "bishop", n: "knight" }[promoPiece];
+      if (!promotionClass) {
+        if (onDone) onDone(false);
+        return;
+      }
+      const promotionRoot = document.querySelector("#promotion-choice, .promotion-choice");
+      const promoNode = promotionRoot?.querySelector(`piece.${promotionClass}, .piece.${promotionClass}`);
+      if (!promoNode || promoNode.getBoundingClientRect().width === 0) {
+        if (attempt < 6) {
+          setTimeout(() => finishPromotionChoice(attempt + 1), 40);
+        } else if (onDone) {
+          onDone(false);
+        }
+        return;
+      }
+      const pr = promoNode.getBoundingClientRect();
+      const x = pr.left + pr.width / 2;
+      const y = pr.top + pr.height / 2;
+      fireMouse(promoNode, "mousedown", x, y, 1);
+      fireMouse(promoNode, "mouseup", x, y, 0);
+      promoNode.click();
+      if (onDone) onDone(true);
+    };
+
     fireMouse(cgBoard, "mousedown", p1.x, p1.y, 1);
 
     setTimeout(() => {
+      if (positionId !== expectedPositionId || !cgBoard.isConnected) {
+        if (onDone) onDone(false);
+        return;
+      }
       if (autoClickMethod === "drag") {
         fireMouse(document, "mousemove", Math.round((p1.x + p2.x) / 2), Math.round((p1.y + p2.y) / 2), 1);
         fireMouse(document, "mousemove", p2.x, p2.y, 1);
         setTimeout(() => {
+          if (positionId !== expectedPositionId || !cgBoard.isConnected) {
+            if (onDone) onDone(false);
+            return;
+          }
           fireMouse(document, "mouseup", p2.x, p2.y, 0);
           fireMouse(cgBoard, "mouseup", p2.x, p2.y, 0);
-          if (onDone) onDone();
+          if (promoPiece) finishPromotionChoice();
+          else if (onDone) onDone();
         }, 25);
       } else {
         fireMouse(cgBoard, "mouseup", p1.x, p1.y, 0);
@@ -3279,21 +3873,8 @@
             fireMouse(cgBoard, "mouseup", p2.x, p2.y, 0);
             fireMouse(document, "mouseup", p2.x, p2.y, 0);
 
-            if (promoPiece) {
-              setTimeout(() => {
-                const targetClass = promoPiece === "n" ? "piece.knight" : "piece.queen";
-                const promoNode =
-                  document.querySelector(`#promotion-choice ${targetClass}`) ||
-                  document.querySelector("#promotion-choice square");
-                if (promoNode) {
-                  const pr = promoNode.getBoundingClientRect();
-                  fireMouse(promoNode, "mousedown", pr.left + pr.width / 2, pr.top + pr.height / 2, 1);
-                  fireMouse(promoNode, "mouseup", pr.left + pr.width / 2, pr.top + pr.height / 2, 0);
-                  promoNode.click();
-                }
-              }, 60);
-            }
-            if (onDone) onDone();
+            if (promoPiece) setTimeout(() => finishPromotionChoice(), 40);
+            else if (onDone) onDone();
           }, 20);
         }, 25);
       }
@@ -3301,9 +3882,6 @@
   }
 
   function detectBlackOrientation(cgBoard, boardRect) {
-    if (forcedMyColor === "b") return true;
-    if (forcedMyColor === "w") return false;
-
     const wrap = cgBoard.closest(".cg-wrap");
     if (wrap) {
       if (wrap.classList.contains("orientation-black")) return true;
@@ -3363,20 +3941,21 @@
     if (document.querySelector(".rclock-bottom.rclock-turn, .rclock-bottom.running")) return myColor;
     if (document.querySelector(".rclock-top.rclock-turn, .rclock-top.running")) return enemyColor;
 
+    const observedPly = getObservedPlyIndex();
+    if (observedPly !== null) return observedPly % 2 === 0 ? "w" : "b";
+
+    return "w";
+  }
+
+  function getObservedPlyIndex() {
     const moveNodes = Array.from(document.querySelectorAll("l4x > kwdb, rm6 > kwdb, .tview2 > move")).filter(
       (el) => !el.closest("interrupt")
     );
-    if (moveNodes.length > 0) {
-      const activeIdx = moveNodes.findIndex(
-        (el) => el.classList.contains("a1t") || el.classList.contains("active")
-      );
-      if (activeIdx !== -1) {
-        return (activeIdx + 1) % 2 === 0 ? "w" : "b";
-      }
-      return moveNodes.length % 2 === 0 ? "w" : "b";
-    }
-
-    return "w";
+    if (moveNodes.length === 0) return null;
+    const activeIdx = moveNodes.findIndex(
+      (el) => el.classList.contains("a1t") || el.classList.contains("active")
+    );
+    return activeIdx === -1 ? moveNodes.length : activeIdx + 1;
   }
 
   function detectRealMoveBetweenGrids(prevGrid, currGrid) {
@@ -3410,20 +3989,95 @@
 
       if (fromSq && toSq) {
         const promo = (oldPiece === "p" && newPiece && newPiece !== "p") ? newPiece : "";
+        const toCol = FILES.indexOf(toSq[0]);
+        const toRow = 8 - parseInt(toSq[1], 10);
+        const capturedOnTarget = prevGrid[toRow]?.[toCol];
+        const isCapture = Boolean(capturedOnTarget && !isCol(capturedOnTarget)) || (oldPiece === "p" && fromSq[0] !== toSq[0]);
         return {
           uci: `${fromSq}${toSq}${promo}`,
           from: fromSq,
           to: toSq,
           piece: oldPiece || "p",
-          color
+          color,
+          isCapture
         };
       }
     }
     return null;
   }
 
-  function updateCastlingEpAndRealHistory(grid, boardPart, myColor) {
+  function isPlausibleDetectedMove(move, actualTurn, prevGrid) {
+    if (!move || !/^[a-h][1-8]$/.test(move.from || "") || !/^[a-h][1-8]$/.test(move.to || "")) return false;
+    if (actualTurn === "w" || actualTurn === "b") {
+      const expectedMovedColor = actualTurn === "w" ? "b" : "w";
+      if (move.color !== expectedMovedColor) return false;
+    }
+
+    const fromFile = FILES.indexOf(move.from[0]);
+    const toFile = FILES.indexOf(move.to[0]);
+    const fromRank = Number(move.from[1]);
+    const toRank = Number(move.to[1]);
+    const fileDelta = toFile - fromFile;
+    const rankDelta = toRank - fromRank;
+    const absFile = Math.abs(fileDelta);
+    const absRank = Math.abs(rankDelta);
+    const piece = move.piece || "p";
+
+    if (piece === "p") {
+      const forward = move.color === "w" ? 1 : -1;
+      const startRank = move.color === "w" ? 2 : 7;
+      if (rankDelta === forward) {
+        return (absFile === 0 && !move.isCapture) || (absFile === 1 && move.isCapture);
+      }
+      if (rankDelta === forward * 2 && fileDelta === 0 && fromRank === startRank && !move.isCapture) {
+        const middleRow = 8 - (fromRank + forward);
+        return !prevGrid?.[middleRow]?.[fromFile];
+      }
+      return false;
+    }
+    if (piece === "n") return (absFile === 1 && absRank === 2) || (absFile === 2 && absRank === 1);
+    if (piece === "k") return (absFile <= 1 && absRank <= 1 && absFile + absRank > 0) || (absFile === 2 && absRank === 0);
+
+    const isDiagonal = absFile === absRank && absFile > 0;
+    const isStraight = (fileDelta === 0) !== (rankDelta === 0);
+    if ((piece === "b" && !isDiagonal) || (piece === "r" && !isStraight) || (piece === "q" && !isDiagonal && !isStraight)) {
+      return false;
+    }
+
+    const fileStep = Math.sign(fileDelta);
+    const rankStep = Math.sign(rankDelta);
+    let file = fromFile + fileStep;
+    let rank = fromRank + rankStep;
+    while (file !== toFile || rank !== toRank) {
+      const row = 8 - rank;
+      if (prevGrid?.[row]?.[file]) return false;
+      file += fileStep;
+      rank += rankStep;
+    }
+    return true;
+  }
+
+  function disableStartposHistory(grid, boardPart, observedPly = null) {
+    gameStartedFromInitial = false;
+    uciHistoryList = [];
+    recentPositionHistory = [];
+    sessionMoveHistory = [];
+    castlingRights = { K: false, Q: false, k: false, q: false };
+    currentEpSquare = "-";
+    halfmoveClock = 0;
+    fullmoveNumber = 1;
+    lastRealEnemyMove = null;
+    lastOurExecutedMove = null;
+    preparedLookahead = null;
+    openingBookDeviated = true;
+    lastObservedPly = Number.isInteger(observedPly) ? observedPly : null;
+    prevGridState = grid.map(row => row.slice());
+    prevBoardPartForHistory = boardPart;
+  }
+
+  function updateCastlingEpAndRealHistory(grid, boardPart, myColor, actualTurn) {
     const startFenBoard = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+    const observedPly = getObservedPlyIndex();
     const isNewUrl = location.pathname !== lastPathname;
     const isFreshStartBoard =
       boardPart === startFenBoard &&
@@ -3431,27 +4085,35 @@
       prevBoardPartForHistory !== startFenBoard;
 
     if (isNewUrl || isFreshStartBoard) {
+      analysisRequestId++;
+      activeEngineBoardKey = "";
+      StockfishWasmEngine.cancel?.();
       lastPathname = location.pathname;
       castlingRights = {
-        K: grid[7][4] === "K" && grid[7][7] === "R",
-        Q: grid[7][4] === "K" && grid[7][0] === "R",
-        k: grid[0][4] === "k" && grid[0][7] === "r",
-        q: grid[0][4] === "k" && grid[0][0] === "r"
+        K: boardPart === startFenBoard,
+        Q: boardPart === startFenBoard,
+        k: boardPart === startFenBoard,
+        q: boardPart === startFenBoard
       };
       prevGridState = grid.map(r => r.slice());
       prevBoardPartForHistory = boardPart;
       currentEpSquare = "-";
+      halfmoveClock = 0;
+      fullmoveNumber = 1;
       lastRealEnemyMove = null;
       lastOurExecutedMove = null;
       preparedLookahead = null;
       sessionMoveHistory = [];
       uciHistoryList = [];
-      recentPositionHistory = [boardPart];
+      recentPositionHistory = boardPart === startFenBoard ? [`${boardPart} w KQkq -`] : [];
       gameStartedFromInitial = (boardPart === startFenBoard);
+      lastObservedPly = boardPart === startFenBoard ? 0 : observedPly;
       evalGraphHistory = [];
       lastRecordedGraphBoardKey = "";
       renderLiveEvalGraph();
-      openingBookDeviated = false;
+      lastTelemetryData = null;
+      updateEvalMoodAndEngineBadge(null, null);
+      openingBookDeviated = boardPart !== startFenBoard;
       lastPremoveSentBoardKey = "";
       gameResultRecorded = false;
       peerExtensionDetected = false;
@@ -3464,17 +4126,20 @@
 
     if (!prevGridState) {
       castlingRights = {
-        K: grid[7][4] === "K" && grid[7][7] === "R",
-        Q: grid[7][4] === "K" && grid[7][0] === "R",
-        k: grid[0][4] === "k" && grid[0][7] === "r",
-        q: grid[0][4] === "k" && grid[0][0] === "r"
+        K: boardPart === startFenBoard,
+        Q: boardPart === startFenBoard,
+        k: boardPart === startFenBoard,
+        q: boardPart === startFenBoard
       };
       prevGridState = grid.map(r => r.slice());
       prevBoardPartForHistory = boardPart;
       currentEpSquare = "-";
-      recentPositionHistory = [boardPart];
+      halfmoveClock = 0;
+      fullmoveNumber = 1;
+      recentPositionHistory = boardPart === startFenBoard ? [`${boardPart} w KQkq -`] : [];
       gameStartedFromInitial = (boardPart === startFenBoard);
-      openingBookDeviated = false;
+      lastObservedPly = boardPart === startFenBoard ? 0 : observedPly;
+      openingBookDeviated = boardPart !== startFenBoard;
       return;
     }
 
@@ -3496,7 +4161,29 @@
       }
     }
 
+    const observedHistoryJump = diffCount > 0 && Number.isInteger(lastObservedPly) && Number.isInteger(observedPly) && (
+      observedPly < lastObservedPly || observedPly > lastObservedPly + 1
+    );
+    if (observedHistoryJump) {
+      disableStartposHistory(grid, boardPart, observedPly);
+      return;
+    }
+
     if (diffCount > 0 && diffCount <= 4) {
+      const realMove = detectRealMoveBetweenGrids(prevGridState, grid);
+      const isSingleCastling = Boolean(realMove?.piece === "k" && Math.abs(FILES.indexOf(realMove.from[0]) - FILES.indexOf(realMove.to[0])) === 2);
+      const isSingleEnPassant = Boolean(realMove?.piece === "p" && realMove.from[0] !== realMove.to[0] && diffCount === 3);
+      if (
+        !realMove ||
+        !realMove.uci ||
+        !isPlausibleDetectedMove(realMove, actualTurn, prevGridState) ||
+        (diffCount === 4 && !isSingleCastling) ||
+        (diffCount === 3 && !isSingleEnPassant)
+      ) {
+        disableStartposHistory(grid, boardPart, observedPly);
+        return;
+      }
+
       if (grid[7][4] !== "K") { castlingRights.K = false; castlingRights.Q = false; }
       if (grid[7][7] !== "R") castlingRights.K = false;
       if (grid[7][0] !== "R") castlingRights.Q = false;
@@ -3506,17 +4193,16 @@
       if (grid[0][0] !== "r") castlingRights.q = false;
 
       currentEpSquare = epFound;
-
-      if (recentPositionHistory[recentPositionHistory.length - 1] !== boardPart) {
-        recentPositionHistory.push(boardPart);
-        if (recentPositionHistory.length > 80) {
-          recentPositionHistory.shift();
-        }
-      }
-
-      const realMove = detectRealMoveBetweenGrids(prevGridState, grid);
       if (realMove && realMove.uci) {
-        if (uciHistoryList[uciHistoryList.length - 1] !== realMove.uci) {
+        halfmoveClock = realMove.piece === "p" || realMove.isCapture ? 0 : halfmoveClock + 1;
+        if (realMove.color === "b") fullmoveNumber++;
+        const nextTurn = realMove.color === "w" ? "b" : "w";
+        const repetitionKey = `${boardPart} ${nextTurn} ${getCastlingString()} ${currentEpSquare}`;
+        if (recentPositionHistory[recentPositionHistory.length - 1] !== repetitionKey) {
+          recentPositionHistory.push(repetitionKey);
+          if (recentPositionHistory.length > 80) recentPositionHistory.shift();
+        }
+        if (gameStartedFromInitial && uciHistoryList[uciHistoryList.length - 1] !== realMove.uci) {
           uciHistoryList.push(realMove.uci);
         }
         if (realMove.color === myColor && prevBoardPartForHistory) {
@@ -3541,19 +4227,9 @@
       prevGridState = grid.map(r => r.slice());
       prevBoardPartForHistory = boardPart;
     } else if (diffCount > 4) {
-      castlingRights = {
-        K: grid[7][4] === "K" && grid[7][7] === "R",
-        Q: grid[7][4] === "K" && grid[7][0] === "R",
-        k: grid[0][4] === "k" && grid[0][7] === "r",
-        q: grid[0][4] === "k" && grid[0][0] === "r"
-      };
-      prevGridState = grid.map(r => r.slice());
-      prevBoardPartForHistory = boardPart;
-      gameStartedFromInitial = (boardPart === startFenBoard);
-      if (recentPositionHistory[recentPositionHistory.length - 1] !== boardPart) {
-        recentPositionHistory.push(boardPart);
-      }
+      disableStartposHistory(grid, boardPart, observedPly);
     }
+    if (Number.isInteger(observedPly)) lastObservedPly = observedPly;
   }
 
   function getCastlingString() {
@@ -3583,7 +4259,8 @@
     }
 
     const isBlackOrientation = detectBlackOrientation(cgBoard, boardRect);
-    const myColor = isBlackOrientation ? "b" : "w";
+    const orientationColor = isBlackOrientation ? "b" : "w";
+    const myColor = forcedMyColor === "w" || forcedMyColor === "b" ? forcedMyColor : orientationColor;
 
     const grid = Array.from({ length: 8 }, () => Array(8).fill(null));
     const pieceMap = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
@@ -3621,6 +4298,8 @@
       pieceCount++;
     });
 
+    if (!grid.some(row => row.includes("K")) || !grid.some(row => row.includes("k"))) return null;
+
     const fenRows = grid.map((r) => {
       let s = "", empty = 0;
       for (const c of r) {
@@ -3635,27 +4314,42 @@
     });
 
     const boardPart = fenRows.join("/");
-    updateCastlingEpAndRealHistory(grid, boardPart, myColor);
-
     const actualTurn = detectActualTurnOnBoard(cgBoard, boardRect, grid, isBlackOrientation, boardPart);
+    if (!allowCachedDuringAnim) updateCastlingEpAndRealHistory(grid, boardPart, myColor, actualTurn);
 
     let sideToAnalyze = actualTurn;
     if (turnMode === "w") sideToAnalyze = "w";
     else if (turnMode === "b") sideToAnalyze = "b";
 
     const castlingStr = getCastlingString();
-    return {
+    const state = {
       animating: false,
       grid,
       pieceCount,
-      fen: `${boardPart} ${sideToAnalyze} ${castlingStr} ${currentEpSquare} 0 1`,
-      boardKey: `${boardPart} ${sideToAnalyze}`,
+      fen: `${boardPart} ${sideToAnalyze} ${castlingStr} ${currentEpSquare} ${halfmoveClock} ${fullmoveNumber}`,
+      actualFen: `${boardPart} ${actualTurn} ${castlingStr} ${currentEpSquare} ${halfmoveClock} ${fullmoveNumber}`,
+      boardKey: `${boardPart} ${sideToAnalyze} ${castlingStr} ${currentEpSquare}`,
+      positionKey: `${boardPart} ${actualTurn} ${castlingStr} ${currentEpSquare}`,
+      sessionId: analysisSessionId,
+      positionId,
       boardRect,
       isBlackOrientation,
       myColor,
       actualTurn,
       sideToAnalyze
     };
+    window.__CHESSCOACH_BOARD_STATE__ = {
+      grid: grid.map(row => row.slice()),
+      fen: state.actualFen,
+      positionKey: state.positionKey,
+      positionId,
+      actualTurn,
+      myColor,
+      isBlackOrientation,
+      boardElement: cgBoard,
+      timestamp: Date.now()
+    };
+    return state;
   }
 
   function renderEvalBar(state, whiteEvalPawns) {
@@ -3687,7 +4381,11 @@
     const fill = $("chesscoach-eval-fill");
     const txt = $("chesscoach-eval-text");
 
-    if (fill) fill.style.height = `${whitePercent}%`;
+    if (fill) {
+      fill.style.height = `${whitePercent}%`;
+      fill.style.top = state.isBlackOrientation ? "0" : "auto";
+      fill.style.bottom = state.isBlackOrientation ? "auto" : "0";
+    }
     if (txt) txt.textContent = `${evalNum > 0 ? "+" : ""}${evalNum.toFixed(1)}`;
   }
 
@@ -3835,6 +4533,11 @@
   }
 
   function renderArrowsOverlay(state, res) {
+    const tokenMismatch = currentPositionKey && (boardDirty || (res.positionId !== undefined && res.positionId !== positionId) || state?.positionKey !== currentPositionKey);
+    if (!state || !res || tokenMismatch) {
+      hideArrows();
+      return;
+    }
     let svg = $("chesscoach-screen-svg");
     if (!svg) {
       svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -3844,13 +4547,23 @@
     }
 
     const showHeatmapNow = Boolean(isAltPressed || heatmapAlwaysOn);
+    const waitingForFinalNnue = Boolean(
+      engineMaxMode &&
+      useStockfishWasm &&
+      res?.best &&
+      !res.engineMeta &&
+      res.pass !== "deep" &&
+      !res.best.fromSyzygy &&
+      !res.best.isMateInOne
+    );
+    const canRenderMoveArrows = showArrows && !waitingForFinalNnue;
 
     if (turnMode === "my" && state && state.actualTurn !== state.myColor && !showHeatmapNow) {
       hideArrows();
       return;
     }
 
-    if (!showHeatmapNow && (!showArrows || !state || !state.boardRect || !res || !res.best)) {
+    if (!showHeatmapNow && (!canRenderMoveArrows || !state || !state.boardRect || !res || !res.best)) {
       svg.innerHTML = "";
       svg.style.display = "none";
       return;
@@ -3877,7 +4590,7 @@
     };
 
     const heatmapSVG = showHeatmapNow ? buildHeatmapCellsSVG(res?.heatmap || cachedMoves.heatmap, sqToXY) : "";
-    if (!res || !res.best || !showArrows || (turnMode === "my" && state.actualTurn !== state.myColor)) {
+    if (!res || !res.best || !canRenderMoveArrows || (turnMode === "my" && state.actualTurn !== state.myColor)) {
       svg.innerHTML = heatmapSVG;
       return;
     }
@@ -4282,7 +4995,7 @@
   }
 
   function checkOpponentExtensionBeacon(myColor, forceNow = false) {
-    if (peerExtensionDetected || extensionInvalidated || !isContextValid()) return;
+    if (peerExtensionDetected || peerBeaconDisabled || extensionInvalidated || !isContextValid()) return;
     const now = Date.now();
     if (!forceNow && now - lastBeaconCheckTime < 10000) return;
     lastBeaconCheckTime = now;
@@ -4301,6 +5014,11 @@
         autoMove: autoMoveEnabled
       },
       (res) => {
+        if (res?.disabled) {
+          peerBeaconDisabled = true;
+          banner.style.display = "none";
+          return;
+        }
         if (res && res.detected) {
           peerExtensionDetected = true;
           const stName = ALL_STYLE_NAMES[res.enemyStyle] || res.enemyStyle;
@@ -4342,33 +5060,58 @@
     }
   }
 
+  function normalizeEngineWdl(line, state) {
+    const raw = line?.wdl;
+    const win = Number(Array.isArray(raw) ? raw[0] : raw?.win);
+    const draw = Number(Array.isArray(raw) ? raw[1] : raw?.draw);
+    const loss = Number(Array.isArray(raw) ? raw[2] : raw?.loss);
+    if (![win, draw, loss].every(Number.isFinite)) return null;
+    const total = win + draw + loss;
+    if (total <= 0) return null;
+    const sideIsMine = state?.sideToAnalyze === state?.myColor;
+    const myRaw = sideIsMine ? win : loss;
+    const enemyRaw = sideIsMine ? loss : win;
+    return {
+      myWin: Math.round((myRaw / total) * 100),
+      draw: Math.round((draw / total) * 100),
+      enemyWin: Math.round((enemyRaw / total) * 100)
+    };
+  }
+
   function mergeWasmAnalysisIntoResult(baseRes, wasmOut, state) {
     if (!baseRes || !baseRes.best || !wasmOut || !wasmOut.lines || !wasmOut.lines[1]) {
       return baseRes;
     }
+    const requirePrimaryStockfish = engineMaxMode || currentElo >= 2000;
     if (
       baseRes.syzygyActive ||
       baseRes.best.fromSyzygy ||
-      baseRes.best.isMateInOne ||
-      baseRes.best.isForcedMateInTwo
+      (!requirePrimaryStockfish && (baseRes.best.isMateInOne || baseRes.best.isForcedMateInTwo))
     ) {
       return baseRes;
     }
 
-    const safeSet = Array.isArray(baseRes.safeNonRepeatingUcis) && baseRes.safeNonRepeatingUcis.length > 0
+    const safeSet = !requirePrimaryStockfish && Array.isArray(baseRes.safeNonRepeatingUcis) && baseRes.safeNonRepeatingUcis.length > 0
       ? new Set(baseRes.safeNonRepeatingUcis)
       : null;
+    const legalSet = Array.isArray(baseRes.legalUcis) && baseRes.legalUcis.length > 0 ? new Set(baseRes.legalUcis) : null;
+    const hardRejectedSet = !requirePrimaryStockfish && Array.isArray(baseRes.hardRejectedUcis) ? new Set(baseRes.hardRejectedUcis) : null;
 
     let chosenLine = null;
-    for (const idx of [1, 2, 3]) {
-      const candidate = wasmOut.lines[idx];
+    const engineCandidates = [wasmOut.primaryLine, wasmOut.lines[1], wasmOut.lines[2], wasmOut.lines[3]]
+      .filter((candidate, index, all) => candidate && all.findIndex(item => item?.uci === candidate.uci) === index);
+    for (const candidate of engineCandidates) {
       if (!candidate || !candidate.uci) continue;
+      if (legalSet && !legalSet.has(candidate.uci)) continue;
+      if (hardRejectedSet?.has(candidate.uci)) continue;
+      const isPrimary = candidate === engineCandidates[0];
+      if (requirePrimaryStockfish && !isPrimary) continue;
       if (candidate.isMate && candidate.mateIn > 0) {
         chosenLine = candidate;
         break;
       }
-      if (!safeSet || safeSet.has(candidate.uci)) {
-        if (idx === 1 || candidate.scoreCp >= -40 || candidate.scoreCp >= (wasmOut.lines[1].scoreCp - 110)) {
+      if (requirePrimaryStockfish || isPrimary || !safeSet || safeSet.has(candidate.uci)) {
+        if (candidate === engineCandidates[0] || candidate.scoreCp >= -40 || candidate.scoreCp >= (wasmOut.lines[1].scoreCp - 110)) {
           chosenLine = candidate;
           break;
         }
@@ -4380,11 +5123,30 @@
     }
 
     if (
+      !requirePrimaryStockfish &&
+      baseRes.best.fromCloud &&
+      baseRes.best.uci !== chosenLine.uci &&
+      Number(baseRes.best.cloudDepth) >= Number(chosenLine.depth || 0)
+    ) {
+      return baseRes;
+    }
+
+    const primarySfLine = engineCandidates[0] || null;
+    const trapSfLine = engineCandidates.find(line => line.uci === baseRes.best.uci) || null;
+    const primarySfScore = Number(primarySfLine?.scoreCp);
+    const trapSfScore = Number(trapSfLine?.scoreCp);
+    const objectiveTrapDelta = Number.isFinite(primarySfScore) && Number.isFinite(trapSfScore)
+      ? primarySfScore - trapSfScore
+      : null;
+    if (
+      !requirePrimaryStockfish &&
       trapRadarEnabled &&
       baseRes.best.isTrap &&
+      baseRes.best.uci !== chosenLine.uci &&
       baseRes.best.trapChance >= 84 &&
       (currentStyle === "tal" || currentStyle === "mogging" || currentStyle === "hikaru") &&
-      baseRes.best.pureSearchScore >= -45 &&
+      Number.isFinite(objectiveTrapDelta) &&
+      objectiveTrapDelta <= 35 &&
       !chosenLine.isMate
     ) {
       return baseRes;
@@ -4398,16 +5160,19 @@
       return p ? p.toLowerCase() : "p";
     };
 
-    const capturedAtSq = (sq) => {
+    const capturedAtSq = (sq, fromSq = null) => {
       if (!state || !state.grid || !sq || sq.length < 2) return null;
       const c = FILES.indexOf(sq[0]);
       const r = 8 - parseInt(sq[1], 10);
       const p = state.grid[r]?.[c];
-      return p ? p.toLowerCase() : null;
+      if (p) return p.toLowerCase();
+      if (fromSq && pieceAtSq(fromSq) === "p" && fromSq[0] !== sq[0]) return "p";
+      return null;
     };
 
     const isMateIn1 = Boolean(chosenLine.isMate && chosenLine.mateIn === 1);
     const isMateIn2 = Boolean(chosenLine.isMate && chosenLine.mateIn === 2);
+    const sameAsBase = chosenLine.uci === baseRes.best.uci;
     const evalPawnsStr = chosenLine.isMate
       ? (chosenLine.mateIn > 0 ? `МАТ #${chosenLine.mateIn}` : `-МАТ #${Math.abs(chosenLine.mateIn)}`)
       : (chosenLine.scoreCp / 100).toFixed(2);
@@ -4422,22 +5187,50 @@
       to: chosenLine.to,
       promo: chosenLine.promo || null,
       piece: pieceAtSq(chosenLine.from),
-      captured: capturedAtSq(chosenLine.to),
+      captured: capturedAtSq(chosenLine.to, chosenLine.from),
+      isEnPassant: pieceAtSq(chosenLine.from) === "p" && chosenLine.from[0] !== chosenLine.to[0] && !capturedAtSq(chosenLine.to),
       fromWasm: true,
+      fromCloud: sameAsBase ? baseRes.best.fromCloud : false,
+      fromExplorer: sameAsBase ? baseRes.best.fromExplorer : false,
+      cloudDepth: sameAsBase ? baseRes.best.cloudDepth : 0,
       isMateInOne: isMateIn1,
       isForcedMateInTwo: isMateIn2,
       isCheckmate: Boolean(chosenLine.isMate && chosenLine.mateIn > 0),
+      mateIn: chosenLine.isMate ? chosenLine.mateIn : null,
+      engineMateIn: chosenLine.isMate ? chosenLine.mateIn : null,
+      isLosingMate: Boolean(chosenLine.isMate && chosenLine.mateIn < 0),
+      blundersMate: false,
+      causesStalemate: false,
+      isRepetitionDrawRisk: false,
+      underDirectAttack: sameAsBase ? baseRes.best.underDirectAttack : false,
+      ignoredHangingPiece: sameAsBase ? baseRes.best.ignoredHangingPiece : false,
+      ruinedCastling: sameAsBase ? baseRes.best.ruinedCastling : false,
+      bookName: sameAsBase ? baseRes.best.bookName : null,
+      savedHangingPiece: sameAsBase ? baseRes.best.savedHangingPiece : null,
+      isSacrifice: sameAsBase ? baseRes.best.isSacrifice : false,
+      isFork: sameAsBase ? baseRes.best.isFork : false,
+      isPin: sameAsBase ? baseRes.best.isPin : false,
+      trueScore: chosenLine.scoreCp,
       pvLine: chosenLine.pvChain || baseRes.best.pvLine,
       pureSearchScore: chosenLine.scoreCp,
       evalPawns: evalPawnsStr,
       whitePerspectiveEval: whiteEval,
-      isTrap: chosenLine.uci === baseRes.best.uci ? baseRes.best.isTrap : false,
-      nextPremove: chosenLine.uci === baseRes.best.uci ? baseRes.best.nextPremove : null
+      isTrap: sameAsBase ? baseRes.best.isTrap : false,
+      nextPremove: sameAsBase ? baseRes.best.nextPremove : null,
+      engineHashMb: wasmOut.hashMb || 0,
+      engineWorkers: wasmOut.workers || 1,
+      engineDepth: chosenLine.depth || 0,
+      engineConsensus: wasmOut.consensus || "primary-only",
+      engineNps: chosenLine.nps || 0,
+      engineHashFull: chosenLine.hashFull || 0
     };
 
     let updatedAvg = baseRes.average;
-    if (showAverageMove && wasmOut.lines[2] && wasmOut.lines[2].uci !== updatedBest.uci) {
-      const l2 = wasmOut.lines[2];
+    const averageLine = [1, 2, 3]
+      .map(index => wasmOut.lines[index])
+      .find(line => line && line.uci !== updatedBest.uci && !(line.isMate && Number(line.mateIn) < 0) && (!safeSet || safeSet.has(line.uci)));
+    if (averageLine) {
+      const l2 = averageLine;
       if (!safeSet || safeSet.has(l2.uci)) {
         updatedAvg = {
           ...(baseRes.average || baseRes.best),
@@ -4446,52 +5239,106 @@
           to: l2.to,
           promo: l2.promo || null,
           piece: pieceAtSq(l2.from),
-          captured: capturedAtSq(l2.to),
+          captured: capturedAtSq(l2.to, l2.from),
           fromWasm: true,
           isMateInOne: false,
+          isForcedMateInTwo: false,
+          isCheckmate: Boolean(l2.isMate && l2.mateIn > 0),
+          mateIn: l2.isMate ? l2.mateIn : null,
+          engineMateIn: l2.isMate ? l2.mateIn : null,
+          isLosingMate: Boolean(l2.isMate && l2.mateIn < 0),
           blundersMate: Boolean(l2.isMate && l2.mateIn < 0),
+          causesStalemate: false,
+          isRepetitionDrawRisk: false,
+          underDirectAttack: false,
+          ignoredHangingPiece: false,
+          ruinedCastling: false,
+          savedHangingPiece: null,
+          isSacrifice: false,
+          isFork: false,
+          isPin: false,
+          trueScore: l2.scoreCp,
           pvLine: l2.pvChain,
           pureSearchScore: l2.scoreCp,
-          evalPawns: l2.isMate ? `МАТ #${l2.mateIn}` : (l2.scoreCp / 100).toFixed(2)
+          evalPawns: l2.isMate
+            ? (l2.mateIn > 0 ? `МАТ #${l2.mateIn}` : `-МАТ #${Math.abs(l2.mateIn)}`)
+            : (l2.scoreCp / 100).toFixed(2),
+          whitePerspectiveEval: l2.isMate
+            ? (state.sideToAnalyze === "w" ? (l2.mateIn > 0 ? 10 : -10) : (l2.mateIn > 0 ? -10 : 10))
+            : ((state.sideToAnalyze === "w" ? l2.scoreCp : -l2.scoreCp) / 100).toFixed(2)
         };
       }
     }
 
+    const workerCount = wasmOut.workers || 1;
+    const mergedWdl = normalizeEngineWdl(chosenLine, state);
+    const consensusLabel = workerCount > 1
+      ? (wasmOut.consensus === "strong" ? "CONSENSUS" : wasmOut.consensus === "weak" ? "VERIFY" : "SPLIT")
+      : "PRIMARY";
+    const baseSource = baseRes.telemetry?.serverSource || "";
+    const sourceSuffix = baseSource && !baseSource.startsWith("SF LOCAL") ? ` • ${baseSource}` : "";
+    const engineLabel = wasmOut.resources?.fullNnue || wasmOut.backend?.includes("full") ? "SF FULL" : "SF LOCAL";
     const updatedTelemetry = baseRes.telemetry
       ? {
           ...baseRes.telemetry,
-          serverSource: `SF WASM d${chosenLine.depth || 12} + ${baseRes.telemetry.serverSource}`,
+          ...(mergedWdl || {}),
+          serverSource: `${engineLabel} ${workerCount}C • H${wasmOut.hashMb || "?"}M • D${chosenLine.depth || 12} • ${consensusLabel}${sourceSuffix}`,
           nearestThreatText: isMateIn1
             ? `👑 МАТ В 1 ХОД: ${updatedBest.from}→${updatedBest.to}#`
             : (isMateIn2
                 ? `👑 ФОРС. МАТ В 2 ХОДА: ${updatedBest.from}→${updatedBest.to}+`
-                : `План SF WASM: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
+                : `План SF LOCAL: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
         }
       : null;
 
     return {
       ...baseRes,
+      ...(mergedWdl || {}),
       best: updatedBest,
       average: updatedAvg,
+      engineMeta: {
+        workers: workerCount,
+        hashMb: wasmOut.hashMb || 0,
+        depth: chosenLine.depth || 0,
+        selDepth: chosenLine.selDepth || chosenLine.depth || 0,
+        nps: chosenLine.nps || 0,
+        hashFull: chosenLine.hashFull || 0,
+        consensus: wasmOut.consensus || "primary-only",
+        backend: wasmOut.backend || "stockfish-19-lite-asm",
+        fullNnue: Boolean(wasmOut.resources?.fullNnue || wasmOut.backend?.includes("full"))
+      },
       telemetry: updatedTelemetry
     };
   }
 
   function applyAnalysisResult(state, res, isDeepPass = false, prevBestUci = "") {
     if (!res || res.error) return;
+    const resultMeta = res.meta || null;
+    if (resultMeta && !isCurrentAnalysisMeta(resultMeta)) return;
+    const requiresFinalDisplay = engineMaxMode || currentElo >= 2000;
+    if (requiresFinalDisplay && !res.engineMeta && !res.syzygyActive && !res.best?.fromSyzygy) {
+      setAutoStatusText(
+        engineMaxMode ? "♚ ENGINE MAX: ЖДЕМ PRIMARY STOCKFISH..." : "🧠 2000+ ELO: ЖДЕМ ФИНАЛЬНЫЙ STOCKFISH...",
+        "#64cdb9"
+      );
+      return;
+    }
+    const qualityRank = res.best?.fromSyzygy ? 60 : res.engineMeta ? 50 : isDeepPass ? 30 : 10;
+    if (cachedMoves?.positionId === positionId && Number(cachedMoves.qualityRank || 0) > qualityRank) return;
     if (!isDeepPass && res.lastOpponentMove) {
       updateBehavioralCheatDetector(res);
     }
-    cachedMoves = res;
+    cachedMoves = { ...res, meta: resultMeta, sessionId: analysisSessionId, positionId, positionKey: currentPositionKey, qualityRank };
 
     if (res.telemetry) {
       lastTelemetryData = res.telemetry;
     }
     updateLiveTelemetryUI();
     updateTimeSniperBanner(res);
+    updateEvalMoodAndEngineBadge(state, res);
 
     if (res.best) {
-      recordEvalPoint(state.boardKey, res.best.whitePerspectiveEval || res.best.evalPawns, res.opponentEvalDropPawns);
+      recordEvalPoint(state.boardKey, res.best.whitePerspectiveEval ?? res.best.evalPawns, res.opponentEvalDropPawns);
     }
 
     if (audioRadarEnabled && window.ChessFX && state.actualTurn === state.myColor) {
@@ -4509,11 +5356,25 @@
       preparedLookahead = res.best.nextPremove;
     }
 
-    if (isDeepPass && currentTurnDecision.boardKey === state.boardKey && !currentTurnDecision.skip) {
-      if (currentTurnDecision.typeLabel.startsWith("СРЕДНИЙ") && !res.isDangerPosition && res.average) {
+    if (
+      isDeepPass &&
+      !isExecutingMove &&
+      currentTurnDecision.boardKey === state.boardKey &&
+      !currentTurnDecision.skip
+    ) {
+      if (
+        currentTurnDecision.choiceKind === "average" &&
+        !res.isDangerPosition &&
+        canUseAverageAutoMove(res)
+      ) {
         currentTurnDecision.move = res.average;
       } else if (res.best) {
         currentTurnDecision.move = res.best;
+        currentTurnDecision.choiceKind = "best";
+      }
+      if (autoMoveTimer) {
+        clearTimeout(autoMoveTimer);
+        autoMoveTimer = null;
       }
     }
 
@@ -4586,7 +5447,8 @@
       }
 
       const improvedByDeep = isDeepPass && prevBestUci && prevBestUci !== res.best.uci;
-      const evalPrefix = (!res.best.isMateInOne && !res.best.isForcedMateInTwo && !res.best.fromSyzygy && parseFloat(res.best.evalPawns) > 0) ? "+" : "";
+      const numericBestEval = Number(res.best.evalPawns);
+      const evalPrefix = (getStructuredMateIn(res.best) === null && !res.best.isMateInOne && !res.best.isForcedMateInTwo && !res.best.fromSyzygy && Number.isFinite(numericBestEval) && numericBestEval > 0) ? "+" : "";
       $("cc-best-eval").textContent = `${evalPrefix}${res.best.evalPawns}`;
       $("cc-best-desc").textContent =
         (improvedByDeep ? "✦ [УЛУЧШЕНО ГЛУБИНОЙ] " : "") + explainWithModule(res.best, "best", state.fen);
@@ -4618,7 +5480,7 @@
         }
       }
 
-      renderEvalBar(state, res.best.whitePerspectiveEval || res.best.evalPawns);
+      renderEvalBar(state, res.best.whitePerspectiveEval ?? res.best.evalPawns);
 
       if (autoMoveEnabled && state.actualTurn === state.myColor) {
         const mySecs = getMyRemainingSeconds();
@@ -4639,7 +5501,8 @@
 
     if (showAverageMove && workMode !== "hvh" && res.average) {
       if ($("cc-avg-card")) $("cc-avg-card").style.display = "block";
-      const avgPref = parseFloat(res.average.evalPawns) > 0 ? "+" : "";
+      const numericAverageEval = Number(res.average.evalPawns);
+      const avgPref = getStructuredMateIn(res.average) === null && Number.isFinite(numericAverageEval) && numericAverageEval > 0 ? "+" : "";
       $("cc-avg-eval").textContent = `${avgPref}${res.average.evalPawns}`;
       $("cc-avg-desc").textContent = explainWithModule(res.average, "avg", state.fen);
     } else if ($("cc-avg-card")) {
@@ -4648,17 +5511,57 @@
 
     if (showWorstMove && workMode === "all" && res.worst) {
       if ($("cc-worst-card")) $("cc-worst-card").style.display = "block";
-      const wstPref = parseFloat(res.worst.evalPawns) > 0 ? "+" : "";
+      const numericWorstEval = Number(res.worst.evalPawns);
+      const wstPref = getStructuredMateIn(res.worst) === null && Number.isFinite(numericWorstEval) && numericWorstEval > 0 ? "+" : "";
       $("cc-worst-eval").textContent = `${wstPref}${res.worst.evalPawns}`;
       $("cc-worst-desc").textContent = explainWithModule(res.worst, "worst", state.fen);
     } else if ($("cc-worst-card")) {
       $("cc-worst-card").style.display = "none";
     }
 
-    renderArrowsOverlay(state, res);
+    renderArrowsOverlay(state, cachedMoves);
   }
 
-  function applyPremovePlanOnEnemyTurn(state, plan) {
+  function getPremovePlanQuality(plan) {
+    if (!plan || !plan.canPremove || !plan.premove) return -Infinity;
+    const typeBonus = {
+      mate_premove: 60,
+      forced_single: 50,
+      safe_universal: 35,
+      forced_tactical: 30,
+      recapture: 25,
+      opening_book: 5
+    }[plan.predictionType] || 0;
+    return (Number(plan.confidence) || 0) + typeBonus + Math.min(18, (Number(plan.validatedBranches) || 0) * 3);
+  }
+
+  function choosePremovePlan(localPlan, backgroundPlan) {
+    if (!backgroundPlan || backgroundPlan.error || backgroundPlan.canPremove !== true || !backgroundPlan.premove) return null;
+    const localFresh = localPlan && (!localPlan.forMoveUci || localPlan.forMoveUci === lastOurExecutedMove?.uci)
+      ? localPlan
+      : null;
+    const backgroundFresh = backgroundPlan && (!backgroundPlan.forMoveUci || backgroundPlan.forMoveUci === lastOurExecutedMove?.uci)
+      ? backgroundPlan
+      : null;
+    if (!backgroundFresh) return null;
+    const selected = backgroundFresh;
+    if (
+      selected === backgroundFresh &&
+      localFresh?.predictionType === "opening_book" &&
+      localFresh.predictedEnemyMove &&
+      Number(localFresh.predictionConfidence) > Number(backgroundFresh?.predictionConfidence || 0)
+    ) {
+      return {
+        ...backgroundFresh,
+        predictedEnemyMove: localFresh.predictedEnemyMove,
+        predictionConfidence: localFresh.predictionConfidence,
+        reasonText: `${backgroundFresh.reasonText} • КНИГА ${localFresh.predictionConfidence}%`
+      };
+    }
+    return selected;
+  }
+
+  function applyPremovePlanOnEnemyTurn(state, plan, allowExecution = true) {
     if (plan && plan.telemetry) {
       lastTelemetryData = plan.telemetry;
     }
@@ -4710,7 +5613,7 @@
       hideArrows();
     }
 
-    if (premoveEnabled || bulletTurboMode) {
+    if (allowExecution && (premoveEnabled || bulletTurboMode)) {
       if (lastPremoveSentBoardKey !== state.boardKey && shouldTriggerPremoveByRisk(plan)) {
         lastPremoveSentBoardKey = state.boardKey;
         clearTimeout(premoveTimer);
@@ -4729,6 +5632,35 @@
     }
   }
 
+  function maybePonderPredictedReply(state, plan) {
+    const predictedUci = plan?.predictedEnemyMove?.uci;
+    const resources = StockfishWasmEngine.getResourceProfile?.();
+    if (!engineMaxMode || !useStockfishWasm || !resources?.fullNnue || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(predictedUci || "")) return;
+    if ((window.ChessCoachEngine.getPerformanceMode?.() || "normal") !== "normal" || document.hidden) return;
+    if (Number(plan.predictionConfidence || 0) < 60) return;
+    const historyTrusted = Boolean(gameStartedFromInitial && state.sideToAnalyze === state.actualTurn);
+    const sourcePositionId = positionId;
+    const requestId = ++ponderRequestId;
+    safeSendMessage({
+      type: "BUILD_PONDER_POSITION",
+      fen: state.fen,
+      enemyMoveUci: predictedUci,
+      uciHistory: historyTrusted ? uciHistoryList : [],
+      historyTrusted,
+      positionId: sourcePositionId
+    }, response => {
+      if (requestId !== ponderRequestId || sourcePositionId !== positionId || boardDirty || !response?.ok) return;
+      void StockfishWasmEngine.analyze(
+        response.fen,
+        850,
+        1,
+        response.uciHistory,
+        response.useStartposMoves,
+        { sessionId: analysisSessionId, positionId: sourcePositionId, analysisId: positionAnalysisId, ponder: true, performanceMode: "normal" }
+      ).catch(() => {});
+    });
+  }
+
   function handleEnemyTurnInstantPremove(state) {
     if (committedEnemyBoardKey === state.boardKey) {
       updateLiveTelemetryUI();
@@ -4740,7 +5672,9 @@
 
     const localPlan = computeLocalInstantPremovePlan(state);
     if (localPlan && localPlan.canPremove && localPlan.premove) {
-      applyPremovePlanOnEnemyTurn(state, localPlan);
+      // Local/book data is a preview. The background validates the move against
+      // several likely replies before anything is queued on the board.
+      applyPremovePlanOnEnemyTurn(state, localPlan, false);
     }
 
     const myPremoveId = ++premoveReqId;
@@ -4751,15 +5685,44 @@
         myColor: state.myColor,
         lastOurMove: lastOurExecutedMove,
         style: currentStyle,
-        recentPositions: recentPositionHistory
+        recentPositions: recentPositionHistory,
+        predictedEnemyMove: localPlan?.predictedEnemyMove || null,
+        predictionConfidence: localPlan?.predictionConfidence || 0
       },
       (bgPlan) => {
         if (myPremoveId !== premoveReqId) return;
         const fresh = captureBoardState(false);
         if (!fresh || fresh.animating || fresh.actualTurn === fresh.myColor || fresh.boardKey !== state.boardKey) return;
-        applyPremovePlanOnEnemyTurn(fresh, (localPlan && localPlan.canPremove) ? { ...bgPlan, ...localPlan } : bgPlan);
+        const selectedPlan = choosePremovePlan(localPlan, bgPlan);
+        applyPremovePlanOnEnemyTurn(fresh, selectedPlan, true);
+        maybePonderPredictedReply(fresh, selectedPlan);
       }
     );
+  }
+
+  function getStockfishMoveTimeMs(fastRes, isTurboActive) {
+    const profile = window.__CC_ANDROID_RUNTIME__?.profile || window.__CC_DEVICE_PROFILE__;
+    const deviceScale = Math.max(0.5, Math.min(1.5, Number(profile?.recommendation?.movetimeScale) || 1));
+    if (!engineMaxMode) {
+      const base = currentElo >= 2800 ? 620 : (currentElo >= 2400 ? 420 : 300);
+      const budget = isTurboActive ? 120 : base + (fastRes.isDangerPosition || fastRes.hangingSquare ? 240 : 0);
+      return Math.max(70, Math.round(budget * deviceScale));
+    }
+    const seconds = getMyRemainingSeconds();
+    const danger = Boolean(fastRes.isDangerPosition || fastRes.hangingSquare);
+    let budget = !Number.isFinite(seconds) ? 3000
+      : seconds >= 300 ? 3000
+      : seconds >= 120 ? 2200
+      : seconds >= 45 ? 1400
+      : seconds >= 15 ? 650
+      : seconds >= 5 ? 260 : 90;
+    if (danger) budget = Math.round(budget * 1.35);
+    budget = Math.round(budget * deviceScale);
+    if (Number.isFinite(seconds)) {
+      const reserve = Math.max(800, seconds * 50);
+      budget = Math.min(budget, Math.max(70, seconds * 1000 - reserve - 300));
+    }
+    return Math.max(70, Math.min(4200, Math.round(budget)));
   }
 
   function runCycle(forceByButton = false) {
@@ -4767,16 +5730,37 @@
       shutdownOrphanedScript();
       return;
     }
+    if (document.hidden) return;
+    if (forceByButton) clearAnalysisRetry();
 
     ensurePanel();
     updateLiveTelemetryUI();
 
-    if (!forceByButton && (isExecutingMove || Date.now() < moveCooldownUntil)) {
+    const state = captureBoardState(false);
+    if (!state) {
+      clearAnalysisRetry();
+      if (currentPositionKey) markBoardDirty("NO_BOARD");
+      if (activeEngineBoardKey) {
+        analysisRequestId++;
+        activeEngineBoardKey = "";
+        StockfishWasmEngine.cancel?.();
+      }
+      hideArrows();
+      renderEvalBar(null, 0);
+      updateEvalMoodAndEngineBadge(null, null);
       return;
     }
-
-    const state = captureBoardState(false);
-    if (!state || state.animating) return;
+    if (state.animating) return;
+    adoptPositionState(state);
+    if (pendingAnalysisRetry && (pendingAnalysisRetry.url !== location.href || pendingAnalysisRetry.positionKey !== state.positionKey)) clearAnalysisRetry();
+    if (!forceByButton && (isExecutingMove || Date.now() < moveCooldownUntil)) return;
+    if (!forceByButton && pendingAnalysisRetry &&
+        (Date.now() < pendingAnalysisRetry.notBefore || pendingAnalysisRetry.timer !== null)) return;
+    if (activeEngineBoardKey && activeEngineBoardKey !== state.boardKey) {
+      analysisRequestId++;
+      activeEngineBoardKey = "";
+      StockfishWasmEngine.cancel?.();
+    }
 
     checkGameEndAndLearn(state.myColor);
     checkOpponentExtensionBeacon(state.myColor, false);
@@ -4814,7 +5798,7 @@
         !currentTurnDecision.skip &&
         cachedMoves.best &&
         cachedMoves.boardKey === state.boardKey &&
-        (!(cachedMoves.isDangerPosition || cachedMoves.hangingSquare) || cachedMoves.pass === "deep")
+        (!(cachedMoves.isDangerPosition || cachedMoves.hangingSquare) || cachedMoves.pass === "deep" || hasFinalAutoAnalysis(cachedMoves))
       ) {
         scheduleAutoMoveIfNeeded();
       }
@@ -4827,20 +5811,29 @@
     resetTurnDecision();
 
     const myReqId = ++analysisRequestId;
+    const cycleAnalysisId = ++positionAnalysisId;
+    const fastMeta = createAnalysisMeta(state, "fast", cycleAnalysisId);
+    const deepMeta = createAnalysisMeta(state, "deep", cycleAnalysisId);
+    activeEngineBoardKey = state.boardKey;
     const sideText = state.sideToAnalyze === "w" ? "ХОД БЕЛЫХ ⚪" : "ХОД ЧЕРНЫХ ⚫";
     if ($("cc-turn-indicator")) $("cc-turn-indicator").textContent = sideText;
 
     const mySecs = getMyRemainingSeconds();
     const enemySecs = getEnemyRemainingSeconds();
-    const isTurboActive = Boolean(bulletTurboMode || (workMode !== "legit" && mySecs <= 15));
-    const needAvg = Boolean((showAverageMove || useAverageMoveSometimes) && workMode !== "hvh");
-    const needWorst = Boolean(showWorstMove && workMode === "all");
+    const normalizedElo = Number.isFinite(Number(currentElo))
+      ? Math.max(400, Math.min(3000, Math.round(Number(currentElo))))
+      : 2000;
+    const isTurboActive = Boolean(currentElo < 2000 && (bulletTurboMode || (workMode !== "legit" && mySecs <= 15)));
+    const historyTrusted = Boolean(gameStartedFromInitial && state.sideToAnalyze === state.actualTurn);
+    const engineUciHistory = historyTrusted ? uciHistoryList : [];
+    const needAvg = Boolean(!engineMaxMode && currentElo < 2000 && (showAverageMove || useAverageMoveSometimes) && workMode !== "hvh");
+    const needWorst = Boolean(!engineMaxMode && currentElo < 2000 && showWorstMove && workMode === "all");
 
     safeSendMessage(
       {
         type: "ANALYZE_POSITION",
         fen: state.fen,
-        elo: currentElo,
+        elo: normalizedElo,
         style: currentStyle,
         pass: "fast",
         lastEnemyMove: lastRealEnemyMove,
@@ -4852,41 +5845,59 @@
         enemySeconds: enemySecs,
         trapRadarEnabled,
         recentPositions: recentPositionHistory,
-        lastOurMove: lastOurExecutedMove
+        lastOurMove: lastOurExecutedMove,
+        uciHistory: engineUciHistory,
+        historyTrusted,
+        meta: fastMeta
       },
       (fastRes) => {
-        if (myReqId !== analysisRequestId || !fastRes || !fastRes.best || fastRes.error) return;
-        const freshFast = captureBoardState(true);
-        const targetState = (freshFast && !freshFast.animating && freshFast.boardKey === state.boardKey) ? freshFast : state;
-        applyAnalysisResult(targetState, fastRes, false, "");
+        const responseMeta = fastRes?.meta || fastMeta;
+        if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
+        if (!fastRes || !fastRes.best || fastRes.error) {
+          activeEngineBoardKey = "";
+          clearPositionPresentation(fastRes?.error ? "ОШИБКА АНАЛИЗА • ПОВТОР..." : "МАТ / ПАТ • НЕТ ХОДОВ");
+          committedBoardKey = state.boardKey;
+          boardDirty = false;
+          if (fastRes?.error && analysisRetryCount < 5) {
+            const retryDelay = Math.min(3000, 180 * (2 ** analysisRetryCount++));
+            scheduleAnalysisRetry(state, retryDelay);
+          }
+          return;
+        }
+        fastRes.meta = responseMeta;
+        analysisRetryCount = 0;
+        applyAnalysisResult(state, fastRes, false, "");
 
+        const requiresFinalEngine = engineMaxMode || currentElo >= 2000 || Boolean(fastRes.analysisIncomplete);
         if (
-          (fastRes.best && (fastRes.best.isMateInOne || fastRes.best.isForcedMateInTwo || fastRes.best.fromSyzygy)) ||
-          (isTurboActive && !fastRes.isDangerPosition && !fastRes.hangingSquare)
+          (fastRes.best && fastRes.best.fromSyzygy) ||
+          (!requiresFinalEngine && fastRes.best && (fastRes.best.isMateInOne || fastRes.best.isForcedMateInTwo)) ||
+          (!requiresFinalEngine && isTurboActive && !fastRes.isDangerPosition && !fastRes.hangingSquare)
         ) {
           if (deepBadge) deepBadge.style.display = "none";
+          if (myReqId === analysisRequestId) activeEngineBoardKey = "";
           return;
         }
 
         if (deepBadge) {
           deepBadge.textContent = fastRes.isDangerPosition
             ? "🛡 ПОИСК ЗАЩИТЫ..."
-            : (useStockfishWasm ? "🧠 SF WASM + CLOUD..." : "⚡ ДОРАСЧЕТ...");
+            : (useStockfishWasm ? "🧠 SF LOCAL + CLOUD..." : "⚡ ДОРАСЧЕТ...");
           deepBadge.style.display = "inline-block";
         }
         const firstBestUci = fastRes.best ? fastRes.best.uci : "";
 
-        const shouldRunWasm = Boolean(useStockfishWasm && currentElo >= 1800 && state.pieceCount > 7);
-        const wasmMovetime = isTurboActive ? 95 : (fastRes.isDangerPosition || fastRes.hangingSquare ? 290 : 195);
+        const shouldRunWasm = Boolean(useStockfishWasm);
+        const wasmMovetime = getStockfishMoveTimeMs(fastRes, isTurboActive);
         const wasmPromise = shouldRunWasm
-          ? StockfishWasmEngine.analyze(state.fen, wasmMovetime, 3, uciHistoryList, gameStartedFromInitial)
+          ? StockfishWasmEngine.analyze(state.fen, wasmMovetime, needAvg ? 3 : 1, engineUciHistory, historyTrusted, { ...deepMeta, elo: normalizedElo, engineMax: engineMaxMode, engineMaxMode, isDangerPosition: Boolean(fastRes.isDangerPosition || fastRes.hangingSquare), needAverage: needAvg })
           : Promise.resolve(null);
 
         safeSendMessage(
           {
             type: "ANALYZE_POSITION",
             fen: state.fen,
-            elo: currentElo,
+            elo: normalizedElo,
             style: currentStyle,
             pass: "deep",
             lastEnemyMove: lastRealEnemyMove,
@@ -4898,32 +5909,67 @@
             enemySeconds: enemySecs,
             trapRadarEnabled,
             recentPositions: recentPositionHistory,
-            lastOurMove: lastOurExecutedMove
+            lastOurMove: lastOurExecutedMove,
+            uciHistory: engineUciHistory,
+            historyTrusted,
+            meta: deepMeta
           },
           async (deepRes) => {
-            if (myReqId !== analysisRequestId) return;
-            if (!deepRes || deepRes.error) {
-              if (deepBadge) deepBadge.style.display = "none";
-              return;
-            }
-
-            let finalDeep = deepRes;
+            const responseMeta = deepRes?.meta || deepMeta;
+            if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
+            const backgroundDeepOk = Boolean(deepRes && !deepRes.error && deepRes.best);
+            let finalDeep = backgroundDeepOk ? deepRes : fastRes;
+            let wasmApplied = false;
             if (shouldRunWasm) {
               try {
                 const wasmOut = await wasmPromise;
-                if (myReqId !== analysisRequestId) return;
-                if (wasmOut && (!deepRes.best || !deepRes.best.fromCloud)) {
-                  finalDeep = mergeWasmAnalysisIntoResult(deepRes, wasmOut, state);
+                if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(deepMeta)) return;
+                if (wasmOut) {
+                  finalDeep = mergeWasmAnalysisIntoResult(finalDeep, wasmOut, state);
+                  wasmApplied = Boolean(finalDeep?.engineMeta);
                 }
               } catch (e) {}
             }
 
+            const requiresFinalEngine = engineMaxMode || currentElo >= 2000 || Boolean(finalDeep?.analysisIncomplete);
+            if (!backgroundDeepOk && !wasmApplied && !requiresFinalEngine) {
+              if (deepBadge) deepBadge.style.display = "none";
+              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              return;
+            }
+
+            const hasFinalEngine = Boolean(finalDeep?.engineMeta || finalDeep?.syzygyActive || finalDeep?.best?.fromSyzygy);
+            if (requiresFinalEngine && !hasFinalEngine) {
+              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              if (!useStockfishWasm) {
+                if (deepBadge) deepBadge.style.display = "none";
+                committedBoardKey = state.boardKey;
+                setAutoStatusText(currentElo >= 2000 || engineMaxMode ? "2000+ ELO требует включённый STOCKFISH LOCAL" : "Анализ не завершён: включите Stockfish или сходите вручную.", "#ffbe0b");
+                return;
+              }
+              if (finalEngineRetryCount < 3) {
+                const retryAttempt = ++finalEngineRetryCount;
+                const retryDelay = Math.min(20000, 5500 * (2 ** (retryAttempt - 1)));
+                if (deepBadge) {
+                  deepBadge.textContent = `🧠 STOCKFISH RETRY ${retryAttempt}/3...`;
+                  deepBadge.style.display = "inline-block";
+                }
+                scheduleAnalysisRetry(state, retryDelay);
+              } else {
+                if (deepBadge) deepBadge.style.display = "none";
+                committedBoardKey = state.boardKey;
+                setAutoStatusText("STOCKFISH недоступен • автоход заблокирован", "#ff2a85");
+              }
+              return;
+            }
+            finalEngineRetryCount = 0;
+
             if (deepBadge) deepBadge.style.display = "none";
 
-            const currentFresh = captureBoardState(true);
-            if (!currentFresh || currentFresh.animating || currentFresh.boardKey !== state.boardKey) return;
-
-            applyAnalysisResult(currentFresh, finalDeep, true, firstBestUci);
+            finalDeep.meta = deepMeta;
+            finalDeep.pass = "deep";
+            applyAnalysisResult(state, finalDeep, true, firstBestUci);
+            if (myReqId === analysisRequestId) activeEngineBoardKey = "";
           }
         );
       }
@@ -4943,45 +5989,69 @@
   let observedBoardNode = null;
   let observedMovesNode = null;
 
-  const domObserver = new MutationObserver(triggerDebouncedCycle);
+  const domObserver = new MutationObserver((mutations) => {
+    if (mutations.length) markBoardDirty("MOVE");
+    triggerDebouncedCycle();
+  });
 
   function ensureObserversAttached() {
     if (extensionInvalidated || !isContextValid()) return;
     const cgBoard = document.querySelector(".main-board cg-board") || document.querySelector("cg-board");
-    if (cgBoard && cgBoard !== observedBoardNode) {
-      observedBoardNode = cgBoard;
-      domObserver.observe(cgBoard, {
-        childList: true,
-        attributes: true,
-        attributeFilter: ["class", "style"]
-      });
-      triggerDebouncedCycle();
-    }
-
     const movesWrap = document.querySelector(".round__app__table, .analyse__moves, l4x, rm6");
-    if (movesWrap && movesWrap !== observedMovesNode) {
+    if (cgBoard !== observedBoardNode || movesWrap !== observedMovesNode) {
+      const boardChanged = cgBoard !== observedBoardNode;
+      domObserver.disconnect();
+      observedBoardNode = cgBoard;
       observedMovesNode = movesWrap;
-      domObserver.observe(movesWrap, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+      if (boardChanged) {
+        markBoardDirty("BOARD_REPLACED");
+      }
+      if (cgBoard) {
+        domObserver.observe(cgBoard, {
+          childList: true,
+          attributes: true,
+          attributeFilter: ["class", "style"]
+        });
+      }
+      if (movesWrap) {
+        domObserver.observe(movesWrap, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+      }
+      triggerDebouncedCycle();
     }
   }
 
   const syncVisualPosition = () => {
     if (extensionInvalidated || !isContextValid()) return;
     const state = captureBoardState(true);
-    if (state && !state.animating && cachedMoves.best) {
-      renderEvalBar(state, cachedMoves.best.whitePerspectiveEval || cachedMoves.best.evalPawns);
-      if (turnMode === "my" && state.actualTurn !== state.myColor && !isAltPressed && !heatmapAlwaysOn) return;
-      renderArrowsOverlay(state, cachedMoves);
+    if (!state || state.animating) {
+      hideArrows();
+      renderEvalBar(null, 0);
+      if (!state) updateEvalMoodAndEngineBadge(null, null);
+      return;
     }
+    if (!isCachedAnalysisCurrent(state)) {
+      hideArrows();
+      return;
+    }
+    renderEvalBar(state, cachedMoves.best.whitePerspectiveEval ?? cachedMoves.best.evalPawns);
+    if (turnMode === "my" && state.actualTurn !== state.myColor && !isAltPressed && !heatmapAlwaysOn) return;
+    renderArrowsOverlay(state, cachedMoves);
   };
 
   loadSettings();
   ensureObserversAttached();
 
+  let lastIdleBoardPollAt = 0;
   mainIntervalId = setInterval(() => {
     if (extensionInvalidated || !isContextValid()) {
       shutdownOrphanedScript();
       return;
+    }
+    if (document.hidden) return;
+    if (window.__CC_ANDROID_RUNTIME__ && !observedBoardNode) {
+      const now = performance.now();
+      if (now - lastIdleBoardPollAt < 1200) return;
+      lastIdleBoardPollAt = now;
     }
     ensureObserversAttached();
     if (!isExecutingMove && Date.now() >= moveCooldownUntil) {
@@ -4991,4 +6061,7 @@
 
   window.addEventListener("scroll", syncVisualPosition, { passive: true });
   window.addEventListener("resize", syncVisualPosition, { passive: true });
+  document.addEventListener?.("visibilitychange", handleEngineVisibilityChange);
+  window.addEventListener("pagehide", handleEngineVisibilityChange);
+  window.addEventListener("cc-mobile-lifecycle", handleMobileMoveLifecycle);
 })();

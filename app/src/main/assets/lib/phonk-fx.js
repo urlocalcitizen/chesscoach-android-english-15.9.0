@@ -1,11 +1,24 @@
-window.ChessFX = (function () {
+window.ChessFX = (function (existing) {
+  if (existing?.__ccLifecycleVersion === 1) {
+    existing.revive?.();
+    return existing;
+  }
+  try { existing?.shutdown?.(); } catch (e) {}
   let audioCtx = null;
   let radarAudioCtx = null;
   let activeEditTimer = null;
   let activeBeatInterval = null;
   let activeEscHandler = null;
+  let activeSkipButton = null;
+  let activeSkipHandler = null;
+  let activeShadowRoot = null;
+  let shutdownComplete = false;
   let lastTriggeredBoardKey = "";
   let lastRadarPingBoardKey = "";
+
+  function revive() {
+    shutdownComplete = false;
+  }
 
   const PHONK_CAPTIONS = [
     "💎 БРИЛЛИАНТОВЫЙ ХОД !! 💎",
@@ -15,7 +28,16 @@ window.ChessFX = (function () {
     "🔥 SIGMA TACTICAL DESTRUCTION 🔥"
   ];
 
+  function closeAudioContext(context) {
+    if (!context || context.state === "closed") return;
+    try {
+      const closing = context.close();
+      if (closing && typeof closing.catch === "function") closing.catch(() => {});
+    } catch (e) {}
+  }
+
   function getRadarAudioContext() {
+    if (shutdownComplete) return null;
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       if (!radarAudioCtx || radarAudioCtx.state === "closed") {
@@ -36,6 +58,7 @@ window.ChessFX = (function () {
    * @param {string} boardKey
    */
   function playTacticalAudioPing(type = "blunder", boardKey = "") {
+    if (shutdownComplete) return;
     if (boardKey && boardKey === lastRadarPingBoardKey) return;
     if (boardKey) lastRadarPingBoardKey = boardKey;
 
@@ -222,6 +245,7 @@ window.ChessFX = (function () {
   }
 
   function stopPhonkEdit(shadowRoot) {
+    const targetShadowRoot = activeShadowRoot || shadowRoot;
     if (activeEditTimer) {
       clearTimeout(activeEditTimer);
       activeEditTimer = null;
@@ -234,8 +258,13 @@ window.ChessFX = (function () {
       window.removeEventListener("keydown", activeEscHandler);
       activeEscHandler = null;
     }
+    if (activeSkipButton && activeSkipHandler) {
+      activeSkipButton.removeEventListener("click", activeSkipHandler);
+    }
+    activeSkipButton = null;
+    activeSkipHandler = null;
     if (audioCtx) {
-      try { audioCtx.close(); } catch (e) {}
+      closeAudioContext(audioCtx);
       audioCtx = null;
     }
     const cgWrap = document.querySelector(".cg-wrap, cg-board");
@@ -244,18 +273,19 @@ window.ChessFX = (function () {
       cgWrap.style.filter = "";
       cgWrap.style.transition = "";
     }
-    if (shadowRoot) {
-      const overlay = shadowRoot.getElementById("cc-phonk-edit-overlay");
+    if (targetShadowRoot) {
+      const overlay = targetShadowRoot.getElementById("cc-phonk-edit-overlay");
       if (overlay) overlay.remove();
-      const testBtn = shadowRoot.getElementById("cc-test-phonk-btn");
+      const testBtn = targetShadowRoot.getElementById("cc-test-phonk-btn");
       if (testBtn) {
         testBtn.textContent = "🔥 ТЕСТ ФОНК-ЭДИТА (15 СЕК)";
       }
     }
+    activeShadowRoot = null;
   }
 
   function triggerBrilliantPhonkEdit(shadowRoot, moveObj, state, durationMs = 15000, forceTest = false) {
-    if (!shadowRoot) return;
+    if (shutdownComplete || !shadowRoot) return;
 
     if (forceTest && isEditRunning()) {
       stopPhonkEdit(shadowRoot);
@@ -270,6 +300,7 @@ window.ChessFX = (function () {
     }
 
     stopPhonkEdit(shadowRoot);
+    activeShadowRoot = shadowRoot;
 
     const testBtn = shadowRoot.getElementById("cc-test-phonk-btn");
     if (testBtn) {
@@ -370,8 +401,9 @@ window.ChessFX = (function () {
 
     shadowRoot.appendChild(overlay);
 
-    const skipBtn = overlay.querySelector("#cc-phonk-skip-btn");
-    if (skipBtn) skipBtn.addEventListener("click", () => stopPhonkEdit(shadowRoot));
+    activeSkipButton = overlay.querySelector("#cc-phonk-skip-btn");
+    activeSkipHandler = () => stopPhonkEdit(shadowRoot);
+    if (activeSkipButton) activeSkipButton.addEventListener("click", activeSkipHandler);
 
     activeEscHandler = (e) => {
       if (e.key === "Escape") {
@@ -468,6 +500,19 @@ window.ChessFX = (function () {
     activeEditTimer = setTimeout(() => stopPhonkEdit(shadowRoot), durationMs);
   }
 
+  function shutdown(shadowRoot) {
+    if (shutdownComplete) return false;
+    shutdownComplete = true;
+    stopPhonkEdit(shadowRoot);
+
+    const radarContextToClose = radarAudioCtx;
+    radarAudioCtx = null;
+    closeAudioContext(radarContextToClose);
+    lastTriggeredBoardKey = "";
+    lastRadarPingBoardKey = "";
+    return true;
+  }
+
   function renderMateSpectacleByStyle(styleName, pm, pk) {
     const bannerY = Math.max(45, pk.y - 54);
     const bannerX = Math.max(125, Math.min(675, pk.x));
@@ -550,11 +595,14 @@ window.ChessFX = (function () {
   }
 
   return {
+    __ccLifecycleVersion: 1,
     isBrilliantMove,
     isEditRunning,
     playTacticalAudioPing,
     triggerBrilliantPhonkEdit,
     stopPhonkEdit,
+    shutdown,
+    revive,
     renderMateSpectacleByStyle
   };
-})();
+})(window.ChessFX);

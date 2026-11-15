@@ -1,30 +1,25 @@
 package com.chesscoach.app
 
 import android.annotation.SuppressLint
-import android.app.Activity
-import android.content.ContentValues
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.provider.MediaStore
-import android.util.Base64
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -33,477 +28,1597 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.toColorInt
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.JavaScriptReplyProxy
+import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
-import java.io.File
-import java.io.FileOutputStream
+import java.nio.charset.StandardCharsets
+import java.util.ArrayDeque
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 class MainActivity : AppCompatActivity() {
+    private lateinit var rootLayout: FrameLayout
+    private lateinit var mainWebView: WebView
+    private lateinit var engineWebView: WebView
+    private lateinit var storageRepository: AtomicStorageRepository
+    private lateinit var capabilityProfiler: DeviceCapabilityProfiler
 
-    private lateinit var webView: WebView
-    private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private lateinit var storageFile: File
-    private lateinit var userScriptsDir: File
+    private val storageExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val bundleExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val bundleCache = ConcurrentHashMap<Platform, String>()
+    private val clientInstanceId = UUID.randomUUID().toString()
+    private val pendingRuntime = LinkedHashMap<String, PendingRuntimeRequest>()
+    private val pendingAsync = LinkedHashMap<String, PendingAsyncRequest>()
+    private val overallLimiter = SlidingWindowLimiter(100, 10_000L)
+    private val runtimeLimiter = SlidingWindowLimiter(50, 5_000L)
+    private val storageLimiter = SlidingWindowLimiter(30, 10_000L)
+    private val profileLimiter = SlidingWindowLimiter(10, 60_000L)
+    private val platformLimiter = SlidingWindowLimiter(4, 60_000L)
+    private val engineLimiter = SlidingWindowLimiter(100, 5_000L)
+    private val touchLimiter = SlidingWindowLimiter(12, 5_000L)
+    private var pendingTouch: PendingTouchRequest? = null
+    private var dispatchingNativeTouch = false
 
-    private val fileChooserLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val callback = filePathCallback ?: return@registerForActivityResult
-        filePathCallback = null
+    private val assetLoader by lazy {
+        WebViewAssetLoader.Builder()
+            .setDomain(APP_ASSET_HOST)
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/__cc_assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+    }
 
-        if (result.resultCode != Activity.RESULT_OK || result.data == null) {
-            callback.onReceiveValue(null)
-            return@registerForActivityResult
-        }
-
-        val data = result.data!!
-        val uris = mutableListOf<Uri>()
-        if (data.clipData != null) {
-            val count = data.clipData!!.itemCount
-            for (i in 0 until count) {
-                uris.add(data.clipData!!.getItemAt(i).uri)
+    private var documentStartHandler: ScriptHandler? = null
+    private var privacyStartHandler: ScriptHandler? = null
+    private var pageGeneration = 0L
+    private var storageRevision = 0L
+    private var engineDocumentLoaded = false
+    private var isResumedState = false
+    private var isDestroyedState = false
+    private var mainRendererRecoveries = 0
+    private var engineRendererRecoveries = 0
+    private var enginePermanentlyUnavailable = false
+    private var appLifecycleGeneration = 0L
+    private var engineNeedsReload = false
+    private var powerReceiverRegistered = false
+    private var removeThermalListener: (() -> Unit)? = null
+    private val powerSaveReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == PowerManager.ACTION_POWER_SAVE_MODE_CHANGED) {
+                publishCurrentDeviceProfile()
             }
-        } else if (data.data != null) {
-            uris.add(data.data!!)
         }
-
-        callback.onReceiveValue(uris.toTypedArray())
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Color.parseColor("#06080E")
-        window.navigationBarColor = Color.parseColor("#06080E")
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        storageFile = File(filesDir, "cc_storage_v15.json")
-        if (!storageFile.exists()) {
-            storageFile.writeText("{}")
-        }
+        storageRepository = AtomicStorageRepository(applicationContext)
+        capabilityProfiler = DeviceCapabilityProfiler(applicationContext)
 
-        userScriptsDir = File(filesDir, "user_scripts")
-        if (!userScriptsDir.exists()) {
-            userScriptsDir.mkdirs()
-        }
-
-        val rootLayout = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#06080E"))
+        rootLayout = FrameLayout(this).apply {
+            setBackgroundColor("#06080E".toColorInt())
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+        setContentView(rootLayout)
 
-        webView = WebView(this).apply {
-            setBackgroundColor(Color.parseColor("#06080E"))
+        engineWebView = createEngineWebView().also { rootLayout.addView(it, 0) }
+        mainWebView = createMainWebView().also { rootLayout.addView(it) }
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(rootLayout)
+        setupBackNavigation()
+        registerDeviceStateListeners()
+
+        engineWebView.loadUrl(ENGINE_URL)
+        if (!restoreTrustedState(savedInstanceState)) {
+            mainWebView.loadUrl(lastPlatform().url)
+        }
+
+        if (!bridgeFeaturesAvailable()) {
+            Toast.makeText(
+                this,
+                "Обновите Android System WebView для функций ChessCoach",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createMainWebView(): WebView {
+        val view = WebView(this).apply {
+            setBackgroundColor("#06080E".toColorInt())
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         }
-
-        rootLayout.addView(webView)
-        setContentView(rootLayout)
-
-        setupWebView()
-        setupBackNavigation()
-
-        val initialUrl = getLastPlatformUrl()
-        webView.loadUrl(initialUrl)
+        configureSecureSettings(view)
+        registerRemoteBridge(view)
+        installDocumentStartScripts(view)
+        view.webViewClient = createMainWebViewClient()
+        view.setOnTouchListener { _, event ->
+            if (!dispatchingNativeTouch && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                cancelPendingTouch("USER_INPUT", "A user touch cancelled the native gesture")
+            }
+            false
+        }
+        return view
     }
 
-    private fun getLastPlatformUrl(): String {
-        return try {
-            val json = JSONObject(storageFile.readText())
-            when (json.optString("cc_mobile_platform", "lichess")) {
-                "chesscom" -> "https://www.chess.com/play/online"
-                else -> "https://lichess.org/"
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createEngineWebView(): WebView {
+        val view = WebView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            alpha = 0f
+            isFocusable = false
+            isFocusableInTouchMode = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            layoutParams = FrameLayout.LayoutParams(1, 1)
+        }
+        configureSecureSettings(view)
+        registerEngineBridge(view)
+        view.webViewClient = createEngineWebViewClient()
+        return view
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureSecureSettings(view: WebView) {
+        view.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = false
+            allowContentAccess = false
+            @Suppress("DEPRECATION")
+            allowFileAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            allowUniversalAccessFromFileURLs = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            safeBrowsingEnabled = true
+            mediaPlaybackRequiresUserGesture = true
+            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(false)
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
+            cacheMode = WebSettings.LOAD_DEFAULT
+            val standardUserAgent = userAgentString.orEmpty()
+            if (!standardUserAgent.contains(USER_AGENT_TOKEN)) {
+                userAgentString = "$standardUserAgent $USER_AGENT_TOKEN".trim()
             }
-        } catch (e: Exception) {
-            "https://lichess.org/"
+        }
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            setAcceptThirdPartyCookies(view, false)
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled", "RequiresFeature")
-    private fun setupWebView() {
-        val settings = webView.settings
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.databaseEnabled = true
-        settings.mediaPlaybackRequiresUserGesture = false
-        settings.allowFileAccess = true
-        settings.allowContentAccess = true
-        settings.loadWithOverviewMode = false
-        settings.useWideViewPort = false
-        settings.setSupportZoom(false)
-        settings.builtInZoomControls = false
-        settings.displayZoomControls = false
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+    private fun createMainWebViewClient(): WebViewClient = object : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+            if (!request.isForMainFrame) return false
+            if (isTrustedRemoteUri(request.url)) return false
+            openExternal(request.url)
+            return true
+        }
 
-        val defaultUa = settings.userAgentString
-        settings.userAgentString = defaultUa
-            .replace("; wv", "")
-            .replace(Regex("Version/\\d+\\.\\d+\\s+"), "")
+        @Deprecated("Deprecated in Android")
+        override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
+            val uri = Uri.parse(url)
+            if (isTrustedRemoteUri(uri)) return false
+            openExternal(uri)
+            return true
+        }
 
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
+        override fun shouldInterceptRequest(
+            view: WebView,
+            request: WebResourceRequest
+        ): WebResourceResponse? {
+            return interceptRemotePackagedAsset(request) ?: super.shouldInterceptRequest(view, request)
+        }
 
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        webView.addJavascriptInterface(AndroidBridge(), "CCAndroidBridge")
+        override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            pageGeneration++
+            cancelRemoteWork("NAVIGATION_CANCELLED", "Document navigation cancelled the request")
+            val uri = Uri.parse(url)
+            if (!isTrustedRemoteUri(uri)) {
+                view.stopLoading()
+                openExternal(uri)
+                return
+            }
+            super.onPageStarted(view, url, favicon)
+        }
 
-        val assetLoader = WebViewAssetLoader.Builder()
-            .setDomain("appassets.androidplatform.net")
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
-            .build()
+        override fun onPageCommitVisible(view: WebView, url: String) {
+            if (!isTrustedRemoteUri(Uri.parse(url))) {
+                view.stopLoading()
+                return
+            }
+            super.onPageCommitVisible(view, url)
+        }
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            val startScript = buildDocumentStartScript()
-            WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                startScript,
-                setOf("https://lichess.org", "https://*.lichess.org", "https://chess.com", "https://*.chess.com")
+        override fun onPageFinished(view: WebView, url: String) {
+            super.onPageFinished(view, url)
+            if (!isTrustedRemoteUri(Uri.parse(url))) return
+            injectMainBundle(view, url, pageGeneration, 0)
+        }
+
+        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            if (!::mainWebView.isInitialized || view !== mainWebView) return false
+            recoverMainRenderer(detail.didCrash())
+            return true
+        }
+    }
+
+    private fun createEngineWebViewClient(): WebViewClient = object : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+            if (!request.isForMainFrame) return false
+            return request.url.toString() != ENGINE_URL
+        }
+
+        override fun shouldInterceptRequest(
+            view: WebView,
+            request: WebResourceRequest
+        ): WebResourceResponse? {
+            if (isAppAssetUri(request.url)) {
+                return assetLoader.shouldInterceptRequest(request.url)
+                    ?: super.shouldInterceptRequest(view, request)
+            }
+            if (!request.isForMainFrame && isAllowedEngineNetworkUri(request.url)) return null
+            return forbiddenResponse()
+        }
+
+        override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            engineDocumentLoaded = false
+            cancelRuntimeRequests("ENGINE_RELOADING", "Engine document is reloading")
+            if (url != ENGINE_URL) view.stopLoading()
+            super.onPageStarted(view, url, favicon)
+        }
+
+        override fun onPageFinished(view: WebView, url: String) {
+            super.onPageFinished(view, url)
+            if (url != ENGINE_URL) return
+            engineDocumentLoaded = true
+            flushQueuedRuntimeRequests()
+        }
+
+        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            if (!::engineWebView.isInitialized || view !== engineWebView) return false
+            recoverEngineRenderer(detail.didCrash())
+            return true
+        }
+    }
+
+    private fun registerRemoteBridge(view: WebView) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        WebViewCompat.addWebMessageListener(view, REMOTE_BRIDGE_NAME, REMOTE_ORIGINS) {
+                sourceView, message, sourceOrigin, isMainFrame, replyProxy ->
+            runOnMain {
+                handleRemoteMessage(
+                    sourceView,
+                    message.data,
+                    sourceOrigin,
+                    isMainFrame,
+                    replyProxy
+                )
+            }
+        }
+    }
+
+    private fun registerEngineBridge(view: WebView) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        WebViewCompat.addWebMessageListener(view, ENGINE_BRIDGE_NAME, setOf(APP_ASSET_ORIGIN)) {
+                sourceView, message, sourceOrigin, isMainFrame, replyProxy ->
+            runOnMain {
+                handleEngineMessage(
+                    sourceView,
+                    message.data,
+                    sourceOrigin,
+                    isMainFrame,
+                    replyProxy
+                )
+            }
+        }
+    }
+
+    private fun handleRemoteMessage(
+        sourceView: WebView,
+        raw: String?,
+        sourceOrigin: Uri,
+        isMainFrame: Boolean,
+        replyProxy: JavaScriptReplyProxy
+    ) {
+        if (
+            isDestroyedState || !isResumedState || sourceView !== mainWebView || !isMainFrame ||
+            trustedOrigin(sourceOrigin) == null ||
+            trustedOrigin(sourceOrigin) != trustedOrigin(Uri.parse(sourceView.url.orEmpty()))
+        ) {
+            postError(replyProxy, safeMessageId(raw), "UNTRUSTED_SOURCE", "Untrusted message source")
+            return
+        }
+        if (raw == null) {
+            postError(replyProxy, "invalid", "INVALID_MESSAGE", "String message required")
+            return
+        }
+        if (!overallLimiter.tryAcquire()) {
+            postError(replyProxy, safeMessageId(raw), "RATE_LIMITED", "Message rate exceeded")
+            return
+        }
+
+        val message = try {
+            BridgeProtocol.parse(raw)
+        } catch (error: Exception) {
+            postError(replyProxy, safeMessageId(raw), "INVALID_MESSAGE", error.message ?: "Invalid message")
+            return
+        }
+
+        try {
+            enforceRemoteMessageSize(message, raw)
+            validateRemoteMetadata(message)
+            when (message.type) {
+                "runtime.message" -> handleRuntimeRequest(message, replyProxy, sourceOrigin)
+                "storage.set" -> handleStorageSet(message, replyProxy)
+                "storage.replace" -> handleStorageReplace(message, replyProxy)
+                "storage.remove" -> handleStorageRemove(message, replyProxy)
+                "storage.clear" -> handleStorageClear(message, replyProxy)
+                "device.profile.get" -> handleDeviceProfileRequest(message, replyProxy, full = false)
+                "platform.switch" -> handlePlatformSwitch(message, replyProxy)
+                "input.gesture" -> handleTouchGesture(message, replyProxy, sourceView)
+                "input.cancel" -> handleTouchCancel(message, replyProxy)
+                else -> postError(replyProxy, message.id, "UNSUPPORTED_TYPE", "Message type is not supported")
+            }
+        } catch (error: Exception) {
+            postError(replyProxy, message.id, "INVALID_PAYLOAD", error.message ?: "Invalid payload")
+        }
+    }
+
+    private fun handleEngineMessage(
+        sourceView: WebView,
+        raw: String?,
+        sourceOrigin: Uri,
+        isMainFrame: Boolean,
+        replyProxy: JavaScriptReplyProxy
+    ) {
+        if (
+            isDestroyedState || sourceView !== engineWebView || !isMainFrame ||
+            !isExactAppAssetOrigin(sourceOrigin) || sourceView.url != ENGINE_URL
+        ) {
+            postError(replyProxy, safeMessageId(raw), "UNTRUSTED_SOURCE", "Untrusted engine source", "ENGINE")
+            return
+        }
+        if (raw == null || !engineLimiter.tryAcquire()) {
+            postError(replyProxy, safeMessageId(raw), "INVALID_MESSAGE", "Invalid engine message", "ENGINE")
+            return
+        }
+
+        val message = try {
+            BridgeProtocol.parse(raw, BridgeProtocol.MAX_MESSAGE_BYTES)
+        } catch (error: Exception) {
+            postError(replyProxy, safeMessageId(raw), "INVALID_MESSAGE", error.message ?: "Invalid message", "ENGINE")
+            return
+        }
+
+        try {
+            enforceEngineMessageSize(message, raw)
+            validateEngineMetadata(message)
+            when (message.type) {
+                "runtime.response" -> routeRuntimeResponse(message)
+                "device.profile.get" -> handleDeviceProfileRequest(message, replyProxy, full = true)
+                "engine.ready" -> {
+                    BridgeProtocol.requireOnlyKeys(message.payload, emptySet())
+                    engineDocumentLoaded = true
+                    engineRendererRecoveries = 0
+                    enginePermanentlyUnavailable = false
+                    postReply(
+                        replyProxy,
+                        BridgeProtocol.response(
+                            message.id,
+                            "engine.ready.response",
+                            "engine",
+                            JSONObject().put("ok", true),
+                            "ENGINE"
+                        )
+                    )
+                    flushQueuedRuntimeRequests()
+                }
+                else -> postError(replyProxy, message.id, "UNSUPPORTED_TYPE", "Engine message type is not supported", "ENGINE")
+            }
+        } catch (error: Exception) {
+            postError(replyProxy, message.id, "INVALID_PAYLOAD", error.message ?: "Invalid payload", "ENGINE")
+        }
+    }
+
+    private fun handleRuntimeRequest(
+        message: BridgeProtocol.Message,
+        replyProxy: JavaScriptReplyProxy,
+        sourceOrigin: Uri
+    ) {
+        require(runtimeLimiter.tryAcquire()) { "Runtime rate exceeded" }
+        if (enginePermanentlyUnavailable) {
+            postError(replyProxy, message.id, "ENGINE_UNAVAILABLE", "Engine renderer is unavailable")
+            return
+        }
+        require(pendingRuntime.size < MAX_PENDING_RUNTIME) { "Too many pending runtime requests" }
+        require(!pendingRuntime.containsKey(message.id)) { "Duplicate runtime request id" }
+        BridgeProtocol.validateRuntimePayload(message.payload)
+
+        val runtimePayload = JSONObject(message.payload.toString())
+        runtimePayload.put("sender", trustedSender(sourceOrigin))
+        val envelope = JSONObject(message.envelope.toString())
+            .put("v", BridgeProtocol.VERSION)
+            .put("scope", BridgeProtocol.SCOPE)
+            .put("source", "remote")
+            .put("target", "ENGINE")
+            .put("channel", "runtime")
+            .put("type", "runtime.message")
+            .put("payload", runtimePayload)
+
+        val timeout = Runnable {
+            completeRuntimeWithError(message.id, "ENGINE_TIMEOUT", "Engine response timed out")
+        }
+        pendingRuntime[message.id] = PendingRuntimeRequest(
+            id = message.id,
+            envelope = envelope.toString(),
+            replyProxy = replyProxy,
+            pageGeneration = pageGeneration,
+            timeout = timeout
+        )
+        mainHandler.postDelayed(timeout, RUNTIME_TIMEOUT_MS)
+        dispatchRuntimeRequest(message.id)
+    }
+
+    private fun dispatchRuntimeRequest(id: String) {
+        val pending = pendingRuntime[id] ?: return
+        if (!engineDocumentLoaded || !::engineWebView.isInitialized) return
+        if (pending.state == DispatchState.DISPATCHED || pending.state == DispatchState.DISPATCHING) return
+        if (pending.dispatchAttempts >= MAX_ENGINE_DISPATCH_ATTEMPTS) {
+            completeRuntimeWithError(id, "ENGINE_UNAVAILABLE", "Engine host is unavailable")
+            return
+        }
+
+        pending.state = DispatchState.DISPATCHING
+        pending.dispatchAttempts++
+        val quoted = quoteForJavaScript(pending.envelope)
+        val script = """
+            (function() {
+              try {
+                if (!window.CCEngineHost || typeof window.CCEngineHost.dispatchFromNative !== "function") return false;
+                window.CCEngineHost.dispatchFromNative(JSON.parse($quoted));
+                return true;
+              } catch (_) {
+                return false;
+              }
+            })();
+        """.trimIndent()
+        engineWebView.evaluateJavascript(script) { result ->
+            val current = pendingRuntime[id] ?: return@evaluateJavascript
+            if (result == "true") {
+                current.state = DispatchState.DISPATCHED
+            } else {
+                current.state = DispatchState.QUEUED
+                mainHandler.postDelayed({ dispatchRuntimeRequest(id) }, ENGINE_DISPATCH_RETRY_MS)
+            }
+        }
+    }
+
+    private fun flushQueuedRuntimeRequests() {
+        pendingRuntime.keys.toList().forEach(::dispatchRuntimeRequest)
+    }
+
+    private fun routeRuntimeResponse(message: BridgeProtocol.Message) {
+        val pending = pendingRuntime.remove(message.id) ?: return
+        mainHandler.removeCallbacks(pending.timeout)
+        if (pending.pageGeneration != pageGeneration || isDestroyedState) return
+        val response = JSONObject(message.envelope.toString())
+            .put("v", BridgeProtocol.VERSION)
+            .put("scope", BridgeProtocol.SCOPE)
+            .put("source", "engine")
+            .put("target", "REMOTE")
+            .put("channel", "runtime")
+            .put("type", "runtime.response")
+        postReply(pending.replyProxy, response.toString())
+    }
+
+    private fun handleStorageSet(message: BridgeProtocol.Message, replyProxy: JavaScriptReplyProxy) {
+        require(storageLimiter.tryAcquire()) { "Storage rate exceeded" }
+        BridgeProtocol.requireOnlyKeys(message.payload, setOf("items"))
+        val items = message.payload.optJSONObject("items")
+            ?: throw IllegalArgumentException("Storage items are required")
+        runAsyncRequest(message.id, replyProxy) {
+            storageRepository.set(items)
+            AsyncResult(
+                "storage.response",
+                "storage",
+                JSONObject().put("ok", true).put("operation", "set"),
+                refreshBootstrap = true
             )
         }
+    }
 
-        webView.webViewClient = object : WebViewClient() {
-
-            override fun shouldInterceptRequest(
-                view: WebView,
-                request: WebResourceRequest
-            ): WebResourceResponse? {
-                val url = request.url
-                if (url.host == "appassets.androidplatform.net") {
-                    val path = url.path ?: ""
-                    if (path.startsWith("/assets/user_scripts/")) {
-                        val fileName = path.removePrefix("/assets/user_scripts/")
-                        val customFile = File(userScriptsDir, fileName)
-                        if (customFile.exists()) {
-                            return createCorsResponse("application/javascript", customFile.readBytes())
-                        }
-                    }
-
-                    val resp = assetLoader.shouldInterceptRequest(url)
-                    if (resp != null) {
-                        val headers = HashMap<String, String>()
-                        resp.responseHeaders?.let { headers.putAll(it) }
-                        headers["Access-Control-Allow-Origin"] = "*"
-                        headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-                        headers["Access-Control-Allow-Headers"] = "*"
-                        headers["Cache-Control"] = "no-store"
-                        resp.responseHeaders = headers
-                        return resp
-                    }
-                }
-                return super.shouldInterceptRequest(view, request)
-            }
-
-            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                    view.evaluateJavascript(buildDocumentStartScript(), null)
-                }
-            }
-
-            override fun onPageFinished(view: WebView, url: String) {
-                super.onPageFinished(view, url)
-                CookieManager.getInstance().flush()
-                injectMainChessCoachBundle(url)
-            }
-        }
-
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onJsBeforeUnload(
-                view: WebView?,
-                url: String?,
-                message: String?,
-                result: android.webkit.JsResult?
-            ): Boolean {
-                // Автоматически разрешаем переключение между Lichess и Chess.com даже посреди партии
-                result?.confirm()
-                return true
-            }
-
-            override fun onShowFileChooser(
-                webView: WebView,
-                filePathCallback: ValueCallback<Array<Uri>>,
-                fileChooserParams: FileChooserParams
-            ): Boolean {
-                this@MainActivity.filePathCallback?.onReceiveValue(null)
-                this@MainActivity.filePathCallback = filePathCallback
-
-                val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
-                }
-                fileChooserLauncher.launch(Intent.createChooser(intent, "Выберите файл для ChessCoach"))
-                return true
-            }
+    private fun handleStorageReplace(message: BridgeProtocol.Message, replyProxy: JavaScriptReplyProxy) {
+        require(storageLimiter.tryAcquire()) { "Storage rate exceeded" }
+        BridgeProtocol.requireOnlyKeys(message.payload, setOf("items"))
+        val items = message.payload.optJSONObject("items")
+            ?: throw IllegalArgumentException("Storage items are required")
+        runAsyncRequest(message.id, replyProxy) {
+            storageRepository.replace(items)
+            AsyncResult(
+                "storage.response",
+                "storage",
+                JSONObject().put("ok", true).put("operation", "replace"),
+                refreshBootstrap = true
+            )
         }
     }
 
-    private fun createCorsResponse(mime: String, bytes: ByteArray): WebResourceResponse {
-        val headers = mapOf(
-            "Access-Control-Allow-Origin" to "*",
-            "Access-Control-Allow-Methods" to "GET, OPTIONS",
-            "Cache-Control" to "no-store"
+    private fun handleStorageRemove(message: BridgeProtocol.Message, replyProxy: JavaScriptReplyProxy) {
+        require(storageLimiter.tryAcquire()) { "Storage rate exceeded" }
+        BridgeProtocol.requireOnlyKeys(message.payload, setOf("keys"))
+        val array = message.payload.optJSONArray("keys")
+            ?: throw IllegalArgumentException("Storage keys are required")
+        require(array.length() <= AtomicStorageRepository.MAX_MUTATION_KEYS) { "Too many storage keys" }
+        val keys = ArrayList<String>(array.length())
+        for (index in 0 until array.length()) keys += array.getString(index)
+        runAsyncRequest(message.id, replyProxy) {
+            storageRepository.remove(keys)
+            AsyncResult(
+                "storage.response",
+                "storage",
+                JSONObject().put("ok", true).put("operation", "remove"),
+                refreshBootstrap = true
+            )
+        }
+    }
+
+    private fun handleStorageClear(message: BridgeProtocol.Message, replyProxy: JavaScriptReplyProxy) {
+        require(storageLimiter.tryAcquire()) { "Storage rate exceeded" }
+        BridgeProtocol.requireOnlyKeys(message.payload, emptySet())
+        runAsyncRequest(message.id, replyProxy) {
+            storageRepository.clear()
+            AsyncResult(
+                "storage.response",
+                "storage",
+                JSONObject().put("ok", true).put("operation", "clear"),
+                refreshBootstrap = true
+            )
+        }
+    }
+
+    private fun handleDeviceProfileRequest(
+        message: BridgeProtocol.Message,
+        replyProxy: JavaScriptReplyProxy,
+        full: Boolean
+    ) {
+        require(profileLimiter.tryAcquire()) { "Profile rate exceeded" }
+        BridgeProtocol.requireOnlyKeys(message.payload, emptySet())
+        val profile = if (full) capabilityProfiler.fullProfile() else capabilityProfiler.coarseProfile()
+        postReply(
+            replyProxy,
+            BridgeProtocol.response(
+                id = message.id,
+                type = "device.profile.response",
+                channel = "device",
+                target = if (full) "ENGINE" else "REMOTE",
+                payload = JSONObject().put("ok", true).put("profile", profile)
+            )
         )
-        return WebResourceResponse(mime, "UTF-8", 200, "OK", headers, ByteArrayInputStream(bytes))
     }
 
-    private fun readAssetTextSafe(relPath: String): String {
-        return try {
-            assets.open(relPath).bufferedReader(Charsets.UTF_8).use { it.readText() }
-        } catch (e: Exception) {
-            ""
+    private fun handlePlatformSwitch(message: BridgeProtocol.Message, replyProxy: JavaScriptReplyProxy) {
+        require(platformLimiter.tryAcquire()) { "Platform switch rate exceeded" }
+        BridgeProtocol.requireOnlyKeys(message.payload, setOf("platform"))
+        val platform = Platform.fromWire(message.payload.optString("platform", ""))
+            ?: throw IllegalArgumentException("Platform must be LICHESS or CHESS_COM")
+        runAsyncRequest(message.id, replyProxy) {
+            storageRepository.set(JSONObject().put(PLATFORM_STORAGE_KEY, platform.storageValue))
+            AsyncResult(
+                "platform.switch.response",
+                "platform",
+                JSONObject().put("ok", true).put("platform", platform.wireValue),
+                refreshBootstrap = true,
+                navigation = platform
+            )
         }
     }
 
-    private fun buildDocumentStartScript(): String {
-        val mainBridgeCode = readAssetTextSafe("content/main-bridge.js")
+    private fun handleTouchGesture(
+        message: BridgeProtocol.Message,
+        replyProxy: JavaScriptReplyProxy,
+        view: WebView
+    ) {
+        require(message.envelope.opt("scope") == BridgeProtocol.SCOPE) { "Input scope is required" }
+        require(message.envelope.opt("source") == "remote" && message.envelope.opt("target") == "NATIVE") {
+            "Invalid input route"
+        }
+        require(message.envelope.opt("channel") == "input") { "Input channel is required" }
+        val gesture = BridgeProtocol.validateTouchGesture(message.payload)
+        if (pendingTouch != null) {
+            postError(replyProxy, message.id, "INPUT_BUSY", "Another native gesture is pending")
+            return
+        }
+        if (!touchLimiter.tryAcquire()) {
+            postError(replyProxy, message.id, "INPUT_RATE_LIMITED", "Native touch rate exceeded")
+            return
+        }
+        val pending = PendingTouchRequest(message.id, replyProxy, view, pageGeneration, view.url.orEmpty(), gesture)
+        if (!isTouchContextCurrent(pending)) {
+            postError(replyProxy, message.id, "INPUT_UNAVAILABLE", "The game view is not visible and focused")
+            return
+        }
+        pendingTouch = pending
+        pending.timeout = Runnable {
+            if (pendingTouch === pending) cancelPendingTouch("INPUT_TIMEOUT", "Native gesture timed out")
+        }.also { mainHandler.postDelayed(it, TOUCH_REQUEST_TIMEOUT_MS) }
+        val script = """
+            (function() {
+              const viewport = window.visualViewport;
+              return {
+                href: String(location.href), visible: document.visibilityState === "visible" && window === window.top,
+                documentToken: window.__CC_ANDROID_RUNTIME__ && window.__CC_ANDROID_RUNTIME__.inputDocumentToken,
+                viewport: {
+                  width: viewport ? viewport.width : window.innerWidth,
+                  height: viewport ? viewport.height : window.innerHeight,
+                  offsetLeft: viewport ? viewport.offsetLeft : 0,
+                  offsetTop: viewport ? viewport.offsetTop : 0
+                }
+              };
+            })();
+        """.trimIndent()
+        try {
+            view.evaluateJavascript(script) { result ->
+                if (pendingTouch !== pending) return@evaluateJavascript
+                try {
+                    require(isTouchContextCurrent(pending)) { "Native touch context changed" }
+                    val actual = JSONObject(result ?: "null")
+                    require(actual.opt("visible") == true && actual.opt("href") == pending.url) { "Game document is not visible" }
+                    require(actual.opt("documentToken") == gesture.documentToken) { "Touch document changed" }
+                    val viewport = BridgeProtocol.validateTouchViewport(actual.getJSONObject("viewport"))
+                    val width = view.width - view.paddingLeft - view.paddingRight
+                    val height = view.height - view.paddingTop - view.paddingBottom
+                    // Client coordinates are CSS pixels in the layout viewport, not Android dp.
+                    pending.points = BridgeProtocol.mapTouchPoints(gesture, viewport, width, height).map {
+                        BridgeProtocol.TouchPoint(it.x + view.paddingLeft, it.y + view.paddingTop)
+                    }
+                    pending.viewWidth = view.width
+                    pending.viewHeight = view.height
+                    pending.downTime = SystemClock.uptimeMillis()
+                    pending.downSent = true
+                    if (!dispatchNativeTouch(pending, MotionEvent.ACTION_DOWN, pending.points.first())) {
+                        cancelPendingTouch("INPUT_REJECTED", "WebView rejected the touch down")
+                        return@evaluateJavascript
+                    }
+                    scheduleTouchStep(pending, 1)
+                } catch (error: Exception) {
+                    cancelPendingTouch("INPUT_CONTEXT_CHANGED", error.message ?: "Native touch validation failed")
+                }
+            }
+        } catch (error: Exception) {
+            cancelPendingTouch("INPUT_UNAVAILABLE", error.message ?: "Could not inspect the game viewport")
+        }
+    }
+
+    private fun handleTouchCancel(message: BridgeProtocol.Message, replyProxy: JavaScriptReplyProxy) {
+        require(message.envelope.opt("scope") == BridgeProtocol.SCOPE &&
+            message.envelope.opt("source") == "remote" && message.envelope.opt("target") == "NATIVE" &&
+            message.envelope.opt("channel") == "input") { "Invalid input cancellation route" }
+        BridgeProtocol.requireOnlyKeys(message.payload, setOf("documentToken"))
+        val token = message.payload.opt("documentToken") as? String
+        require(token != null && MESSAGE_ID_PATTERN.matches(token)) { "Invalid touch document token" }
+        val cancelled = pendingTouch?.gesture?.documentToken == token
+        if (cancelled) cancelPendingTouch("INPUT_CANCELLED", "The game core cancelled the native gesture")
+        postReply(
+            replyProxy,
+            BridgeProtocol.response(
+                message.id, "input.cancel.response", "input", JSONObject().put("ok", true).put("cancelled", cancelled)
+            )
+        )
+    }
+
+    private fun isTouchContextCurrent(pending: PendingTouchRequest): Boolean {
+        val view = pending.view
+        return !isDestroyedState && isResumedState && view === mainWebView &&
+            pending.pageGeneration == pageGeneration && view.url == pending.url &&
+            isTrustedRemoteUri(Uri.parse(pending.url)) && view.isAttachedToWindow && view.isShown &&
+            view.windowVisibility == View.VISIBLE && view.hasWindowFocus() &&
+            view.width > 0 && view.height > 0 &&
+            (pending.viewWidth == 0 || (view.width == pending.viewWidth && view.height == pending.viewHeight))
+    }
+
+    private fun scheduleTouchStep(pending: PendingTouchRequest, index: Int) {
+        if (pendingTouch !== pending) return
+        val dragging = pending.gesture.action == "drag"
+        val moving = dragging && index < pending.points.size
+        val elapsed = if (moving) {
+            pending.gesture.durationMs.toLong() * index / pending.points.size
+        } else {
+            pending.gesture.durationMs.toLong()
+        }
+        val step = Runnable {
+            if (pendingTouch !== pending) return@Runnable
+            if (!isTouchContextCurrent(pending) || SystemClock.uptimeMillis() - pending.downTime > pending.gesture.durationMs + 250L) {
+                cancelPendingTouch("INPUT_CONTEXT_CHANGED", "Native gesture context changed")
+                return@Runnable
+            }
+            val point = if (moving) pending.points[index] else pending.points.last()
+            val action = if (moving) MotionEvent.ACTION_MOVE else MotionEvent.ACTION_UP
+            try {
+                if (!dispatchNativeTouch(pending, action, point)) {
+                    cancelPendingTouch("INPUT_REJECTED", "WebView rejected the native gesture")
+                } else if (moving) {
+                    scheduleTouchStep(pending, index + 1)
+                } else {
+                    pendingTouch = null
+                    pending.downSent = false
+                    pending.timeout?.let(mainHandler::removeCallbacks)
+                    postReply(
+                        pending.replyProxy,
+                        BridgeProtocol.response(
+                            pending.id,
+                            "input.gesture.response",
+                            "input",
+                            JSONObject().put("ok", true).put("dispatched", true).put("action", pending.gesture.action)
+                        )
+                    )
+                }
+            } catch (error: Exception) {
+                cancelPendingTouch("INPUT_FAILED", error.message ?: "Native gesture dispatch failed")
+            }
+        }
+        pending.step = step
+        mainHandler.postAtTime(step, pending.downTime + elapsed)
+    }
+
+    private fun dispatchNativeTouch(
+        pending: PendingTouchRequest,
+        action: Int,
+        point: BridgeProtocol.TouchPoint
+    ): Boolean {
+        val properties = MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_FINGER
+        }
+        val coordinates = MotionEvent.PointerCoords().apply {
+            x = point.x.toFloat()
+            y = point.y.toFloat()
+            pressure = if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) 0f else 1f
+            size = 0.1f
+        }
+        val event = MotionEvent.obtain(
+            pending.downTime, SystemClock.uptimeMillis(), action, 1,
+            arrayOf(properties), arrayOf(coordinates), 0, 0, 1f, 1f,
+            0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
+        )
+        pending.lastPoint = point
+        dispatchingNativeTouch = true
+        return try {
+            pending.view.dispatchTouchEvent(event)
+        } finally {
+            dispatchingNativeTouch = false
+            event.recycle()
+        }
+    }
+
+    private fun cancelPendingTouch(code: String, message: String) {
+        val pending = pendingTouch ?: return
+        pendingTouch = null
+        pending.step?.let(mainHandler::removeCallbacks)
+        pending.timeout?.let(mainHandler::removeCallbacks)
+        if (pending.downSent) {
+            try {
+                dispatchNativeTouch(pending, MotionEvent.ACTION_CANCEL, pending.lastPoint)
+            } catch (_: Exception) {
+            }
+            pending.downSent = false
+        }
+        postError(pending.replyProxy, pending.id, code, message)
+    }
+
+    private fun runAsyncRequest(
+        id: String,
+        replyProxy: JavaScriptReplyProxy,
+        operation: () -> AsyncResult
+    ) {
+        require(!pendingAsync.containsKey(id)) { "Duplicate async request id" }
+        val pending = PendingAsyncRequest(id, replyProxy, pageGeneration)
+        pendingAsync[id] = pending
+        pending.future = storageExecutor.submit {
+            val result = try {
+                operation()
+            } catch (error: Exception) {
+                AsyncResult(
+                    "error",
+                    "native",
+                    JSONObject()
+                        .put("ok", false)
+                        .put(
+                            "error",
+                            JSONObject()
+                                .put("code", "OPERATION_FAILED")
+                                .put("message", (error.message ?: "Operation failed").take(256))
+                        )
+                )
+            }
+            mainHandler.post { completeAsyncRequest(id, result) }
+        }
+    }
+
+    private fun completeAsyncRequest(id: String, result: AsyncResult) {
+        val pending = pendingAsync.remove(id) ?: return
+        if (isDestroyedState || pending.pageGeneration != pageGeneration) return
+        if (result.refreshBootstrap) {
+            storageRevision++
+            installDocumentStartScripts(mainWebView)
+        }
+        postReply(
+            pending.replyProxy,
+            BridgeProtocol.response(id, result.type, result.channel, result.payload)
+        )
+        result.navigation?.let { platform ->
+            mainHandler.post {
+                if (!isDestroyedState) mainWebView.loadUrl(platform.url)
+            }
+        }
+    }
+
+    private fun validateRemoteMetadata(message: BridgeProtocol.Message) {
+        validateOptionalField(message.envelope, "source", "remote")
+        validateOptionalField(message.envelope, "target", if (message.type == "runtime.message") "ENGINE" else "NATIVE")
+        val expectedChannel = when {
+            message.type.startsWith("runtime.") -> "runtime"
+            message.type.startsWith("storage.") -> "storage"
+            message.type.startsWith("device.") -> "device"
+            message.type.startsWith("platform.") -> "platform"
+            message.type.startsWith("input.") -> "input"
+            else -> "native"
+        }
+        validateOptionalField(message.envelope, "channel", expectedChannel)
+    }
+
+    private fun enforceRemoteMessageSize(message: BridgeProtocol.Message, raw: String) {
+        val limit = when (message.type) {
+            "runtime.message" -> BridgeProtocol.MAX_MESSAGE_BYTES
+            "storage.set", "storage.replace" -> AtomicStorageRepository.MAX_STORAGE_BYTES + 8 * 1024
+            else -> BridgeProtocol.MAX_SMALL_MESSAGE_BYTES
+        }
+        require(raw.toByteArray(StandardCharsets.UTF_8).size <= limit) { "Message exceeds type limit" }
+    }
+
+    private fun enforceEngineMessageSize(message: BridgeProtocol.Message, raw: String) {
+        val limit = if (message.type == "runtime.response") {
+            BridgeProtocol.MAX_MESSAGE_BYTES
+        } else {
+            BridgeProtocol.MAX_SMALL_MESSAGE_BYTES
+        }
+        require(raw.toByteArray(StandardCharsets.UTF_8).size <= limit) { "Message exceeds type limit" }
+    }
+
+    private fun validateEngineMetadata(message: BridgeProtocol.Message) {
+        validateOptionalField(message.envelope, "source", "engine")
+        validateOptionalField(message.envelope, "target", if (message.type == "device.profile.get") "NATIVE" else "REMOTE")
+        val expectedChannel = when {
+            message.type.startsWith("runtime.") -> "runtime"
+            message.type.startsWith("device.") -> "device"
+            else -> "engine"
+        }
+        validateOptionalField(message.envelope, "channel", expectedChannel)
+    }
+
+    private fun validateOptionalField(envelope: JSONObject, name: String, expected: String) {
+        if (envelope.has(name)) require(envelope.getString(name) == expected) { "Invalid $name" }
+    }
+
+    private fun trustedSender(sourceOrigin: Uri): JSONObject = JSONObject()
+        .put("id", RUNTIME_ID)
+        .put("url", mainWebView.url.orEmpty())
+        .put("origin", trustedOrigin(sourceOrigin).orEmpty())
+        .put("frameId", 0)
+        .put("documentId", "android-$pageGeneration")
+        .put("clientInstanceId", clientInstanceId)
+
+    private fun postError(
+        replyProxy: JavaScriptReplyProxy,
+        id: String,
+        code: String,
+        message: String,
+        target: String = "REMOTE"
+    ) {
+        try {
+            postReply(replyProxy, BridgeProtocol.error(id, code, message, target))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun postReply(replyProxy: JavaScriptReplyProxy, message: String) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        replyProxy.postMessage(message)
+    }
+
+    private fun completeRuntimeWithError(id: String, code: String, message: String) {
+        val pending = pendingRuntime.remove(id) ?: return
+        mainHandler.removeCallbacks(pending.timeout)
+        postError(pending.replyProxy, id, code, message)
+    }
+
+    private fun cancelRuntimeRequests(code: String, message: String) {
+        pendingRuntime.keys.toList().forEach { completeRuntimeWithError(it, code, message) }
+    }
+
+    private fun cancelRemoteWork(code: String, message: String) {
+        cancelPendingTouch(code, message)
+        cancelRuntimeRequests(code, message)
+        val requests = pendingAsync.values.toList()
+        pendingAsync.clear()
+        requests.forEach {
+            it.future?.cancel(true)
+            postError(it.replyProxy, it.id, code, message)
+        }
+    }
+
+    private fun installDocumentStartScripts(view: WebView) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        documentStartHandler?.remove()
+        privacyStartHandler?.remove()
+        documentStartHandler = null
+        privacyStartHandler = null
+
+        val polyfill = readAssetText("bridge/cc-android-polyfill.js") ?: return
+        val profile = capabilityProfiler.coarseProfile()
+            .put("runtimeId", RUNTIME_ID)
+            .put("documentId", "android-$pageGeneration")
+            .put("clientInstanceId", clientInstanceId)
+        val bootstrap = JSONObject()
+            .put("v", BridgeProtocol.VERSION)
+            .put("storage", storageRepository.snapshot())
+            .put("storageRevision", storageRevision)
+            .put("profile", profile)
+        val quotedBootstrap = quoteForJavaScript(bootstrap.toString())
+        val privacyScript = readAssetText("content/privacy-mask-bootstrap.js").orEmpty()
+        documentStartHandler = WebViewCompat.addDocumentStartJavaScript(
+            view,
+            buildDocumentStartScript(polyfill, quotedBootstrap, ""),
+            setOf(LICHESS_ORIGIN)
+        )
+        privacyStartHandler = WebViewCompat.addDocumentStartJavaScript(
+            view,
+            buildDocumentStartScript(polyfill, quotedBootstrap, privacyScript),
+            setOf(CHESS_COM_ORIGIN)
+        )
+    }
+
+    private fun buildDocumentStartScript(
+        polyfill: String,
+        quotedBootstrap: String,
+        privacyScript: String
+    ): String {
+        val privacyBootstrap = if (privacyScript.isBlank()) {
+            ""
+        } else {
+            """
+                const chrome = window.__CC_ANDROID_RUNTIME__ && window.__CC_ANDROID_RUNTIME__.chrome;
+                if (!chrome) throw new Error("Android runtime unavailable for privacy bootstrap");
+                $privacyScript
+            """.trimIndent()
+        }
         return """
             (function() {
-                if (window.__ccDocStartDone) return;
-                window.__ccDocStartDone = true;
-                var host = location.hostname || "";
-                if (host.indexOf("lichess.org") !== -1) {
-                    try {
-                        $mainBridgeCode
-                    } catch (e) {}
-                }
+              "use strict";
+              if (window.__CC_ANDROID_BOOTSTRAP_READY__ === true) return;
+              try {
+                const bootstrap = JSON.parse($quotedBootstrap);
+                Object.defineProperty(window, "__CC_ANDROID_BOOTSTRAP__", {
+                  value: bootstrap, configurable: false, enumerable: false, writable: false
+                });
+                Object.defineProperty(window, "__CC_DEVICE_PROFILE__", {
+                  value: bootstrap.profile, configurable: false, enumerable: false, writable: false
+                });
+                $polyfill
+                $privacyBootstrap
+                Object.defineProperty(window, "__CC_ANDROID_BOOTSTRAP_READY__", {
+                  value: true, configurable: false, enumerable: false, writable: false
+                });
+              } catch (error) {
+                console.error("[ChessCoach Android] bootstrap failed", error);
+              }
             })();
         """.trimIndent()
     }
 
-    /**
-     * ВАЖНО: Сначала инжектится polyfillJs + mobileLauncherOrbJs (чтобы перехватить attachShadow
-     * и вшить content.css напрямую), и только потом запускается content.js / chesscom.js!
-     */
-    private fun injectMainChessCoachBundle(url: String) {
-        val host = Uri.parse(url).host?.lowercase() ?: ""
-        val isLichess = host.contains("lichess.org")
-        val isChessCom = host.contains("chess.com")
-        if (!isLichess && !isChessCom) return
-
-        val polyfillJs = readAssetTextSafe("bridge/cc-android-polyfill.js")
-        val backgroundJs = readAssetTextSafe("background/background.js")
-        val openingsJs = readAssetTextSafe("lib/openings.js")
-        val explainerJs = readAssetTextSafe("lib/explainer.js")
-        val phonkFxJs = readAssetTextSafe("lib/phonk-fx.js")
-        val mobileLauncherOrbJs = readAssetTextSafe("bridge/cc-mobile-launcher-orb.js")
-        val scriptApiJs = readAssetTextSafe("lib/script-api.js")
-        val platformCoreJs = if (isChessCom) {
-            readAssetTextSafe("content/chesscom.js")
-        } else {
-            readAssetTextSafe("content/content.js")
+    private fun injectMainBundle(view: WebView, url: String, generation: Long, attempt: Int) {
+        val platform = platformForUri(Uri.parse(url)) ?: return
+        val cached = bundleCache[platform]
+        if (cached != null) {
+            evaluateBundle(view, cached, url, generation, attempt)
+            return
         }
-        val sampleScriptJs = readAssetTextSafe("scripts/sample.js")
+        bundleExecutor.submit {
+            val bundle = buildMainBundle(platform)
+            if (bundle != null) bundleCache[platform] = bundle
+            mainHandler.post {
+                if (bundle != null && !isDestroyedState) {
+                    evaluateBundle(view, bundle, url, generation, attempt)
+                }
+            }
+        }
+    }
 
-        val fullBundle = StringBuilder(550_000)
-        fullBundle.append("(function(){\n")
-        fullBundle.append("if (window.__ccAndroidBundleInjected) return;\n")
-        fullBundle.append("window.__ccAndroidBundleInjected = true;\n")
-        fullBundle.append("try {\n").append(polyfillJs).append("\n} catch(e){ console.error('Polyfill err', e); }\n")
-        fullBundle.append("try {\n").append(backgroundJs).append("\n} catch(e){ console.error('BG err', e); }\n")
-        fullBundle.append("try {\n").append(openingsJs).append("\n} catch(e){ console.error('Openings err', e); }\n")
-        fullBundle.append("try {\n").append(explainerJs).append("\n} catch(e){ console.error('Explainer err', e); }\n")
-        fullBundle.append("try {\n").append(phonkFxJs).append("\n} catch(e){ console.error('PhonkFX err', e); }\n")
-        fullBundle.append("try {\n").append(mobileLauncherOrbJs).append("\n} catch(e){ console.error('Launcher err', e); }\n")
-        fullBundle.append("try {\n").append(scriptApiJs).append("\n} catch(e){ console.error('ScriptAPI err', e); }\n")
-        fullBundle.append("try {\n").append(platformCoreJs).append("\n} catch(e){ console.error('Core err', e); }\n")
-        fullBundle.append("try {\n").append(sampleScriptJs).append("\n} catch(e){ console.error('Sample err', e); }\n")
-        fullBundle.append("})();")
+    private fun evaluateBundle(
+        view: WebView,
+        bundle: String,
+        url: String,
+        generation: Long,
+        attempt: Int
+    ) {
+        if (
+            isDestroyedState || view !== mainWebView || generation != pageGeneration ||
+            view.url != url || !isTrustedRemoteUri(Uri.parse(url))
+        ) return
+        view.evaluateJavascript(bundle) { result ->
+            if (result == "\"ready\"") return@evaluateJavascript
+            if (attempt < MAX_BUNDLE_RETRIES && generation == pageGeneration && !isDestroyedState) {
+                mainHandler.postDelayed(
+                    { injectMainBundle(view, url, generation, attempt + 1) },
+                    BUNDLE_RETRY_MS
+                )
+            }
+        }
+    }
 
-        webView.evaluateJavascript(fullBundle.toString(), null)
+    private fun buildMainBundle(platform: Platform): String? {
+        val paths = ArrayList<String>()
+        paths += "lib/openings.js"
+        paths += "lib/explainer.js"
+        paths += "lib/phonk-fx.js"
+        if (platform == Platform.CHESS_COM) paths += "lib/privacy-mask.js"
+        paths += "lib/engine-client.js"
+        paths += "bridge/cc-mobile-launcher-orb.js"
+        paths += if (platform == Platform.CHESS_COM) "content/chesscom.js" else "content/content.js"
+
+        val sources = paths.map { path -> readAssetText(path) ?: return null }
+        return buildString(sources.sumOf(String::length) + 1024) {
+            append("(function(){\n\"use strict\";\n")
+            append("if(window.__ccAndroidBundleState===\"ready\")return \"ready\";\n")
+            append("if(window.__ccAndroidBundleState===\"loading\")return \"loading\";\n")
+            append("window.__ccAndroidBundleState=\"loading\";\n")
+            append("try{\n")
+            append("if(window.__CC_ANDROID_BOOTSTRAP_READY__!==true)throw new Error(\"Native bootstrap unavailable\");\n")
+            append("const chrome=window.__CC_ANDROID_RUNTIME__&&window.__CC_ANDROID_RUNTIME__.chrome;\n")
+            append("if(!chrome)throw new Error(\"Android runtime unavailable\");\n")
+            for (source in sources) append(source).append("\n;\n")
+            append("window.__ccAndroidBundleState=\"ready\";\n")
+            append("Object.defineProperty(window,\"__ccAndroidBundleReady\",{value:true,configurable:false});\n")
+            append("window.dispatchEvent(new CustomEvent(\"cc-android-ready\"));\n")
+            append("return \"ready\";\n")
+            append("}catch(error){window.__ccAndroidBundleState=\"failed\";console.error(\"[ChessCoach Android] bundle failed\",error);return \"failed\";}\n")
+            append("})();")
+        }
+    }
+
+    private fun interceptRemotePackagedAsset(request: WebResourceRequest): WebResourceResponse? {
+        val uri = request.url
+        if (!isTrustedRemoteUri(uri)) return null
+        val encodedPath = uri.encodedPath ?: return null
+        if (!encodedPath.startsWith(REMOTE_ASSET_PREFIX)) return null
+        if (!request.method.equals("GET", ignoreCase = true)) return forbiddenResponse()
+
+        val encodedRelative = encodedPath.removePrefix(REMOTE_ASSET_PREFIX)
+        if (
+            encodedRelative.isBlank() || encodedRelative.contains('%') || encodedRelative.contains('\\') ||
+            encodedRelative.startsWith('/') || encodedRelative.split('/').any { it == "." || it == ".." }
+        ) return forbiddenResponse()
+        if (encodedRelative !in REMOTE_ASSET_ALLOWLIST) return forbiddenResponse()
+
+        val origin = trustedOrigin(uri) ?: return forbiddenResponse()
+        val mime = mimeTypeForAsset(encodedRelative)
+        val encoding = if (mime.startsWith("text/") || mime.contains("javascript")) "UTF-8" else null
+        val headers = mapOf(
+            "Access-Control-Allow-Origin" to origin,
+            "Access-Control-Allow-Methods" to "GET",
+            "Cache-Control" to "no-store",
+            "Vary" to "Origin",
+            "X-Content-Type-Options" to "nosniff"
+        )
+        return try {
+            WebResourceResponse(
+                mime,
+                encoding,
+                200,
+                "OK",
+                headers,
+                assets.open(encodedRelative)
+            )
+        } catch (_: Exception) {
+            WebResourceResponse(
+                "text/plain",
+                "UTF-8",
+                404,
+                "Not Found",
+                headers,
+                ByteArrayInputStream("Not Found".toByteArray(StandardCharsets.UTF_8))
+            )
+        }
+    }
+
+    private fun forbiddenResponse(): WebResourceResponse = WebResourceResponse(
+        "text/plain",
+        "UTF-8",
+        403,
+        "Forbidden",
+        mapOf("Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff"),
+        ByteArrayInputStream("Forbidden".toByteArray(StandardCharsets.UTF_8))
+    )
+
+    private fun mimeTypeForAsset(path: String): String = when {
+        path.endsWith(".css") -> "text/css"
+        path.endsWith(".js") -> "application/javascript"
+        path.endsWith(".png") -> "image/png"
+        path.endsWith(".jpg") || path.endsWith(".jpeg") -> "image/jpeg"
+        else -> "application/octet-stream"
+    }
+
+    private fun installDocumentStartScriptsAfterResume() {
+        if (::mainWebView.isInitialized && !isDestroyedState) installDocumentStartScripts(mainWebView)
+    }
+
+    private fun registerDeviceStateListeners() {
+        ContextCompat.registerReceiver(
+            this,
+            powerSaveReceiver,
+            IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        powerReceiverRegistered = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val powerManager = getSystemService(PowerManager::class.java) ?: return
+            val listener = PowerManager.OnThermalStatusChangedListener {
+                publishCurrentDeviceProfile()
+            }
+            powerManager.addThermalStatusListener(mainExecutor, listener)
+            removeThermalListener = { powerManager.removeThermalStatusListener(listener) }
+        }
+    }
+
+    private fun publishCurrentDeviceProfile(resumeEngine: Boolean = false) {
+        if (isDestroyedState || !isResumedState) return
+        val profile = capabilityProfiler.coarseProfile()
+            .put("runtimeId", RUNTIME_ID)
+            .put("documentId", "android-$pageGeneration")
+            .put("clientInstanceId", clientInstanceId)
+        val quotedProfile = quoteForJavaScript(profile.toString())
+        if (::mainWebView.isInitialized && isTrustedRemoteUri(Uri.parse(mainWebView.url.orEmpty()))) {
+            val envelope = BridgeProtocol.response(
+                "profile-${SystemClock.elapsedRealtime()}",
+                "profile.update",
+                "device",
+                JSONObject().put("profile", profile)
+            )
+            mainWebView.evaluateJavascript(
+                """
+                    (function() {
+                      const bridge = window.CCNative;
+                      if (bridge && typeof bridge.onmessage === "function") bridge.onmessage(${quoteForJavaScript(envelope)});
+                      window.dispatchEvent(new CustomEvent("cc-device-profile-ready"));
+                    })();
+                """.trimIndent(),
+                null
+            )
+        }
+        if (::engineWebView.isInitialized && !engineNeedsReload && engineWebView.url == ENGINE_URL) {
+            val method = if (resumeEngine) "resumeForApp" else "refreshDeviceProfileForApp"
+            engineWebView.evaluateJavascript(
+                "window.CCEngineHost && window.CCEngineHost.$method(JSON.parse($quotedProfile));",
+                null
+            )
+        }
     }
 
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                webView.evaluateJavascript(
-                    "(window.__ccHandleAndroidBack && window.__ccHandleAndroidBack()) || false"
-                ) { res ->
-                    if (res == "true") return@evaluateJavascript
-                    if (webView.canGoBack()) {
-                        webView.goBack()
-                    } else {
-                        moveTaskToBack(true)
-                    }
+                if (isDestroyedState) return
+                val history = mainWebView.copyBackForwardList()
+                val previous = if (history.currentIndex > 0) {
+                    history.getItemAtIndex(history.currentIndex - 1)?.url
+                } else {
+                    null
+                }
+                if (previous != null && isTrustedRemoteUri(Uri.parse(previous))) {
+                    mainWebView.goBack()
+                } else {
+                    finishAfterTransition()
                 }
             }
         })
     }
 
-    inner class AndroidBridge {
-
-        @JavascriptInterface
-        fun getStorageJson(): String {
-            return synchronized(this@MainActivity) {
-                try {
-                    storageFile.readText(Charsets.UTF_8)
-                } catch (e: Exception) {
-                    "{}"
-                }
+    private fun restoreTrustedState(savedInstanceState: Bundle?): Boolean {
+        if (savedInstanceState == null) return false
+        return try {
+            val restored = mainWebView.restoreState(savedInstanceState) ?: return false
+            val history = mainWebView.copyBackForwardList()
+            val valid = history.size > 0 && (0 until history.size).all { index ->
+                val url = history.getItemAtIndex(index)?.url ?: return@all false
+                isTrustedRemoteUri(Uri.parse(url))
             }
-        }
-
-        @JavascriptInterface
-        fun saveStoragePatch(patchJsonStr: String) {
-            synchronized(this@MainActivity) {
-                try {
-                    val current = try {
-                        JSONObject(storageFile.readText(Charsets.UTF_8))
-                    } catch (e: Exception) {
-                        JSONObject()
-                    }
-                    val patch = JSONObject(patchJsonStr)
-                    val keys = patch.keys()
-                    while (keys.hasNext()) {
-                        val k = keys.next()
-                        current.put(k, patch.get(k))
-                    }
-                    storageFile.writeText(current.toString(), Charsets.UTF_8)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun readAssetText(relPath: String): String {
-            val clean = relPath.trimStart('/')
-            if (clean.startsWith("user_scripts/")) {
-                val f = File(userScriptsDir, clean.removePrefix("user_scripts/"))
-                if (f.exists()) return f.readText(Charsets.UTF_8)
-            }
-            return readAssetTextSafe(clean)
-        }
-
-        @JavascriptInterface
-        fun saveUserScriptFile(fileName: String, codeContent: String): Boolean {
-            return try {
-                val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-                val outFile = File(userScriptsDir, safeName)
-                outFile.writeText(codeContent, Charsets.UTF_8)
-                true
-            } catch (e: Exception) {
+            if (!valid || !isTrustedRemoteUri(Uri.parse(restored.currentItem?.url.orEmpty()))) {
+                mainWebView.stopLoading()
+                mainWebView.clearHistory()
                 false
+            } else {
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun lastPlatform(): Platform {
+        return when (storageRepository.snapshot().optString(PLATFORM_STORAGE_KEY, Platform.LICHESS.storageValue)) {
+            Platform.CHESS_COM.storageValue -> Platform.CHESS_COM
+            else -> Platform.LICHESS
+        }
+    }
+
+    private fun openExternal(uri: Uri) {
+        val scheme = uri.scheme?.lowercase() ?: return
+        if (scheme !in setOf("https", "http", "mailto")) return
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, uri)
+                    .addCategory(Intent.CATEGORY_BROWSABLE)
+                    .setComponent(null)
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun isTrustedRemoteUri(uri: Uri): Boolean = trustedOrigin(uri) != null
+
+    private fun trustedOrigin(uri: Uri): String? {
+        if (!uri.isHierarchical || !uri.scheme.equals("https", ignoreCase = true)) return null
+        if (!uri.encodedUserInfo.isNullOrEmpty()) return null
+        if (uri.port != -1 && uri.port != 443) return null
+        val host = uri.host?.lowercase() ?: return null
+        val authority = uri.encodedAuthority?.lowercase() ?: return null
+        if (authority != host && authority != "$host:443") return null
+        return when (host) {
+            LICHESS_HOST -> LICHESS_ORIGIN
+            CHESS_COM_HOST -> CHESS_COM_ORIGIN
+            else -> null
+        }
+    }
+
+    private fun platformForUri(uri: Uri): Platform? = when (trustedOrigin(uri)) {
+        LICHESS_ORIGIN -> Platform.LICHESS
+        CHESS_COM_ORIGIN -> Platform.CHESS_COM
+        else -> null
+    }
+
+    private fun isExactAppAssetOrigin(uri: Uri): Boolean {
+        val authority = uri.encodedAuthority?.lowercase()
+        return uri.isHierarchical && uri.scheme.equals("https", ignoreCase = true) &&
+            uri.host.equals(APP_ASSET_HOST, ignoreCase = true) &&
+            (uri.port == -1 || uri.port == 443) &&
+            uri.encodedUserInfo.isNullOrEmpty() &&
+            (authority == APP_ASSET_HOST || authority == "$APP_ASSET_HOST:443")
+    }
+
+    private fun isAppAssetUri(uri: Uri): Boolean = isExactAppAssetOrigin(uri)
+
+    private fun isAllowedEngineNetworkUri(uri: Uri): Boolean {
+        if (!uri.isHierarchical || !uri.scheme.equals("https", ignoreCase = true)) return false
+        if (!uri.encodedUserInfo.isNullOrEmpty()) return false
+        if (uri.port != -1 && uri.port != 443) return false
+        val host = uri.host?.lowercase() ?: return false
+        val authority = uri.encodedAuthority?.lowercase() ?: return false
+        return host in ENGINE_NETWORK_HOSTS && (authority == host || authority == "$host:443")
+    }
+
+    private fun bridgeFeaturesAvailable(): Boolean {
+        return WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+    }
+
+    private fun readAssetText(path: String): String? = try {
+        assets.open(path).bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun quoteForJavaScript(value: String): String {
+        return JSONObject.quote(value)
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+            .replace("</", "<\\/")
+    }
+
+    private fun safeMessageId(raw: String?): String {
+        if (raw == null || raw.length > BridgeProtocol.MAX_MESSAGE_BYTES) return "invalid"
+        return try {
+            val candidate = JSONObject(raw).optString("id", "")
+            if (MESSAGE_ID_PATTERN.matches(candidate)) candidate else "invalid"
+        } catch (_: Exception) {
+            "invalid"
+        }
+    }
+
+    private fun runOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
+    }
+
+    private fun recoverMainRenderer(didCrash: Boolean) {
+        cancelRemoteWork("RENDERER_GONE", "Remote renderer was restarted")
+        val recoveryUrl = mainWebView.url?.takeIf { isTrustedRemoteUri(Uri.parse(it)) } ?: lastPlatform().url
+        val oldView = mainWebView
+        mainHandler.post {
+            if (isDestroyedState) return@post
+            mainRendererRecoveries++
+            detachAndDestroyWebView(oldView, REMOTE_BRIDGE_NAME)
+            mainWebView = createMainWebView()
+            rootLayout.addView(mainWebView)
+            mainWebView.loadUrl(recoveryUrl)
+            if (didCrash && mainRendererRecoveries <= MAX_RENDERER_RECOVERIES) {
+                Toast.makeText(this, "WebView перезапущен после сбоя", Toast.LENGTH_SHORT).show()
             }
         }
+    }
 
-        @JavascriptInterface
-        fun listAvailableScriptsJson(): String {
-            val arr = JSONArray()
+    private fun recoverEngineRenderer(didCrash: Boolean) {
+        cancelRuntimeRequests("ENGINE_RENDERER_GONE", "Engine renderer was restarted")
+        engineDocumentLoaded = false
+        val oldView = engineWebView
+        mainHandler.post {
+            if (isDestroyedState) return@post
+            engineRendererRecoveries++
+            detachAndDestroyWebView(oldView, ENGINE_BRIDGE_NAME)
+            if (engineRendererRecoveries > MAX_RENDERER_RECOVERIES) {
+                enginePermanentlyUnavailable = true
+                if (didCrash) Toast.makeText(this, "Шахматный движок временно недоступен", Toast.LENGTH_LONG).show()
+                return@post
+            }
+            engineWebView = createEngineWebView()
+            rootLayout.addView(engineWebView, 0)
+            mainHandler.postDelayed({
+                if (!isDestroyedState) engineWebView.loadUrl(ENGINE_URL)
+            }, ENGINE_RECOVERY_DELAY_MS)
+        }
+    }
+
+    private fun detachAndDestroyWebView(view: WebView, bridgeName: String) {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             try {
-                assets.list("scripts")?.forEach { name ->
-                    if (name.endsWith(".js")) arr.put(name)
-                }
-                userScriptsDir.listFiles()?.forEach { f ->
-                    if (f.name.endsWith(".js")) arr.put(f.name)
-                }
-            } catch (e: Exception) {}
-            return arr.toString()
-        }
-
-        @JavascriptInterface
-        fun downloadFile(fileName: String, content: String, isBase64: Boolean) {
-            mainHandler.post {
-                try {
-                    val bytes = if (isBase64) {
-                        Base64.decode(content, Base64.DEFAULT)
-                    } else {
-                        content.toByteArray(Charsets.UTF_8)
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val resolver = applicationContext.contentResolver
-                        val values = ContentValues().apply {
-                            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                            put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
-                            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ChessCoach")
-                        }
-                        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                        if (uri != null) {
-                            resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                            Toast.makeText(
-                                this@MainActivity,
-                                "💾 Сохранено в Загрузки/ChessCoach/$fileName",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
-                    } else {
-                        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                        val outFile = File(dir, fileName)
-                        FileOutputStream(outFile).use { it.write(bytes) }
-                        Toast.makeText(
-                            this@MainActivity,
-                            "💾 Сохранено: ${outFile.absolutePath}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                } catch (e: Exception) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Ошибка сохранения: ${e.message}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
+                WebViewCompat.removeWebMessageListener(view, bridgeName)
+            } catch (_: Exception) {
             }
         }
+        try {
+            (view.parent as? ViewGroup)?.removeView(view)
+            view.stopLoading()
+            view.removeAllViews()
+            view.destroy()
+        } catch (_: Exception) {
+        }
+    }
 
-        @JavascriptInterface
-        fun switchPlatformUrl(targetUrl: String) {
-            mainHandler.post {
-                webView.loadUrl(targetUrl)
+    override fun onResume() {
+        super.onResume()
+        appLifecycleGeneration++
+        isResumedState = true
+        if (::mainWebView.isInitialized) {
+            mainWebView.onResume()
+            mainWebView.resumeTimers()
+        }
+        if (engineNeedsReload) {
+            engineNeedsReload = false
+            engineWebView = createEngineWebView().also { rootLayout.addView(it, 0) }
+            engineWebView.loadUrl(ENGINE_URL)
+        } else if (::engineWebView.isInitialized) {
+            engineWebView.onResume()
+        }
+        installDocumentStartScriptsAfterResume()
+        publishCurrentDeviceProfile(resumeEngine = true)
+    }
+
+    override fun onPause() {
+        isResumedState = false
+        val generation = ++appLifecycleGeneration
+        cancelRemoteWork("APP_PAUSED", "Activity is paused")
+        if (::mainWebView.isInitialized) {
+            mainWebView.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('cc-mobile-lifecycle',{detail:{state:'hidden',cancelPendingMoves:true}}));",
+                null
+            )
+            mainWebView.onPause()
+        }
+        if (::engineWebView.isInitialized && !engineNeedsReload) {
+            val view = engineWebView
+            val stopTimeout = Runnable {
+                if (isDestroyedState || isResumedState || generation != appLifecycleGeneration || view !== engineWebView) return@Runnable
+                engineDocumentLoaded = false
+                engineNeedsReload = true
+                detachAndDestroyWebView(view, ENGINE_BRIDGE_NAME)
+                if (::mainWebView.isInitialized) mainWebView.pauseTimers()
             }
-        }
-
-        @JavascriptInterface
-        fun vibrateTick(durationMs: Long) {
-            try {
-                val vib = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vib.vibrate(VibrationEffect.createOneShot(durationMs.coerceIn(5, 100), VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vib.vibrate(durationMs.coerceIn(5, 100))
-                }
-            } catch (e: Exception) {}
-        }
-
-        @JavascriptInterface
-        fun dispatchNativeTap(cssX: Float, cssY: Float, holdMs: Long) {
-            mainHandler.post {
-                val density = resources.displayMetrics.density
-                val rawX = cssX * density
-                val rawY = cssY * density
-                val downTime = SystemClock.uptimeMillis()
-
-                val downEvent = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, rawX, rawY, 0)
-                webView.dispatchTouchEvent(downEvent)
-                downEvent.recycle()
-
-                val safeHold = holdMs.coerceIn(35L, 220L)
-                mainHandler.postDelayed({
-                    val upTime = SystemClock.uptimeMillis()
-                    val upEvent = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, rawX + 0.5f, rawY + 0.5f, 0)
-                    webView.dispatchTouchEvent(upEvent)
-                    upEvent.recycle()
-                }, safeHold)
+            mainHandler.postDelayed(stopTimeout, 1_000L)
+            // Worker termination must execute before globally freezing WebView timers.
+            view.evaluateJavascript(
+                "(function(){if(window.CCEngineHost)window.CCEngineHost.suspendForApp();return 'suspended';})();"
+            ) { result ->
+                mainHandler.removeCallbacks(stopTimeout)
+                if (isDestroyedState || isResumedState || generation != appLifecycleGeneration || view !== engineWebView) return@evaluateJavascript
+                if (result != "\"suspended\"") stopTimeout.run()
+                else if (::mainWebView.isInitialized) mainWebView.pauseTimers()
             }
+            view.onPause()
+        } else if (::mainWebView.isInitialized) {
+            mainWebView.pauseTimers()
         }
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) cancelPendingTouch("INPUT_FOCUS_LOST", "The activity lost focus")
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (::mainWebView.isInitialized && isTrustedRemoteUri(Uri.parse(mainWebView.url.orEmpty()))) {
+            mainWebView.saveState(outState)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        isDestroyedState = true
+        removeThermalListener?.invoke()
+        removeThermalListener = null
+        if (powerReceiverRegistered) {
+            unregisterReceiver(powerSaveReceiver)
+            powerReceiverRegistered = false
+        }
+        cancelRemoteWork("APP_DESTROYED", "Activity was destroyed")
+        documentStartHandler?.remove()
+        privacyStartHandler?.remove()
+        documentStartHandler = null
+        privacyStartHandler = null
+        mainHandler.removeCallbacksAndMessages(null)
+        storageExecutor.shutdownNow()
+        bundleExecutor.shutdownNow()
+        if (::mainWebView.isInitialized) detachAndDestroyWebView(mainWebView, REMOTE_BRIDGE_NAME)
+        if (::engineWebView.isInitialized) detachAndDestroyWebView(engineWebView, ENGINE_BRIDGE_NAME)
+        super.onDestroy()
+    }
+
+    private enum class Platform(
+        val wireValue: String,
+        val storageValue: String,
+        val url: String
+    ) {
+        LICHESS("LICHESS", "lichess", "https://lichess.org/"),
+        CHESS_COM("CHESS_COM", "chesscom", "https://www.chess.com/play/online");
+
+        companion object {
+            fun fromWire(value: String): Platform? = entries.firstOrNull { it.wireValue == value }
+        }
+    }
+
+    private data class PendingRuntimeRequest(
+        val id: String,
+        val envelope: String,
+        val replyProxy: JavaScriptReplyProxy,
+        val pageGeneration: Long,
+        val timeout: Runnable,
+        var state: DispatchState = DispatchState.QUEUED,
+        var dispatchAttempts: Int = 0
+    )
+
+    private data class PendingAsyncRequest(
+        val id: String,
+        val replyProxy: JavaScriptReplyProxy,
+        val pageGeneration: Long,
+        @Volatile var future: Future<*>? = null
+    )
+
+    private data class PendingTouchRequest(
+        val id: String,
+        val replyProxy: JavaScriptReplyProxy,
+        val view: WebView,
+        val pageGeneration: Long,
+        val url: String,
+        val gesture: BridgeProtocol.TouchGesture,
+        var points: List<BridgeProtocol.TouchPoint> = emptyList(),
+        var viewWidth: Int = 0,
+        var viewHeight: Int = 0,
+        var downTime: Long = 0L,
+        var downSent: Boolean = false,
+        var lastPoint: BridgeProtocol.TouchPoint = BridgeProtocol.TouchPoint(0.0, 0.0),
+        var step: Runnable? = null,
+        var timeout: Runnable? = null
+    )
+
+    private data class AsyncResult(
+        val type: String,
+        val channel: String,
+        val payload: JSONObject,
+        val refreshBootstrap: Boolean = false,
+        val navigation: Platform? = null
+    )
+
+    private enum class DispatchState { QUEUED, DISPATCHING, DISPATCHED }
+
+    private class SlidingWindowLimiter(
+        private val capacity: Int,
+        private val windowMs: Long
+    ) {
+        private val timestamps = ArrayDeque<Long>()
+
+        @Synchronized
+        fun tryAcquire(now: Long = android.os.SystemClock.elapsedRealtime()): Boolean {
+            while (timestamps.isNotEmpty() && now - timestamps.first() >= windowMs) {
+                timestamps.removeFirst()
+            }
+            if (timestamps.size >= capacity) return false
+            timestamps.addLast(now)
+            return true
+        }
+    }
+
+    companion object {
+        private const val LICHESS_HOST = "lichess.org"
+        private const val CHESS_COM_HOST = "www.chess.com"
+        private const val LICHESS_ORIGIN = "https://lichess.org"
+        private const val CHESS_COM_ORIGIN = "https://www.chess.com"
+        private val REMOTE_ORIGINS = setOf(LICHESS_ORIGIN, CHESS_COM_ORIGIN)
+        private const val APP_ASSET_HOST = "appassets.androidplatform.net"
+        private const val APP_ASSET_ORIGIN = "https://appassets.androidplatform.net"
+        private val ENGINE_NETWORK_HOSTS = setOf(
+            "lichess.org",
+            "explorer.lichess.ovh",
+            "tablebase.lichess.ovh"
+        )
+        private const val ENGINE_URL = "$APP_ASSET_ORIGIN/assets/engine/engine-host.html"
+        private const val REMOTE_BRIDGE_NAME = "CCNative"
+        private const val ENGINE_BRIDGE_NAME = "CCEngineNative"
+        private const val RUNTIME_ID = "chesscoach_android_v1"
+        private const val USER_AGENT_TOKEN = "ChessCoach/15.9.0-Android"
+        private const val PLATFORM_STORAGE_KEY = "cc_mobile_platform"
+        private const val REMOTE_ASSET_PREFIX = "/__cc_assets/"
+        private const val RUNTIME_TIMEOUT_MS = 70_000L
+        private const val TOUCH_REQUEST_TIMEOUT_MS = 2_500L
+        private const val ENGINE_DISPATCH_RETRY_MS = 250L
+        private const val ENGINE_RECOVERY_DELAY_MS = 500L
+        private const val BUNDLE_RETRY_MS = 500L
+        private const val MAX_PENDING_RUNTIME = 24
+        private const val MAX_ENGINE_DISPATCH_ATTEMPTS = 8
+        private const val MAX_BUNDLE_RETRIES = 2
+        private const val MAX_RENDERER_RECOVERIES = 3
+        private val MESSAGE_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+        private val REMOTE_ASSET_ALLOWLIST = setOf(
+            "content/content.css",
+            "lib/stockfish-local.js"
+        )
     }
 }

@@ -111,34 +111,40 @@ window.ChessExplainer = (function () {
       }
     }
 
+    const boardAfter = grid.map(row => row.slice());
+    const movedPiece = boardAfter[from.r]?.[from.c] || (isW ? m.piece.toUpperCase() : m.piece);
+    if (boardAfter[from.r]) boardAfter[from.r][from.c] = null;
+    if (boardAfter[to.r]) boardAfter[to.r][to.c] = movedPiece;
+
+    function seesFriendlySlider(directions, compatiblePieces) {
+      for (const [dr, dc] of directions) {
+        let r = to.r + dr;
+        let c = to.c + dc;
+        while (r >= 0 && r < 8 && c >= 0 && c < 8) {
+          const piece = boardAfter[r][c];
+          if (piece) {
+            if (compatiblePieces.includes(piece)) return true;
+            break;
+          }
+          r += dr;
+          c += dc;
+        }
+      }
+      return false;
+    }
+
     let isBattery = false;
     if (m.piece === "q" || m.piece === "r") {
-      for (let r = 0; r < 8; r++) {
-        if ((r !== from.r || to.c !== from.c) && (grid[r][to.c] === ownRook || grid[r][to.c] === ownQueen)) {
-          isBattery = true;
-        }
-      }
+      isBattery = seesFriendlySlider(
+        [[-1, 0], [1, 0], [0, -1], [0, 1]],
+        [ownRook, ownQueen]
+      );
     }
-    if (m.piece === "q" || m.piece === "b") {
-      for (let d = -7; d <= 7; d++) {
-        if (d === 0) continue;
-        const r1 = to.r + d, c1 = to.c + d;
-        const r2 = to.r + d, c2 = to.c - d;
-        if (
-          r1 >= 0 && r1 <= 7 && c1 >= 0 && c1 <= 7 &&
-          !(r1 === from.r && c1 === from.c) &&
-          (grid[r1][c1] === ownBishop || grid[r1][c1] === ownQueen)
-        ) {
-          isBattery = true;
-        }
-        if (
-          r2 >= 0 && r2 <= 7 && c2 >= 0 && c2 <= 7 &&
-          !(r2 === from.r && c2 === from.c) &&
-          (grid[r2][c2] === ownBishop || grid[r2][c2] === ownQueen)
-        ) {
-          isBattery = true;
-        }
-      }
+    if (!isBattery && (m.piece === "q" || m.piece === "b")) {
+      isBattery = seesFriendlySlider(
+        [[-1, -1], [-1, 1], [1, -1], [1, 1]],
+        [ownBishop, ownQueen]
+      );
     }
 
     const homeRow = isW ? 7 : 0;
@@ -169,7 +175,7 @@ window.ChessExplainer = (function () {
     const capAcc = m.captured ? PIECE_GENITIVE[m.captured] || "фигуру" : "";
     const promoText = m.promo ? `=${m.promo.toUpperCase()}` : "";
     const syzygyTag = m.fromSyzygy ? " 🔮[SYZYGY БОГ]" : "";
-    const sfWasmTag = m.fromWasm ? " 🧠[SF WASM]" : "";
+    const sfWasmTag = m.fromWasm ? " 🧠[SF LOCAL]" : "";
     const cloudTag = (!m.fromSyzygy && !m.fromWasm && m.fromCloud) ? " ⚡[SF 3000]" : "";
     const memTag = m.memoryBonus > 20 ? " ◈[MEM]" : "";
     const zeitnotTag = m.isZeitnotBranched ? " ⏱️[ФЛАГ-ШТУРМ]" : "";

@@ -1,24 +1,22 @@
 (function () {
-  if (window.CC && window.CC.__v2Initialized) return;
+  if (window.CC && window.CC.__v2Initialized) {
+    window.CC.revive?.();
+    return;
+  }
 
   const FILES = "abcdefgh";
   const registeredScripts = new Map();
   const dynamicallyLoadedFiles = new Set();
   let hudShadow = null;
+  let runtimeRafId = null;
+  let runtimeIntervalId = null;
+  let destroyed = false;
 
-  // Перехватываем закрытый ShadowRoot главного меню ChessCoach
-  const origAttachShadow = Element.prototype.attachShadow;
-  Element.prototype.attachShadow = function (init) {
-    const sr = origAttachShadow.call(this, init);
-    if (
-      this.id !== "cc-userscripts-host" &&
-      this.id !== "cc-floating-orb-host" &&
-      (!hudShadow || (init && init.mode === "closed"))
-    ) {
-      hudShadow = sr;
-    }
-    return sr;
+  // HUD регистрирует свой закрытый ShadowRoot явно, не затрагивая компоненты сайта.
+  const registerHudShadow = (root) => {
+    if (root instanceof ShadowRoot) hudShadow = root;
   };
+  window.__ChessCoachRegisterHudShadow = registerHudShadow;
 
   let prevMatrix = null;
   let trackedState = {
@@ -26,6 +24,9 @@
     boardMatrix: Array.from({ length: 8 }, () => Array(8).fill(null)),
     isBlackOrientation: false,
     myColor: "w",
+    actualTurn: "w",
+    positionId: 0,
+    positionKey: "",
     lastMoveFrom: null,
     lastMoveTo: null,
     isCapture: false,
@@ -49,104 +50,133 @@
   let scriptsHost = null;
   let scriptsShadow = null;
 
-  const DOCKED_SCRIPT_STYLES = `
-    .cc-docked-script-win {
-      margin-top: 10px;
-      background: rgba(8, 11, 19, 0.92);
-      border: 1px solid rgba(0, 245, 212, 0.35);
-      border-radius: 14px;
-      overflow: hidden;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 8px 24px rgba(0, 0, 0, 0.45);
-    }
-    .cc-script-win-bar {
-      height: 3px;
-      width: 100%;
-      background: linear-gradient(90deg, #00f5d4, #00bbf9, #c77dff, #ff2a85);
-    }
-    .cc-script-win-header {
-      padding: 9px 12px;
-      background: rgba(5, 7, 13, 0.9);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 11px;
-      font-weight: 900;
-      color: #00f5d4;
-      letter-spacing: 0.4px;
-    }
-    .cc-script-win-body {
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 9px;
-    }
-    .cc-ctrl-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-      padding: 9px 11px;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.10);
-      border-radius: 11px;
-      font-size: 11.5px;
-      font-weight: 700;
-      color: #f1f5f9;
-    }
-    .cc-ctrl-col {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      padding: 9px 11px;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.10);
-      border-radius: 11px;
-      font-size: 11px;
-      color: #f1f5f9;
-    }
-    .cc-tabs-bar {
-      display: grid;
-      gap: 6px;
-      background: rgba(5, 7, 13, 0.8);
-      padding: 5px;
-      border-radius: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.09);
-    }
-    .cc-tab-trigger {
-      background: transparent;
-      border: 1px solid transparent;
-      color: #94a3b8;
-      border-radius: 8px;
-      padding: 6px 8px;
-      font-size: 11px;
-      font-weight: 800;
-      cursor: pointer;
-    }
-    .cc-tab-trigger.active {
-      background: rgba(0, 245, 212, 0.18);
-      color: #fff;
-      border-color: #00f5d4;
-    }
-  `;
-
-  // Контейнер для 60 FPS Canvas на доске и всплывающих OSD-баннеров
   function getScriptsShadow() {
     if (scriptsShadow) return scriptsShadow;
     scriptsHost = document.createElement("div");
     scriptsHost.id = "cc-userscripts-host";
     scriptsHost.style.cssText =
-      "all:initial; position:fixed; top:0; left:0; width:0; height:0; z-index:2147483644; pointer-events:none;";
+      "all:initial; position:fixed; top:0; left:0; width:0; height:0; z-index:2147483647; pointer-events:none;";
     document.documentElement.appendChild(scriptsHost);
-    scriptsShadow = origAttachShadow.call(scriptsHost, { mode: "open" });
+    scriptsShadow = scriptsHost.attachShadow({ mode: "open" });
 
     const baseStyle = document.createElement("style");
-    baseStyle.textContent = DOCKED_SCRIPT_STYLES;
+    baseStyle.textContent = `
+      * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI", Roboto, sans-serif; }
+      .cc-script-win {
+        position: fixed;
+        background: rgba(10, 13, 22, 0.94);
+        backdrop-filter: blur(24px) saturate(190%);
+        -webkit-backdrop-filter: blur(24px) saturate(190%);
+        border: 1px solid rgba(0, 245, 212, 0.38);
+        border-radius: 16px;
+        box-shadow: 0 24px 60px rgba(0,0,0,0.85), 0 0 28px rgba(0,245,212,0.18);
+        color: #f8fafc;
+        pointer-events: auto;
+        user-select: none;
+        overflow: hidden;
+        z-index: 2147483647;
+        transition: border-color 0.2s ease;
+      }
+      .cc-script-win-bar {
+        height: 3px;
+        width: 100%;
+        background: linear-gradient(90deg, #00f5d4, #00bbf9, #c77dff, #ff2a85);
+      }
+      .cc-script-win-header {
+        padding: 10px 14px;
+        background: rgba(6, 8, 14, 0.88);
+        border-bottom: 1px solid rgba(255,255,255,0.09);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: grab;
+        font-size: 11.5px;
+        font-weight: 900;
+        letter-spacing: 0.4px;
+      }
+      .cc-script-win-header:active { cursor: grabbing; }
+      .cc-script-win-body {
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 78vh;
+        overflow-y: auto;
+      }
+      .cc-ctrl-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 7px 10px;
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 10px;
+        font-size: 11.5px;
+        font-weight: 700;
+      }
+      .cc-ctrl-col {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        padding: 8px 10px;
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 10px;
+        font-size: 11px;
+      }
+      .cc-btn {
+        background: linear-gradient(135deg, #00f5d4, #00bbf9);
+        color: #05070c;
+        border: none;
+        border-radius: 9px;
+        padding: 8px 12px;
+        font-size: 11.5px;
+        font-weight: 900;
+        cursor: pointer;
+        text-align: center;
+        transition: transform 0.15s ease, opacity 0.15s ease;
+      }
+      .cc-btn:hover { transform: translateY(-1px); opacity: 0.95; }
+      .cc-tabs-bar {
+        display: grid;
+        gap: 5px;
+        background: rgba(5, 7, 13, 0.75);
+        padding: 5px;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.09);
+      }
+      .cc-tab-trigger {
+        background: transparent;
+        border: 1px solid transparent;
+        color: #94a3b8;
+        border-radius: 7px;
+        padding: 5px 6px;
+        font-size: 10.5px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      .cc-tab-trigger.active {
+        background: rgba(0, 245, 212, 0.18);
+        color: #fff;
+        border-color: #00f5d4;
+      }
+    `;
     scriptsShadow.appendChild(baseStyle);
     return scriptsShadow;
   }
 
+  function isExtensionContextValid() {
+    try {
+      return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ДИНАМИЧЕСКИЙ ЗАГРУЗЧИК СКРИПТОВ ИЗ ПАПКИ scripts/ БЕЗ ПРАВКИ MANIFEST.JSON
   async function loadScriptFileFromFolder(fileName, saveToList = true) {
+    if (destroyed || !isExtensionContextValid()) return false;
     const cleanName = String(fileName || "").trim().replace(/^.*[\\/]/, "");
     if (!cleanName || !cleanName.endsWith(".js") || cleanName === "sample.js") return false;
     if (dynamicallyLoadedFiles.has(cleanName)) return true;
@@ -167,6 +197,7 @@
       }
       return true;
     } catch (err) {
+      console.warn("[ChessCoach SDK] Не удалось загрузить scripts/" + cleanName + ". Убедитесь, что файл лежит в папке scripts/ и вы нажали Обновить в chrome://extensions/.", err);
       return false;
     }
   }
@@ -188,6 +219,7 @@
   let boardCanvasCtx = null;
 
   function ensureBoardOverlayElements() {
+    if (destroyed) return null;
     const root = getScriptsShadow();
     if (!boardOverlayWrap) {
       boardOverlayWrap = document.createElement("div");
@@ -224,15 +256,59 @@
     return rect;
   }
 
+  const BOARD_SELECTOR = ".main-board cg-board, cg-board, wc-chess-board, chess-board, #board-single, #board-play-computer, .board";
+
+  function getBoardRoots(root) {
+    const roots = [root];
+    for (let i = 0; i < roots.length; i++) {
+      const current = roots[i];
+      for (const node of [current, ...current.querySelectorAll("*")]) {
+        if (node.shadowRoot && !roots.includes(node.shadowRoot)) roots.push(node.shadowRoot);
+        if (node.tagName === "SLOT" && node.assignedElements) {
+          for (const assigned of node.assignedElements({ flatten: true })) {
+            if (!roots.includes(assigned)) roots.push(assigned);
+          }
+        }
+      }
+    }
+    return roots;
+  }
+
+  function queryBoardDom(root, selector) {
+    return Array.from(new Set(getBoardRoots(root).flatMap((entry, index) => [
+      ...(index > 0 && entry.matches?.(selector) ? [entry] : []),
+      ...entry.querySelectorAll(selector)
+    ])));
+  }
+
   function getBoardElement() {
-    const candidates = document.querySelectorAll(
-      ".main-board cg-board, cg-board, wc-chess-board, chess-board, #board-single, #board-play-computer, .board"
-    );
+    const candidates = new Set(document.querySelectorAll(BOARD_SELECTOR));
+    if (!candidates.size) {
+      for (const node of queryBoardDom(document, BOARD_SELECTOR)) candidates.add(node);
+    }
+    for (const node of [...candidates]) {
+      for (const inner of queryBoardDom(node, BOARD_SELECTOR)) candidates.add(inner);
+    }
+
+    const visible = [...candidates].filter((node) => {
+      const r = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      if (r.width < 180 || r.height < 180 || r.right <= 0 || r.bottom <= 0 ||
+          r.left >= window.innerWidth || r.top >= window.innerHeight ||
+          style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      const hasChessComPieces = queryBoardDom(node, ".piece").some(piece =>
+        /\b[wb][pnbrqk]\b/i.test(piece.getAttribute("class") || "") &&
+        /\bsquare-[1-8][1-8]\b/.test(piece.getAttribute("class") || "")
+      );
+      return hasChessComPieces || queryBoardDom(node, "piece").length > 0;
+    });
+
     let best = null;
     let maxArea = 0;
-    for (const node of candidates) {
+    for (const node of visible) {
+      if (queryBoardDom(node, BOARD_SELECTOR).some(inner => inner !== node && visible.includes(inner))) continue;
       const r = node.getBoundingClientRect();
-      if (r.width >= 180 && r.height >= 180 && r.width * r.height > maxArea) {
+      if (r.width * r.height > maxArea) {
         maxArea = r.width * r.height;
         best = node;
       }
@@ -257,18 +333,35 @@
   }
 
   function scanBoardAndHudState() {
-    const boardEl = getBoardElement();
+    const shared = window.__CHESSCOACH_BOARD_STATE__;
+    const hasSharedState = Boolean(
+      shared && Array.isArray(shared.grid) && shared.grid.length === 8 &&
+      (!shared.boardElement || shared.boardElement.isConnected) &&
+      Date.now() - Number(shared.timestamp || 0) < 1000
+    );
+    const boardEl = hasSharedState && shared.boardElement?.isConnected ? shared.boardElement : getBoardElement();
     if (!boardEl) return;
     const rect = boardEl.getBoundingClientRect();
     if (rect.width < 50) return;
 
-    const isChessCom = location.hostname.includes("chess.com");
-    let isBlack = false;
-    const matrix = Array.from({ length: 8 }, () => Array(8).fill(null));
+    const isChessCom = location.hostname.includes("chess.com") || (!hasSharedState && queryBoardDom(boardEl, ".piece").some(piece =>
+      /\b[wb][pnbrqk]\b/i.test(piece.getAttribute("class") || "") &&
+      /\bsquare-[1-8][1-8]\b/.test(piece.getAttribute("class") || "")
+    ));
+    let isBlack = hasSharedState ? Boolean(shared.isBlackOrientation) : false;
+    const matrix = hasSharedState
+      ? shared.grid.map(row => row.slice())
+      : Array.from({ length: 8 }, () => Array(8).fill(null));
 
-    if (isChessCom) {
-      isBlack = boardEl.classList.contains("flipped");
-      boardEl.querySelectorAll(".piece").forEach((p) => {
+    if (!hasSharedState && isChessCom) {
+      for (let node = boardEl; node; node = node.parentElement || node.getRootNode().host) {
+        if (node.classList?.contains("flipped") || node.getAttribute?.("orientation") === "black") {
+          isBlack = true;
+          break;
+        }
+      }
+      if (!isBlack && queryBoardDom(boardEl, ".flipped, [orientation='black']").length) isBlack = true;
+      queryBoardDom(boardEl, ".piece").forEach((p) => {
         const cls = p.className || "";
         const tm = cls.match(/\b([wb])([pnbrqk])\b/i);
         const sm = cls.match(/\bsquare-(\d)(\d)\b/);
@@ -280,14 +373,14 @@
           }
         }
       });
-    } else {
+    } else if (!hasSharedState) {
       const wrap = boardEl.closest(".cg-wrap");
       isBlack = Boolean(wrap && wrap.classList.contains("orientation-black"));
       const cellW = rect.width / 8;
       const cellH = rect.height / 8;
       const pMap = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
-      boardEl.querySelectorAll("piece").forEach((p) => {
+      queryBoardDom(boardEl, "piece").forEach((p) => {
         if (p.classList.contains("ghost") || p.classList.contains("fading")) return;
         const pr = p.getBoundingClientRect();
         if (pr.width === 0) return;
@@ -305,7 +398,10 @@
     }
 
     trackedState.isBlackOrientation = isBlack;
-    trackedState.myColor = isBlack ? "b" : "w";
+    trackedState.myColor = hasSharedState ? shared.myColor : (isBlack ? "b" : "w");
+    trackedState.actualTurn = hasSharedState ? shared.actualTurn : trackedState.myColor;
+    trackedState.positionId = hasSharedState ? Number(shared.positionId || 0) : trackedState.positionId;
+    trackedState.positionKey = hasSharedState ? String(shared.positionKey || "") : trackedState.positionKey;
 
     if (prevMatrix) {
       let diff = 0;
@@ -369,7 +465,9 @@
       if (empty > 0) s += empty;
       return s;
     });
-    trackedState.fen = fenRows.join("/") + " " + trackedState.myColor + " KQkq - 0 1";
+    trackedState.fen = hasSharedState
+      ? shared.fen
+      : fenRows.join("/") + " " + trackedState.myColor + " KQkq - 0 1";
 
     const checkSqEl = document.querySelector("cg-board square.check");
     if (checkSqEl) {
@@ -397,10 +495,16 @@
         trackedState.bestMoveFrom = bm[1].toLowerCase();
         trackedState.bestMoveTo = bm[2].toLowerCase();
         trackedState.bestMoveUci = trackedState.bestMoveFrom + trackedState.bestMoveTo;
+      } else {
+        trackedState.bestMoveFrom = null;
+        trackedState.bestMoveTo = null;
+        trackedState.bestMoveUci = "";
       }
       const am = avgDesc.match(/\b([a-h][1-8])\s*→\s*([a-h][1-8])/i);
       if (am) {
         trackedState.avgMoveUci = am[1].toLowerCase() + am[2].toLowerCase();
+      } else {
+        trackedState.avgMoveUci = "";
       }
       trackedState.bestEvalText = bestEval.trim();
       trackedState.openingName = opName.trim();
@@ -496,7 +600,7 @@
         inp.type = "color";
         inp.value = opts.value || "#00f5d4";
         inp.style.cssText =
-          "width:36px; height:26px; border:1px solid rgba(255,255,255,0.25); border-radius:6px; background:transparent; cursor:pointer; padding:0;";
+          "width:34px; height:24px; border:1px solid rgba(255,255,255,0.25); border-radius:6px; background:transparent; cursor:pointer; padding:0;";
 
         inp.addEventListener("input", () => {
           if (typeof opts.onChange === "function") opts.onChange(inp.value);
@@ -520,9 +624,9 @@
         span.textContent = opts.label || "Файл / Текстура";
 
         const btn = document.createElement("button");
-        btn.className = "cc-btn cc-btn-primary";
-        btn.style.padding = "6px 12px";
-        btn.style.fontSize = "11px";
+        btn.className = "cc-btn";
+        btn.style.padding = "5px 10px";
+        btn.style.fontSize = "10.5px";
         btn.textContent = "📂 Выбрать...";
 
         const fileInp = document.createElement("input");
@@ -555,25 +659,41 @@
           : { label: labelOrOpts, defaultKey, onTrigger };
 
         let currentKey = opts.defaultKey || opts.key || "KeyX";
+        let listening = false;
 
         const row = document.createElement("div");
         row.className = "cc-ctrl-row";
 
         const span = document.createElement("span");
-        span.textContent = opts.label || "Быстрое действие";
+        span.textContent = opts.label || "Горячая клавиша";
 
-        const triggerBtn = document.createElement("button");
-        triggerBtn.style.cssText =
-          "background:rgba(0,245,212,0.16); border:1px solid #00f5d4; color:#00f5d4; border-radius:8px; padding:5px 11px; font-size:11px; font-weight:900; cursor:pointer;";
-        triggerBtn.textContent = "⚡ ВЫПОЛНИТЬ";
+        const bindBtn = document.createElement("button");
+        bindBtn.style.cssText =
+          "background:rgba(0,245,212,0.14); border:1px solid #00f5d4; color:#00f5d4; border-radius:7px; padding:4px 9px; font-family:monospace; font-size:11px; font-weight:900; cursor:pointer;";
+        bindBtn.textContent = "[" + currentKey.replace(/^Key/, "") + "]";
 
-        triggerBtn.addEventListener("click", (e) => {
-          if (typeof opts.onTrigger === "function") opts.onTrigger(e);
+        bindBtn.addEventListener("click", () => {
+          listening = true;
+          bindBtn.textContent = "[Нажми клавишу...]";
+          bindBtn.style.borderColor = "#ffbe0b";
+          bindBtn.style.color = "#ffbe0b";
         });
 
         const keyHandler = (e) => {
           const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : "";
           if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+          if (listening) {
+            e.preventDefault();
+            listening = false;
+            currentKey = e.code || e.key;
+            bindBtn.textContent = "[" + currentKey.replace(/^Key/, "") + "]";
+            bindBtn.style.borderColor = "#00f5d4";
+            bindBtn.style.color = "#00f5d4";
+            if (typeof opts.onChange === "function") opts.onChange(currentKey);
+            return;
+          }
+
           if (e.code === currentKey || e.key === currentKey || ("Key" + (e.key || "").toUpperCase()) === currentKey) {
             if (typeof opts.onTrigger === "function") opts.onTrigger(e);
           }
@@ -585,9 +705,9 @@
         }
 
         row.appendChild(span);
-        row.appendChild(triggerBtn);
+        row.appendChild(bindBtn);
         bodyEl.appendChild(row);
-        return triggerBtn;
+        return bindBtn;
       },
 
       addSelect(labelOrOpts, optionsArr, defaultVal, onChange) {
@@ -603,7 +723,8 @@
         lbl.textContent = opts.label || "Выбор";
 
         const sel = document.createElement("select");
-        sel.className = "cc-select";
+        sel.style.cssText =
+          "width:100%; background:rgba(10,13,20,0.95); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px; padding:6px 8px; font-size:11px; font-weight:700; outline:none;";
 
         (opts.options || []).forEach((item) => {
           const op = document.createElement("option");
@@ -645,7 +766,7 @@
         inp.placeholder = opts.placeholder || "";
         inp.value = opts.value || "";
         inp.style.cssText =
-          "width:100%; background:rgba(10,13,20,0.95); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px; padding:7px 9px; font-size:11.5px; font-weight:700; outline:none;";
+          "width:100%; background:rgba(10,13,20,0.95); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px; padding:6px 8px; font-size:11px; font-weight:700; outline:none;";
 
         inp.addEventListener("input", () => {
           if (typeof opts.onChange === "function") opts.onChange(inp.value);
@@ -663,7 +784,7 @@
           : { label: labelOrOpts, onClick };
 
         const btn = document.createElement("button");
-        btn.className = "cc-btn cc-btn-primary";
+        btn.className = "cc-btn";
         btn.textContent = opts.label || "Кнопка";
         btn.addEventListener("click", () => {
           if (typeof opts.onClick === "function") opts.onClick();
@@ -675,7 +796,7 @@
       addInfo(textOrOpts) {
         const text = typeof textOrOpts === "object" ? textOrOpts.text : textOrOpts;
         const info = document.createElement("div");
-        info.style.cssText = "font-size:11px; color:#94a3b8; line-height:1.4; padding:2px 4px;";
+        info.style.cssText = "font-size:10.5px; color:#94a3b8; line-height:1.36; padding:2px 4px;";
         info.textContent = text || "";
         bodyEl.appendChild(info);
         return info;
@@ -698,7 +819,6 @@
 
         tabNames.forEach((name, idx) => {
           const btn = document.createElement("button");
-          btn.type = "button";
           btn.className = "cc-tab-trigger" + (idx === 0 ? " active" : "");
           btn.textContent = name;
 
@@ -731,40 +851,24 @@
     return helpers;
   }
 
-  /**
-   * Вместо отдельного плавающего окна поверх доски, встраивает настройки скрипта
-   * прямо внутрь карточки скрипта во вкладке «📜 СКРИПТЫ» главного меню!
-   */
-  function mountDockedWindowIntoHud(winEl, scriptEntry) {
-    if (!hudShadow) return false;
-    injectScriptsTabIntoHud();
-    if (scriptEntry) {
-      const cardSlot = hudShadow.getElementById("cc-script-dock-slot-" + scriptEntry.id);
-      if (cardSlot) {
-        cardSlot.innerHTML = "";
-        cardSlot.appendChild(winEl);
-        cardSlot.style.display = "block";
-        return true;
-      }
-    }
-    const listContainer = hudShadow.getElementById("cc-scripts-list-container");
-    if (listContainer) {
-      listContainer.appendChild(winEl);
-      return true;
-    }
-    return false;
-  }
-
   function createWindowForScript(scriptEntry, opts = {}) {
+    if (destroyed) return null;
+    const root = getScriptsShadow();
     const id = opts.id || "cc-win-" + (scriptEntry ? scriptEntry.id : Math.random().toString(36).slice(2, 7));
-    if (hudShadow) {
-      const existing = hudShadow.getElementById(id);
-      if (existing) existing.remove();
-    }
+    const existing = root.getElementById(id);
+    if (existing) existing.remove();
 
     const win = document.createElement("div");
     win.id = id;
-    win.className = "cc-docked-script-win";
+    win.className = "cc-script-win";
+
+    const width = opts.width || 340;
+    const left = opts.left !== undefined ? opts.left : (opts.x !== undefined ? opts.x : 28);
+    const top = opts.top !== undefined ? opts.top : (opts.y !== undefined ? opts.y : 90);
+
+    win.style.width = width + "px";
+    win.style.left = left + "px";
+    win.style.top = top + "px";
 
     const topBar = document.createElement("div");
     topBar.className = "cc-script-win-bar";
@@ -772,38 +876,64 @@
     const header = document.createElement("div");
     header.className = "cc-script-win-header";
     header.innerHTML =
-      '<div style="display:flex; align-items:center; gap:7px;"><span style="width:7px; height:7px; border-radius:50%; background:#00f5d4; box-shadow:0 0 8px #00f5d4;"></span><span>' +
-      (opts.title || "⚙️ НАСТРОЙКИ СКРИПТА") +
+      '<div style="display:flex; align-items:center; gap:7px;"><span style="width:8px; height:8px; border-radius:50%; background:#00f5d4; box-shadow:0 0 10px #00f5d4;"></span><span>' +
+      (opts.title || "📜 МЕНЮ СКРИПТА") +
       "</span></div>";
 
-    const foldBtn = document.createElement("button");
-    foldBtn.type = "button";
-    foldBtn.textContent = "Свернуть ▲";
-    foldBtn.style.cssText =
-      "background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.16); color:#e2e8f0; border-radius:6px; padding:3px 8px; font-size:10px; font-weight:800; cursor:pointer;";
+    const minBtn = document.createElement("button");
+    minBtn.textContent = "—";
+    minBtn.style.cssText =
+      "background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.16); color:#e2e8f0; border-radius:6px; padding:2px 8px; font-size:10px; font-weight:800; cursor:pointer;";
 
     const body = document.createElement("div");
     body.className = "cc-script-win-body";
 
-    let folded = false;
-    foldBtn.addEventListener("click", () => {
-      folded = !folded;
-      body.style.display = folded ? "none" : "flex";
-      foldBtn.textContent = folded ? "Развернуть ▼" : "Свернуть ▲";
+    let minimized = false;
+    minBtn.addEventListener("click", () => {
+      minimized = !minimized;
+      body.style.display = minimized ? "none" : "flex";
+      minBtn.textContent = minimized ? "▢" : "—";
     });
 
-    header.appendChild(foldBtn);
+    header.appendChild(minBtn);
     win.appendChild(topBar);
     win.appendChild(header);
     win.appendChild(body);
+    root.appendChild(win);
 
-    if (!mountDockedWindowIntoHud(win, scriptEntry)) {
-      const waitTimer = setInterval(() => {
-        if (mountDockedWindowIntoHud(win, scriptEntry)) {
-          clearInterval(waitTimer);
+    let dragging = false, ox = 0, oy = 0;
+    const posKey = "cc_win_pos_" + id;
+    header.addEventListener("mousedown", (e) => {
+      if (e.target.tagName === "BUTTON") return;
+      dragging = true;
+      ox = e.clientX - win.offsetLeft;
+      oy = e.clientY - win.offsetTop;
+    });
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      win.style.left = Math.max(0, Math.min(window.innerWidth - 120, e.clientX - ox)) + "px";
+      win.style.top = Math.max(0, Math.min(window.innerHeight - 50, e.clientY - oy)) + "px";
+    };
+    const onUp = () => {
+      if (dragging) {
+        dragging = false;
+        try {
+          chrome.storage?.local?.set({ [posKey]: { left: win.offsetLeft, top: win.offsetTop } });
+        } catch (e) {}
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+
+    try {
+      chrome.storage?.local?.get([posKey], (res) => {
+        if (res && res[posKey]) {
+          win.style.left = res[posKey].left + "px";
+          win.style.top = res[posKey].top + "px";
         }
-      }, 150);
-    }
+      });
+    } catch (e) {}
 
     const uiHelpers = attachUiHelpersToContainer(body, scriptEntry);
     const winObj = {
@@ -811,11 +941,9 @@
       body,
       ...uiHelpers,
       destroy() {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
         win.remove();
-        if (hudShadow && scriptEntry) {
-          const slot = hudShadow.getElementById("cc-script-dock-slot-" + scriptEntry.id);
-          if (slot) slot.style.display = "none";
-        }
       }
     };
 
@@ -826,6 +954,7 @@
   }
 
   function showUniversalBanner(scriptEntry, arg1, arg2, arg3 = {}) {
+    if (destroyed) return null;
     const root = getScriptsShadow();
     let id = "cc-osd-banner-" + (scriptEntry ? scriptEntry.id : "global");
     let text = "";
@@ -865,24 +994,24 @@
       "background: rgba(8, 11, 19, 0.95)",
       "border: 2px solid " + color,
       "border-radius: 14px",
-      "padding: 10px 20px",
+      "padding: 12px 26px",
       "color: #ffffff",
       "box-shadow: 0 16px 40px rgba(0,0,0,0.85), 0 0 30px " + color + "55",
       "text-align: center",
       "pointer-events: none",
-      "z-index: 2147483645"
+      "z-index: 2147483647"
     ].join(";");
 
     banner.innerHTML =
-      '<div style="font-size:15px; font-weight:900; letter-spacing:0.6px; color:' +
+      '<div style="font-size:18px; font-weight:900; letter-spacing:0.8px; color:' +
       color +
-      "; text-shadow:0 0 12px " +
+      "; text-shadow:0 0 14px " +
       color +
       '88;">' +
       text +
       "</div>" +
       (subtext
-        ? '<div style="font-size:10.5px; color:#cbd5e1; margin-top:3px; font-weight:600;">' + subtext + "</div>"
+        ? '<div style="font-size:11px; color:#cbd5e1; margin-top:4px; font-weight:600;">' + subtext + "</div>"
         : "");
 
     root.appendChild(banner);
@@ -891,7 +1020,11 @@
   }
 
   function hideUniversalBanner(scriptEntry, id) {
-    const root = getScriptsShadow();
+    const root = scriptsShadow;
+    if (!root) {
+      if (scriptEntry) scriptEntry.banners.clear();
+      return;
+    }
     if (id) {
       const el = root.getElementById(id);
       if (el) el.remove();
@@ -959,6 +1092,7 @@
   }
 
   function injectPageStyle(scriptEntry, id, cssText) {
+    if (destroyed) return null;
     const fullId = "cc-page-style-" + (scriptEntry ? scriptEntry.id + "-" : "") + id;
     let el = document.getElementById(fullId);
     if (!el) {
@@ -972,6 +1106,7 @@
   }
 
   function injectShadowStyle(scriptEntry, id, cssText) {
+    if (destroyed) return null;
     const root = getScriptsShadow();
     const fullId = "cc-shd-style-" + (scriptEntry ? scriptEntry.id + "-" : "") + id;
     let el = root.getElementById(fullId);
@@ -987,6 +1122,7 @@
 
   let scriptAudioCtx = null;
   function playCustomTone(freqHz = 880, durationMs = 140, waveType = "sine") {
+    if (destroyed) return;
     try {
       const AudioClass = window.AudioContext || window.webkitAudioContext;
       if (!scriptAudioCtx || scriptAudioCtx.state === "closed") {
@@ -1108,21 +1244,26 @@
         }
       },
       setInterval(fn, ms) {
+        if (destroyed) return null;
         const id = window.setInterval(fn, ms);
         scriptEntry.intervals.push(id);
         return id;
       },
       setTimeout(fn, ms) {
+        if (destroyed) return null;
         const id = window.setTimeout(fn, ms);
         scriptEntry.timeouts.push(id);
         return id;
       },
       addEventListener(target, type, fn, opts) {
+        if (destroyed) return false;
         const t = target || window;
         t.addEventListener(type, fn, opts);
         scriptEntry.cleanupListeners.push({ target: t, type, fn, opts });
+        return true;
       },
       on(eventName, fn) {
+        if (destroyed) return;
         if (typeof fn === "function") {
           scriptEntry.dynamicHooks[eventName] = fn;
         }
@@ -1172,6 +1313,77 @@
     if (boardCanvasCtx) {
       boardCanvasCtx.clearRect(0, 0, 800, 800);
     }
+  }
+
+  function stopRuntimeLoops() {
+    if (runtimeRafId !== null) {
+      try { cancelAnimationFrame(runtimeRafId); } catch (e) {}
+      runtimeRafId = null;
+    }
+    if (runtimeIntervalId !== null) {
+      try { clearInterval(runtimeIntervalId); } catch (e) {}
+      runtimeIntervalId = null;
+    }
+  }
+
+  function destroyScriptApi() {
+    if (destroyed) return false;
+    destroyed = true;
+    stopRuntimeLoops();
+
+    registeredScripts.forEach((entry) => {
+      if (entry.enabled && typeof entry.onDisable === "function") {
+        try { entry.onDisable(entry.scopedApi); } catch (e) {}
+      }
+      entry.enabled = false;
+      try { cleanupScriptResources(entry); } catch (e) {}
+      try {
+        if (hudShadow) {
+          const card = hudShadow.getElementById("cc-script-card-" + entry.id);
+          if (card) card.remove();
+        }
+      } catch (e) {}
+    });
+    try { cleanupScriptResources(globalEntry); } catch (e) {}
+    registeredScripts.clear();
+    dynamicallyLoadedFiles.clear();
+
+    try {
+      if (hudShadow) {
+        const scriptsPane = hudShadow.getElementById("cc-pane-scripts");
+        if (scriptsPane) scriptsPane.remove();
+        const scriptsTab = hudShadow.querySelector('.cc-tab-btn[data-tab="scripts"]');
+        if (scriptsTab) scriptsTab.remove();
+      }
+    } catch (e) {}
+
+    const audioContextToClose = scriptAudioCtx;
+    scriptAudioCtx = null;
+    if (audioContextToClose && audioContextToClose.state !== "closed") {
+      try {
+        const closing = audioContextToClose.close();
+        if (closing && typeof closing.catch === "function") closing.catch(() => {});
+      } catch (e) {}
+    }
+
+    try { if (scriptsHost) scriptsHost.remove(); } catch (e) {}
+    scriptsHost = null;
+    scriptsShadow = null;
+    boardOverlayWrap = null;
+    boardSvgRoot = null;
+    boardCanvasEl = null;
+    boardCanvasCtx = null;
+    cachedOverlayRect = null;
+    hudShadow = null;
+    prevMatrix = null;
+
+    if (window.__ChessCoachRegisterHudShadow === registerHudShadow) {
+      try { delete window.__ChessCoachRegisterHudShadow; } catch (e) {}
+    }
+    if (window.CC && window.CC.destroy === destroyScriptApi) {
+      window.CC.__v2Initialized = false;
+    }
+    return true;
   }
 
   function toggleScriptState(scriptId, enabled, save = true) {
@@ -1239,32 +1451,19 @@
       (scriptObj.enabled ? "АКТИВЕН" : "ВЫКЛ") +
       "</span>" +
       "</div>" +
-      "<div style='font-size:11px; color:#cbd5e1; margin-bottom:8px; line-height:1.4;'>" +
-      (scriptObj.description || "Пользовательский скрипт с встроенными настройками прямо в этой вкладке.") +
+      "<div style='font-size:10.5px; color:#cbd5e1; margin-bottom:6px; line-height:1.35;'>" +
+      (scriptObj.description || "Пользовательский скрипт из папки scripts/") +
       "</div>" +
-      '<div class="cc-Switch-row" style="padding:4px 0 0 0; border:none;">' +
-      "<span style='font-weight:800; color:#fff;'>⚡ Включить скрипт (настройки откроются ниже)</span>" +
+      '<div class="cc-Switch-row" style="padding:2px 0 0 0; border:none;">' +
+      "<span style='font-weight:800; color:#fff;'>⚡ Активировать и открыть окно скрипта</span>" +
       "<input type='checkbox' id='cc-script-chk-" +
       scriptObj.id +
       "' " +
       (scriptObj.enabled ? "checked" : "") +
       ">" +
-      "</div>" +
-      "<div id='cc-script-dock-slot-" +
-      scriptObj.id +
-      "' style='display:none;'></div>";
+      "</div>";
 
     listEl.appendChild(card);
-
-    // Если у скрипта уже было создано окно настроек — монтируем его в слот карточки
-    if (scriptObj.enabled && scriptObj.windows.length > 0) {
-      const slot = card.querySelector("#cc-script-dock-slot-" + scriptObj.id);
-      if (slot) {
-        slot.innerHTML = "";
-        slot.appendChild(scriptObj.windows[scriptObj.windows.length - 1].el);
-        slot.style.display = "block";
-      }
-    }
 
     const chk = card.querySelector("#cc-script-chk-" + scriptObj.id);
     if (chk) {
@@ -1282,11 +1481,6 @@
     if (!navList || !mainView) return false;
     if (targetShadow.getElementById("cc-pane-scripts")) return true;
 
-    // Инжектим стили встроенных панелей скриптов в главный ShadowRoot
-    const dockedStyleEl = document.createElement("style");
-    dockedStyleEl.textContent = DOCKED_SCRIPT_STYLES;
-    targetShadow.appendChild(dockedStyleEl);
-
     const tabBtn = document.createElement("button");
     tabBtn.className = "cc-tab-btn";
     tabBtn.dataset.tab = "scripts";
@@ -1299,19 +1493,19 @@
     pane.innerHTML =
       '<div class="cc-glass-card" style="border-left:3.5px solid #c77dff; background:linear-gradient(135deg, rgba(199,125,255,0.14), rgba(0,245,212,0.08));">' +
       '<div class="cc-section-title" style="color:#c77dff;">' +
-      "<span>🧩 МЕНЕДЖЕР СКРИПТОВ (ВСТРОЕННЫЕ ВКЛАДКИ)</span>" +
-      "<span id='cc-script-loader-status' style='color:#00f5d4;'>SDK v2.0</span>" +
+      "<span>🧩 CHESSCOACH LUA / JS SCRIPT ENGINE</span>" +
+      "<span id='cc-script-loader-status' style='color:#00f5d4;'>SDK v2.0 (60 FPS)</span>" +
       "</div>" +
-      "<div style='font-size:11px; color:#cbd5e1; line-height:1.4; margin-bottom:10px;'>" +
-      "Настройки каждого включенного скрипта открываются <strong>прямо внутри этой вкладки</strong>, не перекрывая шахматную доску. Вы можете загрузить любой <code>.js</code> скрипт из памяти телефона:" +
+      "<div style='font-size:10.5px; color:#cbd5e1; line-height:1.38; margin-bottom:8px;'>" +
+      "Положите любой скрипт (например, <code>snake.js</code>) в папку <strong>scripts/</strong>, обновите расширение в браузере и нажмите кнопку ниже, чтобы подключить его без замены <code>sample.js</code>:" +
       "</div>" +
       '<div class="cc-actions-bar">' +
-      '<button class="cc-btn cc-btn-primary" id="cc-add-script-file-btn">📂 ЗАГРУЗИТЬ .JS СКРИПТ</button>' +
+      '<button class="cc-btn cc-btn-primary" id="cc-add-script-file-btn">📂 ПОДКЛЮЧИТЬ .JS ИЗ ПАПКИ SCRIPTS/</button>' +
       '<button class="cc-btn cc-btn-danger" id="cc-reset-script-files-btn">🗑 СБРОСИТЬ СПИСОК</button>' +
       "</div>" +
       '<input type="file" id="cc-script-file-picker" accept=".js" multiple style="display:none;" />' +
       "</div>" +
-      '<div id="cc-scripts-list-container" style="display:flex; flex-direction:column; gap:10px;"></div>';
+      '<div id="cc-scripts-list-container" style="display:flex; flex-direction:column; gap:7px;"></div>';
 
     mainView.appendChild(pane);
 
@@ -1333,9 +1527,11 @@
           const ok = await loadScriptFileFromFolder(f.name, true);
           if (ok) loadedCount++;
         }
-        if (statusEl && loadedCount > 0) {
-          statusEl.textContent = "✅ ПОДКЛЮЧЕНО: " + loadedCount;
-          statusEl.style.color = "#38b000";
+        if (statusEl) {
+          statusEl.textContent = loadedCount > 0
+            ? "✅ ПОДКЛЮЧЕНО: " + loadedCount + " СКРИПТ(ОВ)"
+            : "⚠️ СНАЧАЛА ОБНОВИТЕ РАСШИРЕНИЕ В CHROME://EXTENSIONS";
+          statusEl.style.color = loadedCount > 0 ? "#38b000" : "#ffbe0b";
         }
       });
     }
@@ -1345,7 +1541,7 @@
         try {
           chrome.storage?.local?.set({ cc_custom_script_files: [] }, () => {
             if (statusEl) {
-              statusEl.textContent = "🔄 СПИСОК ОЧИЩЕН";
+              statusEl.textContent = "🔄 СПИСОК ОЧИЩЕН (ОБНОВИТЕ СТРАНИЦУ)";
               statusEl.style.color = "#ff4d94";
             }
           });
@@ -1360,6 +1556,7 @@
       targetShadow.querySelectorAll(".cc-tab-pane").forEach((p) => {
         p.classList.toggle("active", p === pane);
       });
+      try { chrome.storage?.local?.set({ activeTabId: "scripts" }); } catch (e) {}
     });
 
     targetShadow.querySelectorAll(".cc-tab-btn").forEach((b) => {
@@ -1371,6 +1568,12 @@
       }
     });
 
+    try {
+      chrome.storage?.local?.get(["activeTabId"], (result) => {
+        if (result?.activeTabId === "scripts") tabBtn.click();
+      });
+    } catch (e) {}
+
     registeredScripts.forEach((scriptObj) => {
       renderScriptCardInMainHud(scriptObj);
     });
@@ -1379,7 +1582,21 @@
   }
 
   let lastFrameTs = performance.now();
+  let lastHookFrameTs = 0;
+  let lastOverlayEnsureTs = 0;
+  let cachedOverlayRect = null;
+  function scheduleRuntimeFrame() {
+    if (!destroyed) runtimeRafId = requestAnimationFrame(run60FpsLoop);
+  }
+
   function run60FpsLoop(now) {
+    runtimeRafId = null;
+    if (destroyed) return;
+    if (!isExtensionContextValid()) {
+      destroyScriptApi();
+      return;
+    }
+
     const dt = Math.min(0.1, (now - lastFrameTs) / 1000);
     lastFrameTs = now;
 
@@ -1391,7 +1608,18 @@
     });
 
     if (anyFrameHookActive) {
-      const rect = ensureBoardOverlayElements();
+      const performanceMode = window.ChessCoachEngine?.getPerformanceMode?.() || "normal";
+      const minimumGap = performanceMode === "critical" ? 100 : performanceMode === "constrained" ? 50 : 16;
+      if (now - lastHookFrameTs < minimumGap) {
+        scheduleRuntimeFrame();
+        return;
+      }
+      lastHookFrameTs = now;
+      if (!cachedOverlayRect || now - lastOverlayEnsureTs >= 500 || !boardCanvasEl?.isConnected) {
+        cachedOverlayRect = ensureBoardOverlayElements();
+        lastOverlayEnsureTs = now;
+      }
+      const rect = cachedOverlayRect;
       if (rect && boardCanvasCtx) {
         boardCanvasCtx.clearRect(0, 0, 800, 800);
         const snapshot = { ...trackedState };
@@ -1411,14 +1639,22 @@
       }
     }
 
-    requestAnimationFrame(run60FpsLoop);
+    scheduleRuntimeFrame();
   }
-  requestAnimationFrame(run60FpsLoop);
+  function runtimeIntervalTick() {
+    if (destroyed) return;
+    if (!isExtensionContextValid()) {
+      destroyScriptApi();
+      return;
+    }
 
-  setInterval(() => {
     injectScriptsTabIntoHud();
     scanBoardAndHudState();
-    ensureBoardOverlayElements();
+    const anyEnabledScript = [...registeredScripts.values()].some(script => script.enabled);
+    if (anyEnabledScript && !cachedOverlayRect) {
+      cachedOverlayRect = ensureBoardOverlayElements();
+      lastOverlayEnsureTs = performance.now();
+    }
 
     const snapshot = { ...trackedState };
     const movePairSig = (snapshot.lastMoveFrom || "") + "-" + (snapshot.lastMoveTo || "") + "-" + snapshot.moveCount;
@@ -1447,9 +1683,23 @@
           if (typeof s.dynamicHooks.onEvalUpdate === "function") s.dynamicHooks.onEvalUpdate(snapshot);
         }
       } catch (e) {}
-    }
-  );
-  }, 250);
+    });
+  }
+
+  function startRuntimeLoops() {
+    destroyed = false;
+    if (runtimeRafId === null) scheduleRuntimeFrame();
+    if (runtimeIntervalId === null) runtimeIntervalId = setInterval(runtimeIntervalTick, 500);
+  }
+
+  function reviveScriptApi() {
+    if (!destroyed) return;
+    destroyed = false;
+    if (window.CC) window.CC.__v2Initialized = true;
+    window.__ChessCoachRegisterHudShadow = registerHudShadow;
+    startRuntimeLoops();
+    autoLoadSavedScriptFiles();
+  }
 
   const globalEntry = {
     id: "global",
@@ -1464,12 +1714,15 @@
   };
   const defaultGlobalApi = buildScopedApiForScript(globalEntry);
 
-  window.CC = {
+  const publicApi = {
     __v2Initialized: true,
     ...defaultGlobalApi,
+    cleanup: destroyScriptApi,
+    destroy: destroyScriptApi,
+    revive: reviveScriptApi,
     loadScriptFile: loadScriptFileFromFolder,
     registerScript(config) {
-      if (!config || !config.id) return;
+      if (destroyed || !config || !config.id) return;
       const entry = {
         id: config.id,
         name: config.name || config.id,
@@ -1506,6 +1759,8 @@
       } catch (e) {}
     }
   };
+  window.CC = publicApi;
 
+  startRuntimeLoops();
   autoLoadSavedScriptFiles();
 })();

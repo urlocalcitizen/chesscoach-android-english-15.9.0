@@ -1,94 +1,645 @@
 let experienceDB = {};
 let totalLearnedGames = 0;
 const transpositionTable = new Map();
+const TT_MAX_ENTRIES = 260000;
 const cloudCache = new Map();
 const syzygyCache = new Map();
+const cloudNegativeCache = new Map();
+const syzygyNegativeCache = new Map();
+const REMOTE_CACHE_MAX_ENTRIES = 2000;
+const NEGATIVE_CACHE_MAX_ENTRIES = 256;
 const killerMoves = Array.from({ length: 16 }, () => [null, null]);
+let localEcoBook = null;
 
-const MY_INSTANCE_ID = "cc_" + Math.random().toString(36).slice(2, 10);
-const activeRoomBeacons = new Map();
-
-async function syncRoomBeacon(roomId, myColor, style, elo, autoMove) {
-  if (!roomId || roomId.length < 8) return { detected: false };
-  const cleanRoom = roomId.slice(0, 8).toLowerCase();
-  const topic = `cc_rw10_${cleanRoom}`;
-  const url = `https://ntfy.sh/${topic}`;
-
-  const beaconKey = `${topic}_${myColor}_${style}_${elo}_${autoMove}`;
-  if (!activeRoomBeacons.has(beaconKey)) {
-    if (activeRoomBeacons.size > 200) activeRoomBeacons.clear();
-    activeRoomBeacons.set(beaconKey, Date.now());
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: { "Title": "CC_BEACON" },
-        body: JSON.stringify({
-          id: MY_INSTANCE_ID,
-          color: myColor,
-          style,
-          elo,
-          auto: Boolean(autoMove),
-          ts: Date.now()
-        })
-      });
-    } catch (e) {}
+try {
+  if (typeof importScripts === "function" && chrome.runtime?.getURL) {
+    importScripts(chrome.runtime.getURL("data/eco-book.js"));
+    localEcoBook = globalThis.CHESSCOACH_ECO_BOOK || null;
+    try { delete globalThis.CHESSCOACH_ECO_BOOK; } catch (e) {}
   }
-
-  try {
-    const res = await fetch(`${url}/json?poll=1&since=20m`, { cache: "no-store" });
-    if (!res.ok) return { detected: false };
-    const text = await res.text();
-    const lines = text.trim().split("\n").filter(Boolean);
-
-    for (let i = lines.length - 1; i >= 0; i--) {
-      let env = null;
-      try { env = JSON.parse(lines[i]); } catch (e) { continue; }
-      if (!env || !env.message) continue;
-
-      let data = null;
-      try { data = JSON.parse(env.message); } catch (e) { continue; }
-      if (!data || !data.id) continue;
-
-      const isDifferentInstance = data.id !== MY_INSTANCE_ID;
-      const isOppositeSide = myColor && data.color && data.color !== myColor;
-
-      if (isDifferentInstance || isOppositeSide) {
-        return {
-          detected: true,
-          enemyStyle: data.style || "tal",
-          enemyElo: data.elo || 2000,
-          enemyAuto: Boolean(data.auto)
-        };
-      }
-    }
-  } catch (e) {}
-
-  return { detected: false };
+} catch (e) {
+  localEcoBook = null;
 }
 
-let lastAnalyzedState = {
-  board: null,
-  boardHash: "",
-  turn: null,
-  pureBestScoreForWhite: 0,
-  prevTurnScoreForWhite: 0,
-  lastDropPawns: 0
-};
+function getLocalEcoBookMoves(uciHistory, historyTrusted) {
+  if (!historyTrusted || !localEcoBook?.positions || !Array.isArray(uciHistory)) return [];
+  if (uciHistory.length > Number(localEcoBook.maxPly || 20)) return [];
+  if (!uciHistory.every(move => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move))) return [];
+  const entries = localEcoBook.positions[uciHistory.join(" ")];
+  if (!Array.isArray(entries)) return [];
+  return entries.slice(0, 5).map(([uci, support, eco, nameId]) => ({
+    from: uci.slice(0, 2),
+    to: uci.slice(2, 4),
+    promo: uci[4] || null,
+    bonus: Math.min(110, 20 + Math.round(Math.log2(Math.max(1, support) + 1) * 8)),
+    name: uciHistory.length < 4
+      ? `ECO LOCAL · ${Number(support) || 1} линий`
+      : `${eco} · ${localEcoBook.names?.[nameId] || "ECO"}`,
+    support: Number(support) || 1,
+    source: "eco-local"
+  }));
+}
 
-if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-  chrome.storage.local.get(["experienceDB", "totalLearnedGames"], (res) => {
-    if (res.experienceDB) experienceDB = res.experienceDB;
-    if (res.totalLearnedGames) totalLearnedGames = Number(res.totalLearnedGames);
+async function syncRoomBeacon(roomId, myColor, style, elo, autoMove) {
+  // Public unauthenticated topics leak room activity and can be spoofed.
+  // Keep the established response shape while disabling all network traffic.
+  return { detected: false, disabled: true };
+}
+
+const analyzedStateByClient = new Map();
+const latestAnalysisMetaByClient = new Map();
+const stockfishWorkByPosition = new Map();
+
+function createAnalyzedState() {
+  return {
+    board: null,
+    boardHash: "",
+    turn: null,
+    pureBestScoreForWhite: 0,
+    prevTurnScoreForWhite: 0,
+    lastDropPawns: 0
+  };
+}
+
+const ENGINE_UCI_MOVE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+const ENGINE_BACKENDS = new Set(["stockfish-19-full-single-wasm", "stockfish-19-lite-asm"]);
+const OFFSCREEN_URL = "offscreen/offscreen.html";
+let creatingOffscreenDocument = null;
+let closingOffscreenDocument = null;
+let engineActivityEpoch = 0;
+const engineCancellationByClient = new Map();
+
+const SEARCH_INTERRUPTED = Object.freeze({ message: "Local search budget exhausted" });
+
+function searchNow() {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
+function createSearchBudget(timeBudgetMs, nodeLimit) {
+  const startedAt = searchNow();
+  return {
+    startedAt,
+    lastNow: startedAt,
+    deadline: startedAt + timeBudgetMs,
+    timeBudgetMs,
+    nodeLimit,
+    nodes: 0,
+    interrupted: false,
+    lifecycleEpoch: globalThis.__CC_ENGINE_RUNTIME__?.lifecycleEpoch
+  };
+}
+
+function checkSearchBudget(budget) {
+  if (!budget) return;
+  budget.lastNow = Math.max(budget.lastNow, searchNow());
+  const runtime = globalThis.__CC_ENGINE_RUNTIME__;
+  if (budget.interrupted || budget.nodes >= budget.nodeLimit || budget.lastNow >= budget.deadline || (runtime && (runtime.suspended || runtime.lifecycleEpoch !== budget.lifecycleEpoch))) {
+    budget.interrupted = true;
+    throw SEARCH_INTERRUPTED;
+  }
+  // Count tactical branch work as well as recursive PV nodes.
+  budget.nodes++;
+}
+
+function searchStats(budget) {
+  return { nodes: budget.nodes, nodeLimit: budget.nodeLimit, timeBudgetMs: budget.timeBudgetMs, elapsedMs: Math.max(0, Math.round(searchNow() - budget.startedAt)), interrupted: budget.interrupted };
+}
+
+function validateEngineFen(fen) {
+  if (typeof fen !== "string" || fen.length > 128 || /[\r\n\0-\x08\x0B\x0C\x0E-\x1F]/.test(fen)) return false;
+  const fields = fen.trim().split(/\s+/);
+  if (fields.length !== 6) return false;
+  const rows = fields[0].split("/");
+  if (rows.length !== 8) return false;
+  for (const row of rows) {
+    let squares = 0;
+    for (const char of row) {
+      if (/[1-8]/.test(char)) squares += Number(char);
+      else if (/[prnbqkPRNBQK]/.test(char)) squares++;
+      else return false;
+    }
+    if (squares !== 8) return false;
+  }
+  return /^[wb]$/.test(fields[1]) && /^(?:-|[KQkq]{1,4})$/.test(fields[2]) &&
+    /^(?:-|[a-h][36])$/.test(fields[3]) && /^\d+$/.test(fields[4]) && /^[1-9]\d*$/.test(fields[5]);
+}
+
+function validateEnginePayload(request) {
+  if (!validateEngineFen(request.fen)) return "INVALID_FEN";
+  if (
+    request.useStartposMoves &&
+    (!Array.isArray(request.uciMoves) || request.uciMoves.length > 1024 || !request.uciMoves.every(move => ENGINE_UCI_MOVE.test(move)))
+  ) return "INVALID_HISTORY";
+  const movetimeMs = Number(request.movetimeMs);
+  const multiPv = Number(request.multiPv);
+  if (!Number.isFinite(movetimeMs) || movetimeMs < 20 || movetimeMs > 10000) return "INVALID_MOVETIME";
+  if (!Number.isInteger(multiPv) || multiPv < 1 || multiPv > 3) return "INVALID_MULTIPV";
+  return null;
+}
+
+async function hasOffscreenDocument() {
+  if (!chrome.runtime.getContexts) return false;
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: [chrome.runtime.ContextType?.OFFSCREEN_DOCUMENT || "OFFSCREEN_DOCUMENT"],
+    documentUrls: [chrome.runtime.getURL(OFFSCREEN_URL)]
+  });
+  return contexts.length > 0;
+}
+
+function ensureOffscreenDocument() {
+  if (!chrome.offscreen?.createDocument) return Promise.reject(new Error("Offscreen API unavailable"));
+  if (creatingOffscreenDocument) return creatingOffscreenDocument;
+  creatingOffscreenDocument = (async () => {
+    if (closingOffscreenDocument) {
+      try { await closingOffscreenDocument; } catch (e) {}
+    }
+    if (await hasOffscreenDocument()) return true;
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: [chrome.offscreen.Reason?.WORKERS || "WORKERS"],
+      justification: "Runs the packaged full-NNUE Stockfish worker for local chess analysis"
+    });
+    return true;
+  })().finally(() => { creatingOffscreenDocument = null; });
+  return creatingOffscreenDocument;
+}
+
+function forwardToOffscreen(message, sendResponse) {
+  chrome.runtime.sendMessage({ ...message, target: "offscreen-engine" }, response => {
+    if (chrome.runtime.lastError) {
+      sendResponse({ ok: false, requestId: message.requestId, code: "OFFSCREEN_MESSAGE_FAILED", error: chrome.runtime.lastError.message });
+      return;
+    }
+    sendResponse(response || { ok: false, requestId: message.requestId, code: "EMPTY_OFFSCREEN_RESPONSE" });
+  });
+}
+
+function handleEngineMessage(request, sender, sendResponse) {
+  const requestId = String(request.requestId || "");
+  const rawClientInstanceId = String(request.clientInstanceId || "legacy");
+  const clientInstanceId = /^[a-z0-9-]{6,64}$/i.test(rawClientInstanceId) ? rawClientInstanceId : "legacy";
+  const clientKey = `${sender?.tab?.id ?? "extension"}:${sender?.frameId ?? 0}:${clientInstanceId}`;
+  const type = request.type;
+  if (request.backend !== undefined && !ENGINE_BACKENDS.has(request.backend)) {
+    sendResponse({ ok: false, requestId, code: "INVALID_BACKEND" });
+    return false;
+  }
+  engineActivityEpoch++;
+  const runtimeEpoch = globalThis.__CC_ENGINE_RUNTIME__?.lifecycleEpoch;
+  let clientEpoch = engineCancellationByClient.get(clientKey)?.epoch || 0;
+  if (type === "ENGINE_CANCEL" || type === "ENGINE_RELEASE") {
+    clientEpoch++;
+    setBoundedCacheEntry(engineCancellationByClient, clientKey, { epoch: clientEpoch, code: type === "ENGINE_RELEASE" ? "RELEASED" : "CANCELLED" }, 128);
+  }
+  const canForward = () => {
+    const runtime = globalThis.__CC_ENGINE_RUNTIME__;
+    return (!runtime || (!runtime.suspended && runtime.lifecycleEpoch === runtimeEpoch)) && (engineCancellationByClient.get(clientKey)?.epoch || 0) === clientEpoch;
+  };
+  if (type === "ENGINE_ANALYZE") {
+    const validationError = validateEnginePayload(request);
+    if (validationError) {
+      sendResponse({ ok: false, requestId, code: validationError });
+      return false;
+    }
+  }
+  const message = {
+    type,
+    backend: request.backend || "stockfish-19-full-single-wasm",
+    requestId,
+    clientKey,
+    fen: request.fen,
+    movetimeMs: Math.max(20, Math.min(10000, Number(request.movetimeMs) || 190)),
+    multiPv: Math.max(1, Math.min(3, Number(request.multiPv) || 1)),
+    uciMoves: Array.isArray(request.uciMoves) ? request.uciMoves.slice() : [],
+    useStartposMoves: Boolean(request.useStartposMoves),
+    hashMb: Math.max(16, Math.min(128, Number(request.hashMb) || 64)),
+    meta: request.meta || null
+  };
+  if (["ENGINE_CANCEL", "ENGINE_RELEASE", "ENGINE_STATUS"].includes(type)) {
+    hasOffscreenDocument().then(exists => {
+      if (!canForward()) {
+        sendResponse({ ok: true, requestId, cancelled: true });
+        return;
+      }
+      if (!exists) {
+        sendResponse({ ok: type !== "ENGINE_STATUS", requestId, code: "OFFSCREEN_NOT_RUNNING", status: { ready: false } });
+        return;
+      }
+      forwardToOffscreen(message, sendResponse);
+    }).catch(error => sendResponse({ ok: false, requestId, code: "OFFSCREEN_LOOKUP_FAILED", error: String(error?.message || error) }));
+    return true;
+  }
+  const positionKey = `${request.meta?.sessionId || ""}|${request.meta?.positionId || ""}|${request.fen || ""}`;
+  const engineWork = { expiresAt: Date.now() + 10000 };
+  if (type === "ENGINE_ANALYZE") setBoundedCacheEntry(stockfishWorkByPosition, positionKey, engineWork, 32);
+  const respond = payload => {
+    if (type === "ENGINE_ANALYZE" && stockfishWorkByPosition.get(positionKey) === engineWork && (!payload?.ok || payload.result?.searchCompleted !== true)) {
+      stockfishWorkByPosition.delete(positionKey);
+    }
+    sendResponse(payload);
+  };
+  ensureOffscreenDocument().then(() => {
+    if (!canForward()) {
+      respond({ ok: false, requestId, code: engineCancellationByClient.get(clientKey)?.code || "ENGINE_SUSPENDED" });
+      return;
+    }
+    forwardToOffscreen(message, respond);
+  }).catch(error => {
+    stockfishWorkByPosition.delete(positionKey);
+    sendResponse({ ok: false, requestId, code: "OFFSCREEN_CREATE_FAILED", error: String(error?.message || error) });
+  });
+  return true;
+}
+
+function handleOffscreenIdle(sender, sendResponse) {
+  if (sender?.url !== chrome.runtime.getURL(OFFSCREEN_URL)) {
+    sendResponse({ ok: false, code: "INVALID_OFFSCREEN_SENDER" });
+    return false;
+  }
+  const epoch = engineActivityEpoch;
+  chrome.runtime.sendMessage({ target: "offscreen-engine", type: "ENGINE_STATUS", requestId: `idle-${Date.now()}`, clientKey: "background-idle" }, statusResponse => {
+    if (chrome.runtime.lastError || !statusResponse?.ok || statusResponse.status?.busy || statusResponse.status?.queueLength > 0 || epoch !== engineActivityEpoch) {
+      sendResponse({ ok: true, closed: false });
+      return;
+    }
+    if (!closingOffscreenDocument) {
+      closingOffscreenDocument = chrome.offscreen.closeDocument()
+        .finally(() => { closingOffscreenDocument = null; });
+    }
+    closingOffscreenDocument
+      .then(() => sendResponse({ ok: true, closed: true }))
+      .catch(error => sendResponse({ ok: false, code: "OFFSCREEN_CLOSE_FAILED", error: String(error?.message || error) }));
+  });
+  return true;
+}
+
+const EXPERIENCE_MAX_POSITIONS = 2500;
+const EXPERIENCE_MAX_MOVES_PER_POSITION = 16;
+const EXPERIENCE_MAX_ENTRY_GAMES = 1000000;
+const EXPERIENCE_MAX_TOTAL_GAMES = 1000000000;
+const EXPERIENCE_FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const EXPERIENCE_MESSAGE_TYPES = new Set([
+  "RECORD_GAME_RESULT",
+  "TRAIN_MOVE_MANUAL",
+  "GET_MEMORY_STATS",
+  "IMPORT_MEMORY",
+  "CLEAR_MEMORY"
+]);
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isValidExperiencePositionKey(fenKey) {
+  if (
+    typeof fenKey !== "string" ||
+    fenKey.length < 3 ||
+    fenKey.length > 128 ||
+    fenKey !== fenKey.trim() ||
+    /[\r\n\0-\x1F]/.test(fenKey) ||
+    EXPERIENCE_FORBIDDEN_KEYS.has(fenKey)
+  ) {
+    return false;
+  }
+  const fieldCount = fenKey.split(/\s+/).length;
+  if (fieldCount === 2) return validateEngineFen(`${fenKey} - - 0 1`);
+  if (fieldCount === 4) return validateEngineFen(`${fenKey} 0 1`);
+  return false;
+}
+
+function experienceEntryWeight(entry) {
+  return Math.min(EXPERIENCE_MAX_ENTRY_GAMES, Number(entry?.games) || 0) * 10 + Math.abs(Number(entry?.bonus) || 0);
+}
+
+function enforceExperienceLimits(db, protectedKeys = new Set()) {
+  for (const fenKey of Object.keys(db)) {
+    const position = db[fenKey];
+    const rankedMoves = Object.entries(position).sort((a, b) => experienceEntryWeight(b[1]) - experienceEntryWeight(a[1]));
+    if (rankedMoves.length > EXPERIENCE_MAX_MOVES_PER_POSITION) {
+      const trimmed = {};
+      for (const [uci, entry] of rankedMoves.slice(0, EXPERIENCE_MAX_MOVES_PER_POSITION)) trimmed[uci] = entry;
+      db[fenKey] = trimmed;
+    }
+  }
+
+  const positionKeys = Object.keys(db);
+  if (positionKeys.length > EXPERIENCE_MAX_POSITIONS) {
+    positionKeys.sort((a, b) => {
+      const protectedDelta = Number(protectedKeys.has(a)) - Number(protectedKeys.has(b));
+      if (protectedDelta !== 0) return protectedDelta;
+      const weightA = Object.values(db[a]).reduce((sum, entry) => sum + experienceEntryWeight(entry), 0);
+      const weightB = Object.values(db[b]).reduce((sum, entry) => sum + experienceEntryWeight(entry), 0);
+      return weightA - weightB;
+    });
+    const removeCount = positionKeys.length - EXPERIENCE_MAX_POSITIONS;
+    for (let i = 0; i < removeCount; i++) delete db[positionKeys[i]];
+  }
+  return db;
+}
+
+function normalizeExperienceDB(raw, strict = false) {
+  if (!isPlainRecord(raw)) {
+    return strict
+      ? { ok: false, code: "INVALID_IMPORT_SCHEMA", error: "Memory import must be an object" }
+      : { ok: true, data: {} };
+  }
+
+  const positions = Object.entries(raw);
+  if (strict && positions.length > EXPERIENCE_MAX_POSITIONS) {
+    return { ok: false, code: "IMPORT_TOO_LARGE", error: `Memory import exceeds ${EXPERIENCE_MAX_POSITIONS} positions` };
+  }
+
+  const normalized = {};
+  for (const [fenKey, rawPosition] of positions) {
+    if (!isValidExperiencePositionKey(fenKey) || !isPlainRecord(rawPosition)) {
+      if (strict) return { ok: false, code: "INVALID_IMPORT_SCHEMA", error: "Invalid position key or move map" };
+      continue;
+    }
+
+    const moves = Object.entries(rawPosition);
+    if (strict && moves.length > EXPERIENCE_MAX_MOVES_PER_POSITION) {
+      return { ok: false, code: "IMPORT_TOO_LARGE", error: `Position exceeds ${EXPERIENCE_MAX_MOVES_PER_POSITION} moves` };
+    }
+
+    const normalizedPosition = {};
+    for (const [uci, rawEntry] of moves) {
+      const entryKeys = isPlainRecord(rawEntry) ? Object.keys(rawEntry) : [];
+      const validEntry =
+        ENGINE_UCI_MOVE.test(uci) &&
+        !EXPERIENCE_FORBIDDEN_KEYS.has(uci) &&
+        isPlainRecord(rawEntry) &&
+        entryKeys.length === 2 &&
+        entryKeys.includes("bonus") &&
+        entryKeys.includes("games") &&
+        typeof rawEntry.bonus === "number" &&
+        Number.isFinite(rawEntry.bonus) &&
+        rawEntry.bonus >= -250 &&
+        rawEntry.bonus <= 180 &&
+        Number.isInteger(rawEntry.games) &&
+        rawEntry.games >= 0 &&
+        rawEntry.games <= EXPERIENCE_MAX_ENTRY_GAMES;
+      if (!validEntry) {
+        if (strict) return { ok: false, code: "INVALID_IMPORT_SCHEMA", error: "Invalid move experience entry" };
+        continue;
+      }
+      normalizedPosition[uci] = { bonus: rawEntry.bonus, games: rawEntry.games };
+    }
+    if (Object.keys(normalizedPosition).length > 0) normalized[fenKey] = normalizedPosition;
+  }
+
+  enforceExperienceLimits(normalized);
+  return { ok: true, data: normalized };
+}
+
+function cloneExperienceDB(db = experienceDB) {
+  const copy = {};
+  for (const [fenKey, position] of Object.entries(db)) {
+    const positionCopy = {};
+    for (const [uci, entry] of Object.entries(position)) {
+      positionCopy[uci] = { bonus: entry.bonus, games: entry.games };
+    }
+    copy[fenKey] = positionCopy;
+  }
+  return copy;
+}
+
+let experienceLoadError = null;
+const experienceReady = new Promise((resolve) => {
+  if (typeof chrome === "undefined" || !chrome.storage?.local) {
+    resolve();
+    return;
+  }
+  try {
+    chrome.storage.local.get(["experienceDB", "totalLearnedGames"], (res) => {
+      const lastError = chrome.runtime?.lastError;
+      if (lastError) {
+        experienceLoadError = String(lastError.message || lastError);
+        resolve();
+        return;
+      }
+      const normalized = normalizeExperienceDB(res?.experienceDB || {}, false);
+      experienceDB = normalized.data;
+      const storedGames = Number(res?.totalLearnedGames);
+      if (Number.isSafeInteger(storedGames) && storedGames >= 0) {
+        totalLearnedGames = Math.min(EXPERIENCE_MAX_TOTAL_GAMES, storedGames);
+      }
+      resolve();
+    });
+  } catch (error) {
+    experienceLoadError = String(error?.message || error);
+    resolve();
+  }
+});
+
+let experienceSaveQueue = Promise.resolve();
+let experienceOperationQueue = Promise.resolve();
+
+function createStorageError(message) {
+  const error = new Error(message || "Failed to persist memory");
+  error.code = /quota|bytes_per_item|max_items/i.test(error.message)
+    ? "STORAGE_QUOTA_EXCEEDED"
+    : "STORAGE_WRITE_FAILED";
+  return error;
+}
+
+function persistExperienceSnapshot(snapshot) {
+  return new Promise((resolve, reject) => {
+    if (typeof chrome === "undefined" || !chrome.storage?.local) {
+      reject(createStorageError("Storage API unavailable"));
+      return;
+    }
+    try {
+      chrome.storage.local.set(snapshot, () => {
+        const lastError = chrome.runtime?.lastError;
+        if (lastError) reject(createStorageError(String(lastError.message || lastError)));
+        else resolve();
+      });
+    } catch (error) {
+      reject(createStorageError(String(error?.message || error)));
+    }
   });
 }
 
 function saveExperienceDB() {
-  if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.set({ experienceDB, totalLearnedGames });
+  const snapshot = {
+    experienceDB: cloneExperienceDB(),
+    totalLearnedGames
+  };
+  const operation = experienceSaveQueue.catch(() => undefined).then(() => persistExperienceSnapshot(snapshot));
+  experienceSaveQueue = operation;
+  return operation;
+}
+
+function experienceErrorResponse(error, extra = {}) {
+  return {
+    ok: false,
+    code: error?.code || "MEMORY_OPERATION_FAILED",
+    error: String(error?.message || error || "Memory operation failed"),
+    ...extra
+  };
+}
+
+async function handleExperienceMessage(request, sendResponse) {
+  if (experienceLoadError) {
+    const error = new Error(experienceLoadError);
+    error.code = "STORAGE_READ_FAILED";
+    sendResponse(experienceErrorResponse(error, {
+      totalLearnedGames,
+      positionsCount: Object.keys(experienceDB).length
+    }));
+    return;
+  }
+  if (request.type === "GET_MEMORY_STATS") {
+    sendResponse({
+      totalLearnedGames,
+      positionsCount: Object.keys(experienceDB).length,
+      experienceDB
+    });
+    return;
+  }
+
+  const previousDB = cloneExperienceDB();
+  const previousTotalLearnedGames = totalLearnedGames;
+  const restoreAfterFailure = (error, extra = {}) => {
+    experienceDB = previousDB;
+    totalLearnedGames = previousTotalLearnedGames;
+    sendResponse(experienceErrorResponse(error, extra));
+  };
+
+  if (request.type === "RECORD_GAME_RESULT") {
+    const { history, result } = request;
+    if (Array.isArray(history) && history.length > 0) {
+      totalLearnedGames = Math.min(EXPERIENCE_MAX_TOTAL_GAMES, totalLearnedGames + 1);
+      const protectedKeys = new Set();
+      const startIdx = Math.max(0, history.length - 10);
+      for (let idx = startIdx; idx < history.length; idx++) {
+        const item = history[idx];
+        if (!item || !isValidExperiencePositionKey(item.fenKey) || !ENGINE_UCI_MOVE.test(String(item.uci || ""))) continue;
+        const fenKey = item.fenKey;
+        const uci = item.uci;
+        protectedKeys.add(fenKey);
+        if (!experienceDB[fenKey]) experienceDB[fenKey] = {};
+        if (!experienceDB[fenKey][uci]) experienceDB[fenKey][uci] = { bonus: 0, games: 0 };
+        const entry = experienceDB[fenKey][uci];
+        entry.games = Math.min(EXPERIENCE_MAX_ENTRY_GAMES, entry.games + 1);
+        if (result === "win") {
+          entry.bonus = Math.min(65, entry.bonus + 15);
+        } else if (result === "loss") {
+          entry.bonus = idx >= history.length - 4
+            ? Math.max(-160, entry.bonus - 55)
+            : Math.max(-60, entry.bonus - 15);
+        }
+      }
+      enforceExperienceLimits(experienceDB, protectedKeys);
+      try {
+        await saveExperienceDB();
+      } catch (error) {
+        restoreAfterFailure(error, {
+          totalLearnedGames: previousTotalLearnedGames,
+          positionsCount: Object.keys(previousDB).length
+        });
+        return;
+      }
+    }
+    sendResponse({
+      ok: true,
+      totalLearnedGames,
+      positionsCount: Object.keys(experienceDB).length
+    });
+    return;
+  }
+
+  if (request.type === "TRAIN_MOVE_MANUAL") {
+    const { fenKey, uci } = request;
+    const delta = Number(request.delta);
+    if (fenKey && uci) {
+      if (!isValidExperiencePositionKey(fenKey) || !ENGINE_UCI_MOVE.test(String(uci)) || !Number.isFinite(delta)) {
+        sendResponse(experienceErrorResponse(new Error("Invalid training entry"), {
+          positionsCount: Object.keys(experienceDB).length
+        }));
+        return;
+      }
+      if (!experienceDB[fenKey]) experienceDB[fenKey] = {};
+      if (!experienceDB[fenKey][uci]) experienceDB[fenKey][uci] = { bonus: 0, games: 0 };
+      experienceDB[fenKey][uci].bonus = Math.max(-250, Math.min(180, experienceDB[fenKey][uci].bonus + delta));
+      experienceDB[fenKey][uci].games = Math.min(EXPERIENCE_MAX_ENTRY_GAMES, experienceDB[fenKey][uci].games + 1);
+      enforceExperienceLimits(experienceDB, new Set([fenKey]));
+      try {
+        await saveExperienceDB();
+      } catch (error) {
+        restoreAfterFailure(error, { positionsCount: Object.keys(previousDB).length });
+        return;
+      }
+    }
+    sendResponse({ ok: true, positionsCount: Object.keys(experienceDB).length });
+    return;
+  }
+
+  if (request.type === "IMPORT_MEMORY") {
+    const normalized = normalizeExperienceDB(request.data, true);
+    if (!normalized.ok) {
+      sendResponse({
+        ok: false,
+        code: normalized.code,
+        error: normalized.error,
+        positionsCount: Object.keys(experienceDB).length
+      });
+      return;
+    }
+    const merged = cloneExperienceDB();
+    for (const [fenKey, position] of Object.entries(normalized.data)) merged[fenKey] = position;
+    experienceDB = enforceExperienceLimits(merged, new Set(Object.keys(normalized.data)));
+    try {
+      await saveExperienceDB();
+    } catch (error) {
+      restoreAfterFailure(error, { positionsCount: Object.keys(previousDB).length });
+      return;
+    }
+    sendResponse({ ok: true, positionsCount: Object.keys(experienceDB).length });
+    return;
+  }
+
+  if (request.type === "CLEAR_MEMORY") {
+    experienceDB = {};
+    totalLearnedGames = 0;
+    transpositionTable.clear();
+    cloudCache.clear();
+    syzygyCache.clear();
+    cloudNegativeCache.clear();
+    syzygyNegativeCache.clear();
+    analyzedStateByClient.clear();
+    latestAnalysisMetaByClient.clear();
+    for (const pair of killerMoves) pair.fill(null);
+    cloudRetryAfter = 0;
+    try {
+      await saveExperienceDB();
+    } catch (error) {
+      restoreAfterFailure(error);
+      return;
+    }
+    sendResponse({ ok: true });
   }
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request?.target === "background-engine" && request?.type === "ENGINE_OFFSCREEN_IDLE") {
+    return handleOffscreenIdle(sender, sendResponse);
+  }
+  if (request?.target === "background-engine" && /^ENGINE_(?:INIT|ANALYZE|CANCEL|RELEASE|STATUS)$/.test(request.type || "")) {
+    return handleEngineMessage(request, sender, sendResponse);
+  }
+  if (EXPERIENCE_MESSAGE_TYPES.has(request?.type)) {
+    experienceOperationQueue = experienceOperationQueue
+      .catch(() => undefined)
+      .then(() => experienceReady)
+      .then(() => handleExperienceMessage(request, sendResponse))
+      .catch((error) => sendResponse(experienceErrorResponse(error, {
+        positionsCount: Object.keys(experienceDB).length
+      })));
+    return true;
+  }
   if (request.type === "CHECK_PEER_BEACON") {
     syncRoomBeacon(request.roomId, request.myColor, request.style, request.elo, request.autoMove)
       .then((res) => sendResponse(res))
@@ -97,29 +648,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "ANALYZE_POSITION") {
-    analyzeAdaptiveMaster(
-      request.fen,
-      request.elo || 2000,
-      request.style || "tal",
-      request.pass || "fast",
-      request.lastEnemyMove || null,
-      Boolean(request.bulletTurbo),
-      request.calcAverage !== false,
-      request.calcWorst !== false,
-      request.myColor || "w",
-      request.mySeconds ?? 999,
-      request.enemySeconds ?? 999,
-      request.trapRadarEnabled !== false,
-      Array.isArray(request.recentPositions) ? request.recentPositions : [],
-      request.lastOurMove || null
-    )
-      .then((res) => sendResponse(res))
-      .catch((err) => sendResponse({ error: err.message }));
+    if (!validateEngineFen(request.fen)) {
+      sendResponse({ error: "Invalid analysis FEN", meta: request.meta || null, status: "error" });
+      return false;
+    }
+    const rawSessionId = String(request.meta?.sessionId || "legacy");
+    const sessionId = /^[a-z0-9:._-]{1,96}$/i.test(rawSessionId) ? rawSessionId : "legacy";
+    const analysisContextKey = `${sender?.tab?.id ?? sender?.url ?? "unknown"}:${sender?.frameId ?? 0}:${sessionId}`;
+    const requestedElo = Number(request.elo);
+    const normalizedElo = Number.isFinite(requestedElo)
+      ? Math.max(400, Math.min(3000, Math.round(requestedElo)))
+      : 2000;
+    const requestedStyle = typeof request.style === "string" ? request.style : "tal";
+    const normalizedStyle = Object.hasOwn(GM_STYLES, requestedStyle) ? requestedStyle : "balanced";
+    if (request.meta) setBoundedCacheEntry(latestAnalysisMetaByClient, analysisContextKey, request.meta, 32);
+    experienceReady
+      .then(() => analyzeAdaptiveMaster(
+        request.fen,
+        normalizedElo,
+        normalizedStyle,
+        request.pass || "fast",
+        request.lastEnemyMove || null,
+        Boolean(request.bulletTurbo),
+        request.calcAverage !== false,
+        request.calcWorst !== false,
+        request.myColor || "w",
+        request.mySeconds ?? 999,
+        request.enemySeconds ?? 999,
+        request.trapRadarEnabled !== false,
+        Array.isArray(request.recentPositions) ? request.recentPositions : [],
+        request.lastOurMove || null,
+        analysisContextKey,
+        Array.isArray(request.uciHistory) ? request.uciHistory : [],
+        Boolean(request.historyTrusted),
+        request.meta || null
+      ))
+      .then((res) => sendResponse({ ...res, meta: request.meta || null, status: res?.best ? "ok" : "terminal" }))
+      .catch((err) => sendResponse({ error: err.message, meta: request.meta || null, status: "error" }));
     return true;
   }
 
   if (request.type === "GET_BOARD_HEATMAP") {
     try {
+      if (!validateEngineFen(request.fen)) throw new Error("Invalid heatmap FEN");
       const { board } = parseFEN(request.fen);
       const myColor = request.myColor || "w";
       const heatmap = computeBoardControlHeatmap(board, myColor);
@@ -130,8 +701,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
+  if (request.type === "BUILD_PONDER_POSITION") {
+    try {
+      if (!validateEngineFen(request.fen)) throw new Error("Invalid ponder FEN");
+      const parsed = parseFEN(request.fen);
+      const requestedUci = String(request.enemyMoveUci || "");
+      if (!ENGINE_UCI_MOVE.test(requestedUci)) throw new Error("Invalid ponder move");
+      const legalMoves = generateLegalMoves(parsed.board, parsed.turn, parsed.castling, parsed.epSquare);
+      const move = legalMoves.find(candidate =>
+        `${FILES[candidate.fromC]}${8 - candidate.fromR}${FILES[candidate.toC]}${8 - candidate.toR}${candidate.promo || ""}` === requestedUci
+      );
+      if (!move) throw new Error("Predicted move is not legal");
+      const nextBoard = makeMove(parsed.board, move);
+      const nextTurn = parsed.turn === "w" ? "b" : "w";
+      const nextCastling = updateCastlingAfterMove(parsed.castling, move);
+      const nextEp = getNextEpSquare(move) || "-";
+      const halfmove = move.piece === "p" || move.captured ? 0 : parsed.halfmoveClock + 1;
+      const fullmove = parsed.fullmoveNumber + (parsed.turn === "b" ? 1 : 0);
+      const history = Array.isArray(request.uciHistory) ? request.uciHistory.slice() : [];
+      history.push(requestedUci);
+      sendResponse({
+        ok: true,
+        fen: `${boardToFenPart(nextBoard)} ${nextTurn} ${nextCastling} ${nextEp} ${halfmove} ${fullmove}`,
+        uciHistory: history,
+        useStartposMoves: Boolean(request.historyTrusted),
+        sourcePositionId: request.positionId
+      });
+    } catch (error) {
+      sendResponse({ ok: false, error: String(error?.message || error) });
+    }
+    return false;
+  }
+
   if (request.type === "GET_INSTANT_PREMOVE") {
     try {
+      if (!validateEngineFen(request.fen)) throw new Error("Invalid premove FEN");
       const { board, castling, epSquare, pieceCount } = parseFEN(request.fen);
       const myColor = request.myColor || "w";
       const enemyColor = myColor === "w" ? "b" : "w";
@@ -143,7 +747,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         epSquare,
         request.lastOurMove || null,
         request.style || "tal",
-        Array.isArray(request.recentPositions) ? request.recentPositions : []
+        Array.isArray(request.recentPositions) ? request.recentPositions : [],
+        request.predictedEnemyMove?.uci || null,
+        Number(request.predictionConfidence) || 0
       );
       const staticMyEval = evaluateBoard(board, myColor, request.style || "tal");
       const wdl = computeWinDrawLossChances(staticMyEval, false, false);
@@ -169,86 +775,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
-  if (request.type === "RECORD_GAME_RESULT") {
-    const { history, result } = request;
-    if (Array.isArray(history) && history.length > 0) {
-      totalLearnedGames++;
-      const startIdx = Math.max(0, history.length - 10);
-      for (let idx = startIdx; idx < history.length; idx++) {
-        const item = history[idx];
-        if (!item.fenKey || !item.uci) continue;
-        if (!experienceDB[item.fenKey]) experienceDB[item.fenKey] = {};
-        if (!experienceDB[item.fenKey][item.uci]) {
-          experienceDB[item.fenKey][item.uci] = { bonus: 0, games: 0 };
-        }
-        const entry = experienceDB[item.fenKey][item.uci];
-        entry.games++;
-
-        if (result === "win") {
-          entry.bonus = Math.min(65, entry.bonus + 15);
-        } else if (result === "loss") {
-          entry.bonus = idx >= history.length - 4
-            ? Math.max(-160, entry.bonus - 55)
-            : Math.max(-60, entry.bonus - 15);
-        }
-      }
-      saveExperienceDB();
-    }
-    sendResponse({
-      ok: true,
-      totalLearnedGames,
-      positionsCount: Object.keys(experienceDB).length
-    });
-    return false;
-  }
-
-  if (request.type === "TRAIN_MOVE_MANUAL") {
-    const { fenKey, uci, delta } = request;
-    if (fenKey && uci) {
-      if (!experienceDB[fenKey]) experienceDB[fenKey] = {};
-      if (!experienceDB[fenKey][uci]) experienceDB[fenKey][uci] = { bonus: 0, games: 0 };
-      experienceDB[fenKey][uci].bonus = Math.max(-250, Math.min(180, experienceDB[fenKey][uci].bonus + delta));
-      experienceDB[fenKey][uci].games++;
-      saveExperienceDB();
-    }
-    sendResponse({
-      ok: true,
-      positionsCount: Object.keys(experienceDB).length
-    });
-    return false;
-  }
-
-  if (request.type === "GET_MEMORY_STATS") {
-    sendResponse({
-      totalLearnedGames,
-      positionsCount: Object.keys(experienceDB).length,
-      experienceDB
-    });
-    return false;
-  }
-
-  if (request.type === "IMPORT_MEMORY") {
-    if (request.data && typeof request.data === "object") {
-      experienceDB = { ...experienceDB, ...request.data };
-      saveExperienceDB();
-    }
-    sendResponse({
-      ok: true,
-      positionsCount: Object.keys(experienceDB).length
-    });
-    return false;
-  }
-
-  if (request.type === "CLEAR_MEMORY") {
-    experienceDB = {};
-    totalLearnedGames = 0;
-    transpositionTable.clear();
-    cloudCache.clear();
-    syzygyCache.clear();
-    saveExperienceDB();
-    sendResponse({ ok: true });
-    return false;
-  }
 });
 
 const PIECE_VALUES = { p: 100, n: 320, b: 335, r: 500, q: 920, k: 20000 };
@@ -268,8 +794,7 @@ const GM_STYLES = {
   balanced:  { tropism: 1.60, safety: 2.35, space: 1.50, bishopBonus: 26, sacrificeBoost: 45, squeeze: 1.30, checkBonus: 15, structure: 1.60, trapAffinity: 1.00 }
 };
 
-let cloudOutOfBookStreak = 0;
-let lastCloudPieceCount = 32;
+let cloudRetryAfter = 0;
 let lastServerSourceTag = "LOCAL CORE";
 let lastServerPingMs = 12;
 
@@ -291,32 +816,51 @@ function computeWinDrawLossChances(scoreCpForUs, isOurMate = false, isEnemyMate 
   return { myWin, draw: drawProb, enemyWin };
 }
 
-async function fetchLichessCloud3000(fen, pieceCount) {
-  if (pieceCount >= 30 && lastCloudPieceCount < 28) {
-    cloudOutOfBookStreak = 0;
-  }
-  lastCloudPieceCount = pieceCount;
+function setBoundedCacheEntry(cache, key, value, maxEntries) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
+}
 
+function rememberNegativeCache(cache, key, ttlMs) {
+  setBoundedCacheEntry(cache, key, Date.now() + ttlMs, NEGATIVE_CACHE_MAX_ENTRIES);
+}
+
+function hasFreshNegativeCache(cache, key) {
+  const expiresAt = cache.get(key);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    cache.delete(key);
+    return false;
+  }
+  return true;
+}
+
+async function fetchLichessCloud3000(fen, pieceCount) {
   if (pieceCount < 18) return null;
   if (cloudCache.has(fen)) {
     const cached = cloudCache.get(fen);
-    if (cached) lastServerSourceTag = "CLOUD CACHE (0ms)";
-    return cached;
+    const isExplorer = cached?.[0]?.source === "explorer";
+    const isFreshExplorer = isExplorer && Date.now() - Number(cached[0].cachedAt || 0) < 30000;
+    if (!isExplorer || isFreshExplorer) {
+      if (cached) lastServerSourceTag = isExplorer ? "EXPLORER CACHE (0ms)" : "CLOUD CACHE (0ms)";
+      return cached;
+    }
+    cloudCache.delete(fen);
   }
+  if (hasFreshNegativeCache(cloudNegativeCache, fen)) return null;
 
-  if (cloudOutOfBookStreak < 2) {
+  if (Date.now() >= cloudRetryAfter) {
     const t0 = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 220);
+    const timer = setTimeout(() => controller.abort(), 650);
     try {
       const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=3`;
       const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
 
       if (res.ok) {
         lastServerPingMs = Date.now() - t0;
         lastServerSourceTag = `CLOUD 3000 (200 OK • ${lastServerPingMs}мс)`;
-        cloudOutOfBookStreak = 0;
         const data = await res.json();
         if (data && Array.isArray(data.pvs) && data.pvs.length > 0) {
           const parsed = data.pvs.map((pv) => {
@@ -328,29 +872,33 @@ async function fetchLichessCloud3000(fen, pieceCount) {
               to: firstUci.slice(2, 4),
               promo: firstUci.length > 4 ? firstUci[4].toLowerCase() : null,
               cp: pv.cp !== undefined ? pv.cp : (pv.mate ? pv.mate * 3000 : 0),
+              source: "cloud",
+              depth: Number(data.depth) || 0,
+              cachedAt: Date.now(),
               pvChain: moves.slice(0, 4).map(u => `${u.slice(0, 2)}→${u.slice(2, 4)}`).join(" ➔ ")
             };
           });
-          if (cloudCache.size > 2000) cloudCache.clear();
-          cloudCache.set(fen, parsed);
+          cloudNegativeCache.delete(fen);
+          setBoundedCacheEntry(cloudCache, fen, parsed, REMOTE_CACHE_MAX_ENTRIES);
           return parsed;
         }
-      } else if (res.status === 404) {
-        cloudOutOfBookStreak++;
+      } else if (res.status === 429 || res.status >= 500) {
+        const retrySeconds = Number(res.headers.get("retry-after")) || 30;
+        cloudRetryAfter = Date.now() + Math.min(120, retrySeconds) * 1000;
       }
     } catch (e) {
+    } finally {
       clearTimeout(timer);
     }
   }
 
-  if (pieceCount >= 22 && cloudOutOfBookStreak <= 4) {
+  if (pieceCount >= 22) {
     const t0 = Date.now();
     const expController = new AbortController();
-    const expTimer = setTimeout(() => expController.abort(), 240);
+    const expTimer = setTimeout(() => expController.abort(), 650);
     try {
-      const expUrl = `https://explorer.lichess.ovh/lichess?variant=standard&speeds=blitz,rapid,classical&ratings=2200,2500&topGames=0&recentGames=0&moves=4&fen=${encodeURIComponent(fen)}`;
+      const expUrl = `https://explorer.lichess.ovh/masters?topGames=0&moves=6&fen=${encodeURIComponent(fen)}`;
       const expRes = await fetch(expUrl, { signal: expController.signal });
-      clearTimeout(expTimer);
 
       if (expRes.ok) {
         lastServerPingMs = Date.now() - t0;
@@ -374,21 +922,25 @@ async function fetchLichessCloud3000(fen, pieceCount) {
                 to: uci.slice(2, 4),
                 promo: uci.length > 4 ? uci[4].toLowerCase() : null,
                 cp: estimatedCp,
+                source: "explorer",
+                depth: 0,
+                cachedAt: Date.now(),
                 pvChain: `${uci.slice(0, 2)}→${uci.slice(2, 4)} (${mv.san || "База Мастеров"} • ${total} парт.)`
               };
             });
-            cloudCache.set(fen, parsedExplorer);
+            cloudNegativeCache.delete(fen);
+            setBoundedCacheEntry(cloudCache, fen, parsedExplorer, REMOTE_CACHE_MAX_ENTRIES);
             return parsedExplorer;
           }
         }
-        cloudOutOfBookStreak++;
       }
     } catch (e) {
+    } finally {
       clearTimeout(expTimer);
     }
   }
 
-  cloudCache.set(fen, null);
+  rememberNegativeCache(cloudNegativeCache, fen, 15000);
   return null;
 }
 
@@ -399,16 +951,16 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
     if (cached) lastServerSourceTag = "SYZYGY CACHE (0ms)";
     return cached;
   }
+  if (hasFreshNegativeCache(syzygyNegativeCache, fen)) return null;
 
   const t0 = Date.now();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 280);
+  const timer = setTimeout(() => controller.abort(), 650);
   try {
     const url = `https://tablebase.lichess.ovh/standard?fen=${encodeURIComponent(fen)}`;
     const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
     if (!res.ok) {
-      syzygyCache.set(fen, null);
+      rememberNegativeCache(syzygyNegativeCache, fen, res.status === 429 || res.status >= 500 ? 15000 : 60000);
       return null;
     }
     lastServerPingMs = Date.now() - t0;
@@ -468,13 +1020,15 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
         rootDtm: data.dtm,
         moves: parsedMoves
       };
-      if (syzygyCache.size > 2000) syzygyCache.clear();
-      syzygyCache.set(fen, resultObj);
+      syzygyNegativeCache.delete(fen);
+      setBoundedCacheEntry(syzygyCache, fen, resultObj, REMOTE_CACHE_MAX_ENTRIES);
       return resultObj;
     }
   } catch (e) {
+  } finally {
     clearTimeout(timer);
   }
+  rememberNegativeCache(syzygyNegativeCache, fen, 30000);
   return null;
 }
 
@@ -609,6 +1163,10 @@ function parseFEN(fen) {
   const turn = parts[1] || "w";
   const castling = parts[2] || "-";
   const epSquare = (parts[3] && parts[3] !== "-") ? parts[3] : null;
+  const parsedHalfmove = Number(parts[4]);
+  const parsedFullmove = Number(parts[5]);
+  const halfmoveClock = Number.isSafeInteger(parsedHalfmove) && parsedHalfmove >= 0 ? parsedHalfmove : 0;
+  const fullmoveNumber = Number.isSafeInteger(parsedFullmove) && parsedFullmove >= 1 ? parsedFullmove : 1;
 
   const board = [];
   let pieceCount = 0;
@@ -629,8 +1187,10 @@ function parseFEN(fen) {
     turn,
     castling,
     epSquare,
+    halfmoveClock,
+    fullmoveNumber,
     pieceCount,
-    boardKey: `${parts[0]} ${turn}`
+    boardKey: `${parts[0]} ${turn} ${castling} ${epSquare || "-"}`
   };
 }
 
@@ -657,8 +1217,8 @@ function boardToFenPart(board) {
   return rows.join("/");
 }
 
-function boardToHash(board, turn, castling = "-", epSquare = null) {
-  let s = `${turn}_${castling}_${epSquare || "-"}_`;
+function boardToHash(board, turn, castling = "-", epSquare = null, halfmoveClock = 0) {
+  let s = `${turn}_${castling}_${epSquare || "-"}_${Math.max(0, Math.min(100, Number(halfmoveClock) || 0))}_`;
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
       s += board[r][c] || ".";
@@ -763,7 +1323,7 @@ function getAttackersOfSquare(board, r, c, byColor) {
       if (p) {
         if (p === B) attackers.push(335);
         else if (p === Q) attackers.push(920);
-        else break;
+        break;
       }
       nr += diagDirs[i][0];
       nc += diagDirs[i][1];
@@ -778,7 +1338,7 @@ function getAttackersOfSquare(board, r, c, byColor) {
       if (p) {
         if (p === R) attackers.push(500);
         else if (p === Q) attackers.push(920);
-        else break;
+        break;
       }
       nr += orthoDirs[i][0];
       nc += orthoDirs[i][1];
@@ -795,12 +1355,13 @@ function getAttackersOfSquare(board, r, c, byColor) {
   return attackers;
 }
 
-function computeBoardControlHeatmap(board, myColor = "w") {
+function computeBoardControlHeatmap(board, myColor = "w", budget = null) {
   const enemyColor = myColor === "w" ? "b" : "w";
   const myKing = findKing(board, myColor);
   const cells = [];
 
   for (let r = 0; r < 8; r++) {
+    checkSearchBudget(budget);
     for (let c = 0; c < 8; c++) {
       const myAtt = getAttackersOfSquare(board, r, c, myColor);
       const enAtt = getAttackersOfSquare(board, r, c, enemyColor);
@@ -1180,24 +1741,22 @@ function generateMoves(board, turn, castling = "KQkq", epSquare = null) {
         if (isColor(target, turn)) return false;
 
         if (type === "p" && (tr === 0 || tr === 7)) {
-          moves.push({
-            fromR: r, fromC: c, toR: tr, toC: tc,
-            piece: type,
-            captured: target ? target.toLowerCase() : null,
-            promo: "q"
-          });
-          moves.push({
-            fromR: r, fromC: c, toR: tr, toC: tc,
-            piece: type,
-            captured: target ? target.toLowerCase() : null,
-            promo: "n"
-          });
+          for (const promo of ["q", "r", "b", "n"]) {
+            moves.push({
+              fromR: r, fromC: c, toR: tr, toC: tc,
+              piece: type,
+              color: turn,
+              captured: target ? target.toLowerCase() : null,
+              promo
+            });
+          }
           return !target;
         }
 
         moves.push({
           fromR: r, fromC: c, toR: tr, toC: tc,
           piece: type,
+          color: turn,
           captured: extra.isEnPassant ? "p" : (target ? target.toLowerCase() : null),
           isEnPassant: Boolean(extra.isEnPassant),
           promo: null
@@ -1208,6 +1767,8 @@ function generateMoves(board, turn, castling = "KQkq", epSquare = null) {
       if (type === "p") {
         const dir = turn === "w" ? -1 : 1;
         const startRow = turn === "w" ? 6 : 1;
+        const epCaptureRow = turn === "w" ? 3 : 4;
+        const enemyPawn = turn === "w" ? "p" : "P";
         if (r + dir >= 0 && r + dir <= 7 && !board[r + dir][c]) {
           push(r + dir, c);
           if (r === startRow && !board[r + dir * 2][c]) push(r + dir * 2, c);
@@ -1217,7 +1778,13 @@ function generateMoves(board, turn, castling = "KQkq", epSquare = null) {
           if (nr >= 0 && nr <= 7 && nc >= 0 && nc <= 7) {
             if (isColor(board[nr][nc], enemy)) {
               push(nr, nc);
-            } else if (nr === epR && nc === epC && !board[nr][nc]) {
+            } else if (
+              r === epCaptureRow &&
+              nr === epR &&
+              nc === epC &&
+              !board[nr][nc] &&
+              board[r][nc] === enemyPawn
+            ) {
               push(nr, nc, { isEnPassant: true });
             }
           }
@@ -1274,7 +1841,7 @@ function makeMove(board, m) {
   const isWhite = p === p.toUpperCase();
 
   if (m.piece === "p" && (m.toR === 0 || m.toR === 7)) {
-    const promoChar = m.promo === "n" ? "n" : "q";
+    const promoChar = ["q", "r", "b", "n"].includes(m.promo) ? m.promo : "q";
     p = isWhite ? promoChar.toUpperCase() : promoChar;
   }
 
@@ -1296,7 +1863,8 @@ function updateCastlingAfterMove(castling, m) {
   if (!castling || castling === "-") return "-";
   let res = castling;
   if (m.piece === "k") {
-    res = m.fromR === 7 ? res.replace("K", "").replace("Q", "") : res.replace("k", "").replace("q", "");
+    const color = m.color || (m.fromR >= 4 ? "w" : "b");
+    res = color === "w" ? res.replace("K", "").replace("Q", "") : res.replace("k", "").replace("q", "");
   }
   if (m.fromR === 7 && m.fromC === 0) res = res.replace("Q", "");
   if (m.fromR === 7 && m.fromC === 7) res = res.replace("K", "");
@@ -1321,9 +1889,13 @@ function moveKeyShort(m) {
   return `${m.fromR}${m.fromC}${m.toR}${m.toC}${m.promo || ""}`;
 }
 
-function generateLegalMoves(board, turn, castling = "KQkq", epSquare = null, ttMoveKey = null, ply = 0) {
+function generateLegalMoves(board, turn, castling = "KQkq", epSquare = null, ttMoveKey = null, ply = 0, budget = null) {
+  checkSearchBudget(budget);
   const legal = generateMoves(board, turn, castling, epSquare).filter(
-    m => !isKingInCheck(makeMove(board, m), turn)
+    m => {
+      checkSearchBudget(budget);
+      return !isKingInCheck(makeMove(board, m), turn);
+    }
   );
   const killers = killerMoves[Math.min(15, ply)] || [null, null];
 
@@ -1353,14 +1925,25 @@ function moveToText(m) {
   return `${FILES[m.fromC]}${8 - m.fromR}→${FILES[m.toC]}${8 - m.toR}${pr}`;
 }
 
-function quiescence(board, turn, alpha, beta, style, qd = 0, maxQd = 4, ply = 0) {
+function quiescence(board, turn, alpha, beta, style, castling = "-", epSquare = null, qd = 0, maxQd = 4, ply = 0, halfmoveClock = 0, budget = null) {
+  checkSearchBudget(budget);
   const inCheck = isKingInCheck(board, turn);
-  const allMoves = generateMoves(board, turn, "-", null);
+  const allMoves = generateMoves(board, turn, castling, epSquare);
+
+  if (halfmoveClock >= 100) {
+    const hasLegalMove = allMoves.some(move => {
+      checkSearchBudget(budget);
+      return !isKingInCheck(makeMove(board, move), turn);
+    });
+    if (!hasLegalMove) return inCheck ? -20000 + ply * 20 : 0;
+    return 0;
+  }
 
   let bestScore = -30000;
   if (!inCheck) {
     let hasAnyLegal = false;
     for (let i = 0; i < allMoves.length; i++) {
+      checkSearchBudget(budget);
       if (!isKingInCheck(makeMove(board, allMoves[i]), turn)) {
         hasAnyLegal = true;
         break;
@@ -1390,6 +1973,7 @@ function quiescence(board, turn, alpha, beta, style, qd = 0, maxQd = 4, ply = 0)
 
   let legalFound = 0;
   for (const m of candidates) {
+    checkSearchBudget(budget);
     const nextB = makeMove(board, m);
     if (isKingInCheck(nextB, turn)) continue;
     legalFound++;
@@ -1399,7 +1983,10 @@ function quiescence(board, turn, alpha, beta, style, qd = 0, maxQd = 4, ply = 0)
       if (seeScore < -80 && !isKingInCheck(nextB, enemy)) continue;
     }
 
-    const s = -quiescence(nextB, enemy, -beta, -alpha, style, qd + 1, maxQd, ply + 1);
+    const nextCastling = updateCastlingAfterMove(castling, m);
+    const nextEp = getNextEpSquare(m);
+    const nextHalfmoveClock = m.piece === "p" || m.captured ? 0 : halfmoveClock + 1;
+    const s = -quiescence(nextB, enemy, -beta, -alpha, style, nextCastling, nextEp, qd + 1, maxQd, ply + 1, nextHalfmoveClock, budget);
     if (s > bestScore) bestScore = s;
     if (s >= beta) return s;
     if (s > alpha) alpha = s;
@@ -1422,14 +2009,17 @@ function searchPV(
   epSquare = null,
   extUsed = 0,
   dangerMode = false,
-  ply = 0
+  ply = 0,
+  halfmoveClock = 0,
+  budget = null
 ) {
+  checkSearchBudget(budget);
   if (depth <= 0) {
-    return { score: quiescence(board, turn, alpha, beta, style, 0, dangerMode ? 5 : 4, ply), pv: [] };
+    return { score: quiescence(board, turn, alpha, beta, style, castling, epSquare, 0, dangerMode ? 5 : 4, ply, halfmoveClock, budget), pv: [] };
   }
 
-  const baseHash = boardToHash(board, turn, castling, epSquare);
-  const ttKey = `${baseHash}_${style}`;
+  const baseHash = boardToHash(board, turn, castling, epSquare, halfmoveClock);
+  const ttKey = `${baseHash}_${style}_${dangerMode ? 1 : 0}_${extUsed}`;
   const cached = transpositionTable.get(ttKey);
   if (cached && cached.depth >= depth && Math.abs(cached.res.score) < 18000) {
     if (cached.flag === "EXACT") return cached.res;
@@ -1439,11 +2029,12 @@ function searchPV(
 
   const ttMoveKey = cached?.bestKey || null;
 
-  const legal = generateLegalMoves(board, turn, castling, epSquare, ttMoveKey, ply);
+  const legal = generateLegalMoves(board, turn, castling, epSquare, ttMoveKey, ply, budget);
   if (legal.length === 0) {
     const mateScore = isKingInCheck(board, turn) ? -20000 + ply * 20 : 0;
     return { score: mateScore, pv: [] };
   }
+  if (halfmoveClock >= 100) return { score: 0, pv: [] };
 
   const enemy = turn === "w" ? "b" : "w";
   let bestScore = -Infinity;
@@ -1452,10 +2043,12 @@ function searchPV(
   const origAlpha = alpha;
 
   for (let i = 0; i < legal.length; i++) {
+    checkSearchBudget(budget);
     const m = legal[i];
     const nextB = makeMove(board, m);
     const nextCastling = updateCastlingAfterMove(castling, m);
     const nextEp = getNextEpSquare(m);
+    const nextHalfmoveClock = m.piece === "p" || m.captured ? 0 : halfmoveClock + 1;
     const givesChk = extUsed < 2 && isKingInCheck(nextB, enemy);
 
     let nextDepth = givesChk ? depth : depth - 1;
@@ -1474,7 +2067,9 @@ function searchPV(
       nextEp,
       givesChk ? extUsed + 1 : extUsed,
       dangerMode,
-      ply + 1
+      ply + 1,
+      nextHalfmoveClock,
+      budget
     );
     let score = -child.score;
 
@@ -1490,7 +2085,9 @@ function searchPV(
         nextEp,
         extUsed,
         dangerMode,
-        ply + 1
+        ply + 1,
+        nextHalfmoveClock,
+        budget
       );
       score = -child.score;
     }
@@ -1514,48 +2111,56 @@ function searchPV(
   }
 
   const res = { score: bestScore, pv: bestPV };
+  checkSearchBudget(budget);
   const flag = bestScore <= origAlpha ? "UPPER" : (bestScore >= beta ? "LOWER" : "EXACT");
-  if (transpositionTable.size > 160000) transpositionTable.clear();
+  const tableLimit = globalThis.__CC_ENGINE_RUNTIME__ || globalThis.__CC_DEVICE_PROFILE__?.recommendation ? 12000 : TT_MAX_ENTRIES;
+  if (transpositionTable.size >= tableLimit) transpositionTable.clear();
   if (!cached || depth >= cached.depth) {
     transpositionTable.set(ttKey, { depth, flag, res, bestKey });
   }
   return res;
 }
 
-function allowsEnemyMateInOne(boardAfterOurMove, ourColor, enemyColor, castling, epSquare) {
-  const enemyReplies = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare);
+function allowsEnemyMateInOne(boardAfterOurMove, ourColor, enemyColor, castling, epSquare, budget = null) {
+  checkSearchBudget(budget);
+  const enemyReplies = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare, null, 0, budget);
   for (const em of enemyReplies) {
+    checkSearchBudget(budget);
     const afterEnemy = makeMove(boardAfterOurMove, em);
     if (isKingInCheck(afterEnemy, ourColor)) {
       const nextCast = updateCastlingAfterMove(castling, em);
       const nextEp = getNextEpSquare(em);
-      const ourEscapes = generateLegalMoves(afterEnemy, ourColor, nextCast, nextEp);
+      const ourEscapes = generateLegalMoves(afterEnemy, ourColor, nextCast, nextEp, null, 0, budget);
       if (ourEscapes.length === 0) return true;
     }
   }
   return false;
 }
 
-function deliversForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, castling, epSquare) {
-  const enemyReplies = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare);
+function deliversForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, castling, epSquare, budget = null) {
+  checkSearchBudget(budget);
+  const enemyReplies = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare, null, 0, budget);
   if (enemyReplies.length === 0 || enemyReplies.length > 10) return false;
 
   for (const er of enemyReplies) {
+    checkSearchBudget(budget);
     const afterEnemy = makeMove(boardAfterOurMove, er);
     const nextCast = updateCastlingAfterMove(castling, er);
     const nextEp = getNextEpSquare(er);
-    if (!allowsEnemyMateInOne(afterEnemy, enemyColor, ourColor, nextCast, nextEp)) {
+    if (!allowsEnemyMateInOne(afterEnemy, enemyColor, ourColor, nextCast, nextEp, budget)) {
       return false;
     }
   }
   return true;
 }
 
-function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, castling, epSquare) {
-  const enemyMoves = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare);
+function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, castling, epSquare, budget = null) {
+  checkSearchBudget(budget);
+  const enemyMoves = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare, null, 0, budget);
   const ourKing = findKing(boardAfterOurMove, ourColor);
 
   for (const em of enemyMoves) {
+    checkSearchBudget(budget);
     const afterEnemy = makeMove(boardAfterOurMove, em);
     const givesChk = isKingInCheck(afterEnemy, ourColor);
     const nearOurKing = Math.abs(em.toR - ourKing.r) <= 2 && Math.abs(em.toC - ourKing.c) <= 2;
@@ -1569,7 +2174,7 @@ function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, cas
 
     const nextCast = updateCastlingAfterMove(castling, em);
     const nextEp = getNextEpSquare(em);
-    const ourDefenses = generateLegalMoves(afterEnemy, ourColor, nextCast, nextEp);
+    const ourDefenses = generateLegalMoves(afterEnemy, ourColor, nextCast, nextEp, null, 0, budget);
 
     if (ourDefenses.length === 0) {
       if (givesChk) return true;
@@ -1579,10 +2184,11 @@ function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, cas
     if (ourDefenses.length <= 9) {
       let allResponsesGetMated = true;
       for (const def of ourDefenses) {
+        checkSearchBudget(budget);
         const afterDef = makeMove(afterEnemy, def);
         const defCast = updateCastlingAfterMove(nextCast, def);
         const defEp = getNextEpSquare(def);
-        if (!allowsEnemyMateInOne(afterDef, ourColor, enemyColor, defCast, defEp)) {
+        if (!allowsEnemyMateInOne(afterDef, ourColor, enemyColor, defCast, defEp, budget)) {
           allResponsesGetMated = false;
           break;
         }
@@ -1593,14 +2199,14 @@ function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, cas
   return false;
 }
 
-function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threatBefore) {
+function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threatBefore, castling = "-", epSquare = null, budget = null) {
   if (inCheckBefore) return { isDanger: true, reason: "ШАХ НАШЕМУ КОРОЛЮ" };
 
-  if (allowsEnemyMateInOne(board, ourColor, enemyColor, "-", null)) {
+  if (allowsEnemyMateInOne(board, ourColor, enemyColor, castling, epSquare, budget)) {
     return { isDanger: true, reason: "ПРЯМАЯ УГРОЗА МАТА В 1 ХОД ОТ СОПЕРНИКА" };
   }
 
-  if (allowsEnemyForcedMateInTwo(board, ourColor, enemyColor, "-", null)) {
+  if (allowsEnemyForcedMateInTwo(board, ourColor, enemyColor, castling, epSquare, budget)) {
     return { isDanger: true, reason: "УГРОЗА ФОРСИРОВАННОГО МАТА В 2 ХОДА" };
   }
 
@@ -1627,11 +2233,12 @@ function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threa
   return { isDanger: false, reason: "" };
 }
 
-function getHangingDetails(board, ourSide) {
+function getHangingDetails(board, ourSide, budget = null) {
   let worstLoss = 0;
   let hangingSquare = null;
 
   for (let r = 0; r < 8; r++) {
+    checkSearchBudget(budget);
     for (let c = 0; c < 8; c++) {
       const p = board[r][c];
       if (!isColor(p, ourSide)) continue;
@@ -1708,8 +2315,9 @@ function detectPinMotif(boardAfter, movedR, movedC, ourSide) {
   return false;
 }
 
-function computeTrapMetrics(boardAfterOurMove, ourMove, ourColor, enemyColor, castling, epSquare, style = "tal") {
-  const enemyReplies = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare);
+function computeTrapMetrics(boardAfterOurMove, ourMove, ourColor, enemyColor, castling, epSquare, style = "tal", budget = null) {
+  checkSearchBudget(budget);
+  const enemyReplies = generateLegalMoves(boardAfterOurMove, enemyColor, castling, epSquare, null, 0, budget);
   const totalReplies = enemyReplies.length;
   if (totalReplies < 5) {
     return { isTrap: false, trapChance: 0, badReplies: 0, totalReplies, complexityBranches: totalReplies };
@@ -1722,11 +2330,12 @@ function computeTrapMetrics(boardAfterOurMove, ourMove, ourColor, enemyColor, ca
   let greedyBaitCapturesMove = false;
 
   for (const er of enemyReplies) {
+    checkSearchBudget(budget);
     const afterEnemy = makeMove(boardAfterOurMove, er);
     const nextCast = updateCastlingAfterMove(castling, er);
     const nextEp = getNextEpSquare(er);
 
-    const getsMatedInOne = allowsEnemyMateInOne(afterEnemy, enemyColor, ourColor, nextCast, nextEp);
+    const getsMatedInOne = allowsEnemyMateInOne(afterEnemy, enemyColor, ourColor, nextCast, nextEp, budget);
     if (getsMatedInOne) {
       losingReplies++;
       matePunishments++;
@@ -1734,7 +2343,7 @@ function computeTrapMetrics(boardAfterOurMove, ourMove, ourColor, enemyColor, ca
       continue;
     }
 
-    const { worstLoss: enemyHanging } = getHangingDetails(afterEnemy, enemyColor);
+    const { worstLoss: enemyHanging } = getHangingDetails(afterEnemy, enemyColor, budget);
     const enemySee = seeExchangeScore(afterEnemy, er.toR, er.toC, er.piece, er.captured, enemyColor);
     const staticOurScore = -evaluateBoard(afterEnemy, enemyColor, style);
 
@@ -1831,43 +2440,70 @@ function computeSmartNextPremove(
   epSquare,
   lastOurMove,
   style = "tal",
-  recentPositions = []
+  recentPositions = [],
+  clientPredictedEnemyUci = null,
+  clientPredictionConfidence = 0,
+  budget = createSearchBudget(40, 2000)
 ) {
-  const enemyMoves = generateLegalMoves(boardOnEnemyTurn, enemyColor, castling, epSquare);
+  checkSearchBudget(budget);
+  const enemyMoves = generateLegalMoves(boardOnEnemyTurn, enemyColor, castling, epSquare, null, 0, budget);
   if (enemyMoves.length === 0) return null;
 
-  const recentSet = new Set(recentPositions);
+  const recentSet = new Set(recentPositions.slice(-256));
+  const wasBoardSeenRecently = (boardPart) => recentSet.has(boardPart) || [...recentSet].some(key => key.startsWith(`${boardPart} `));
 
   const enemyScored = enemyMoves.map((em) => {
+    checkSearchBudget(budget);
     const nb = makeMove(boardOnEnemyTurn, em);
+    const nextCast = updateCastlingAfterMove(castling, em);
+    const nextEp = getNextEpSquare(em);
     const seeScore = seeExchangeScore(nb, em.toR, em.toC, em.piece, em.captured, enemyColor);
-    const { worstLoss: enemyHangingLoss } = getHangingDetails(nb, enemyColor);
-    const { worstLoss: ourHangingAfterEnemy } = getHangingDetails(nb, myColor);
+    const { worstLoss: enemyHangingLoss } = getHangingDetails(nb, enemyColor, budget);
+    const { worstLoss: ourHangingAfterEnemy } = getHangingDetails(nb, myColor, budget);
 
     const givesCheck = isKingInCheck(nb, myColor);
-    const isEnemyMateInOne = givesCheck && generateLegalMoves(nb, myColor, "-", null).length === 0;
+    const isEnemyMateInOne = givesCheck && generateLegalMoves(nb, myColor, nextCast, nextEp, null, 0, budget).length === 0;
     if (isEnemyMateInOne) {
-      return { em, nb, seeScore: 9999, ourHangingAfterEnemy: 9999, score: 50000 };
+      return { em, nb, nextCast, nextEp, seeScore: 9999, ourHangingAfterEnemy: 9999, score: 50000 };
     }
 
     const blunderPenalty = seeScore < -50 ? seeScore * 3.2 : seeScore * 1.1;
     const hangingPenalty = enemyHangingLoss > 80 ? -enemyHangingLoss * 1.4 : 0;
     const attackOurPieceBonus = ourHangingAfterEnemy >= 150 && seeScore >= -30 ? ourHangingAfterEnemy * 0.65 : 0;
     const safeCheckBonus = (givesCheck && seeScore >= 0) ? 45 : 0;
+    const enemyUci = `${FILES[em.fromC]}${8 - em.fromR}${FILES[em.toC]}${8 - em.toR}${em.promo || ""}`;
+    const clientPredictionBonus = clientPredictedEnemyUci === enemyUci
+      ? 70 + Math.min(150, Math.max(0, clientPredictionConfidence) * 1.5)
+      : 0;
 
-    const evalScore = evaluateBoard(nb, enemyColor, style) + blunderPenalty + hangingPenalty + attackOurPieceBonus + safeCheckBonus;
-    return { em, nb, seeScore, ourHangingAfterEnemy, score: evalScore };
+    const evalScore = evaluateBoard(nb, enemyColor, style) + blunderPenalty + hangingPenalty + attackOurPieceBonus + safeCheckBonus + clientPredictionBonus;
+    return { em, nb, nextCast, nextEp, seeScore, ourHangingAfterEnemy, score: evalScore };
   });
 
   enemyScored.sort((a, b) => b.score - a.score);
 
   const topScore = enemyScored[0].score;
-  const dangerousOrReasonableEnemyMoves = enemyScored.filter(
+  const reasonableEnemyMoves = enemyScored.filter(
     (item, idx) =>
       idx === 0 ||
       (item.seeScore >= -80 && (topScore - item.score) <= 220) ||
       (item.seeScore >= -30 && item.ourHangingAfterEnemy >= 200)
-  ).slice(0, 6);
+  ).slice(0, 10);
+
+  // A score gap is converted into a conservative probability instead of the old
+  // fixed 87/95% labels. This keeps quiet positions from looking "forced".
+  let likelihoodTotal = 0;
+  for (const item of reasonableEnemyMoves) {
+    checkSearchBudget(budget);
+    item.likelihood = Math.exp(Math.max(-7, Math.min(0, (item.score - topScore) / 105)));
+    likelihoodTotal += item.likelihood;
+  }
+  const topPredictionConfidence = enemyMoves.length === 1
+    ? 99
+    : Math.max(20, Math.min(97, Math.round((reasonableEnemyMoves[0].likelihood / Math.max(1, likelihoodTotal)) * 100)));
+
+  // Validate against enough likely continuations, but keep instant-premoves fast.
+  const dangerousOrReasonableEnemyMoves = reasonableEnemyMoves.slice(0, 6);
 
   const topEnemy = enemyScored[0];
   const secondEnemy = enemyScored[1] || null;
@@ -1876,38 +2512,37 @@ function computeSmartNextPremove(
   const enemyFrom = `${FILES[topEnemy.em.fromC]}${8 - topEnemy.em.fromR}`;
   const enemyTo = `${FILES[topEnemy.em.toC]}${8 - topEnemy.em.toR}`;
 
-  const nextCastling = updateCastlingAfterMove(castling, topEnemy.em);
-  const nextEp = getNextEpSquare(topEnemy.em);
-  const ourReplies = generateLegalMoves(topEnemy.nb, myColor, nextCastling, nextEp);
+  const ourReplies = generateLegalMoves(topEnemy.nb, myColor, topEnemy.nextCast, topEnemy.nextEp, null, 0, budget);
   if (ourReplies.length === 0) return null;
 
   const validPremoveReplies = ourReplies.filter(
-    (m) => isColor(boardOnEnemyTurn[m.fromR][m.fromC], myColor) && m.promo !== "n"
+    (m) => isColor(boardOnEnemyTurn[m.fromR][m.fromC], myColor) && (!m.promo || m.promo === "q")
   );
   if (validPremoveReplies.length === 0) return null;
 
-  const scoredReplies = validPremoveReplies.map((m) => {
-    const afterOur = makeMove(topEnemy.nb, m);
-    const afterOurCast = updateCastlingAfterMove(nextCastling, m);
+  const scoreReply = (branch, m) => {
+    checkSearchBudget(budget);
+    const afterOur = makeMove(branch.nb, m);
+    const afterOurCast = updateCastlingAfterMove(branch.nextCast, m);
     const afterOurEp = getNextEpSquare(m);
     const givesCheck = isKingInCheck(afterOur, enemyColor);
-    const enemyLegalAfterOur = generateLegalMoves(afterOur, enemyColor, afterOurCast, afterOurEp);
+    const enemyLegalAfterOur = generateLegalMoves(afterOur, enemyColor, afterOurCast, afterOurEp, null, 0, budget);
 
     const isMateIn1 = givesCheck && enemyLegalAfterOur.length === 0;
     const isStalemate = !givesCheck && enemyLegalAfterOur.length === 0;
     if (isStalemate) {
-      return { m, score: -50000, ourSee: -9999, worstLoss: 9999, gained: 0, isRealRecapture: false, isStalemate: true };
+      return { m, score: -50000, ourSee: -9999, worstLoss: 9999, gained: 0, isRealRecapture: false, isStalemate: true, safe: false };
     }
     if (isMateIn1) {
-      return { m, score: 100000, ourSee: 999, worstLoss: 0, gained: 999, isRealRecapture: false, isMateIn1: true };
+      return { m, score: 100000, ourSee: 999, worstLoss: 0, gained: 999, isRealRecapture: false, isMateIn1: true, safe: true };
     }
 
-    if (allowsEnemyMateInOne(afterOur, myColor, enemyColor, afterOurCast, afterOurEp)) {
-      return { m, score: -45000, ourSee: -9999, worstLoss: 9999, gained: 0, isRealRecapture: false };
+    if (allowsEnemyMateInOne(afterOur, myColor, enemyColor, afterOurCast, afterOurEp, budget)) {
+      return { m, score: -45000, ourSee: -9999, worstLoss: 9999, gained: 0, isRealRecapture: false, safe: false };
     }
 
     const ourSee = seeExchangeScore(afterOur, m.toR, m.toC, m.piece, m.captured, myColor);
-    const { worstLoss } = getHangingDetails(afterOur, myColor);
+    const { worstLoss } = getHangingDetails(afterOur, myColor, budget);
     const gained = m.captured ? (PIECE_VALUES[m.captured] || 100) : 0;
 
     const seePenalty = ourSee < -40 ? ourSee * 3.0 : ourSee;
@@ -1917,72 +2552,77 @@ function computeSmartNextPremove(
     const ourFromSq = `${FILES[m.fromC]}${8 - m.fromR}`;
     const ourToSq = `${FILES[m.toC]}${8 - m.toR}`;
     const isBackAndForth = lastOurMove && ourFromSq === lastOurMove.to && ourToSq === lastOurMove.from && !m.captured;
-    const repPen = (recentSet.has(boardPartAfter) ? -1800 : 0) + (isBackAndForth ? -600 : 0);
+    const repPen = (wasBoardSeenRecently(boardPartAfter) ? -1800 : 0) + (isBackAndForth ? -600 : 0);
 
     const isRealRecapture =
-      m.toR === topEnemy.em.toR &&
-      m.toC === topEnemy.em.toC &&
+      m.toR === branch.em.toR &&
+      m.toC === branch.em.toC &&
       m.captured &&
-      topEnemy.seeScore >= -50 &&
+      branch.seeScore >= -50 &&
       ourSee >= -20 &&
       worstLoss <= gained + 50;
 
     const recapBonus = isRealRecapture ? 120 : 0;
     const cutEnemyKingMobilityBonus = Math.max(0, (12 - enemyLegalAfterOur.length) * 14);
     const s = evaluateBoard(afterOur, myColor, style) + seePenalty + hangingPen + recapBonus + repPen + cutEnemyKingMobilityBonus;
-    return { m, score: s, ourSee, worstLoss, gained, isRealRecapture, isStalemate: false };
-  });
+    const safe = s >= -3000 && ourSee >= -60 && worstLoss <= gained + 80;
+    return { m, score: s, ourSee, worstLoss, gained, isRealRecapture, isStalemate: false, safe };
+  };
+
+  const scoredReplies = validPremoveReplies.map((m) => scoreReply(topEnemy, m));
 
   scoredReplies.sort((a, b) => b.score - a.score);
-  const bestReplyObj = scoredReplies[0];
-  if (
-    !bestReplyObj ||
-    bestReplyObj.isStalemate ||
-    bestReplyObj.score < -3000 ||
-    bestReplyObj.ourSee < -60 ||
-    bestReplyObj.worstLoss > bestReplyObj.gained + 80
-  ) {
-    return { canPremove: false };
+  const robustReplies = [];
+  for (const topReply of scoredReplies.filter(item => item.safe).slice(0, 8)) {
+    checkSearchBudget(budget);
+    const outcomes = [topReply];
+    let weightedScore = topReply.score * topEnemy.likelihood;
+    let branchWeight = topEnemy.likelihood;
+    let allBranchesSafe = true;
+
+    for (let i = 1; i < dangerousOrReasonableEnemyMoves.length; i++) {
+      checkSearchBudget(budget);
+      const branch = dangerousOrReasonableEnemyMoves[i];
+      const branchReplies = generateLegalMoves(branch.nb, myColor, branch.nextCast, branch.nextEp, null, 0, budget);
+      const matchingMove = branchReplies.find((m) =>
+        m.fromR === topReply.m.fromR && m.fromC === topReply.m.fromC &&
+        m.toR === topReply.m.toR && m.toC === topReply.m.toC &&
+        (m.promo || null) === (topReply.m.promo || null)
+      );
+      if (!matchingMove) {
+        allBranchesSafe = false;
+        break;
+      }
+      const outcome = scoreReply(branch, matchingMove);
+      outcomes.push(outcome);
+      if (!outcome.safe) {
+        allBranchesSafe = false;
+        break;
+      }
+      weightedScore += outcome.score * branch.likelihood;
+      branchWeight += branch.likelihood;
+    }
+
+    if (allBranchesSafe) {
+      const worstScore = Math.min(...outcomes.map(outcome => outcome.score));
+      const expectedScore = weightedScore / Math.max(0.001, branchWeight);
+      robustReplies.push({
+        ...topReply,
+        outcomes,
+        robustScore: expectedScore + worstScore * 0.18,
+        validatedBranches: outcomes.length
+      });
+    }
   }
+
+  robustReplies.sort((a, b) => b.robustScore - a.robustScore);
+  const bestReplyObj = robustReplies[0];
+  if (!bestReplyObj) return { canPremove: false, predictionConfidence: topPredictionConfidence };
 
   const rm = bestReplyObj.m;
   const ourFrom = `${FILES[rm.fromC]}${8 - rm.fromR}`;
   const ourTo = `${FILES[rm.toC]}${8 - rm.toR}`;
-
-  let safeAgainstTopBranches = true;
-  if (!bestReplyObj.isRealRecapture && dangerousOrReasonableEnemyMoves.length > 1) {
-    for (let i = 1; i < dangerousOrReasonableEnemyMoves.length; i++) {
-      const altEnemy = dangerousOrReasonableEnemyMoves[i];
-      const altCast = updateCastlingAfterMove(castling, altEnemy.em);
-      const altEp = getNextEpSquare(altEnemy.em);
-      const altOurLegal = generateLegalMoves(altEnemy.nb, myColor, altCast, altEp);
-      const matchingMove = altOurLegal.find(
-        (am) => am.fromR === rm.fromR && am.fromC === rm.fromC && am.toR === rm.toR && am.toC === rm.toC
-      );
-      if (!matchingMove) {
-        safeAgainstTopBranches = false;
-        break;
-      }
-      const afterAltOur = makeMove(altEnemy.nb, matchingMove);
-      const altGivesChk = isKingInCheck(afterAltOur, enemyColor);
-      const altEnemyLegal = generateLegalMoves(afterAltOur, enemyColor, "-", null);
-      const altIsStalemate = !altGivesChk && altEnemyLegal.length === 0;
-
-      const altSee = seeExchangeScore(afterAltOur, matchingMove.toR, matchingMove.toC, matchingMove.piece, matchingMove.captured, myColor);
-      const { worstLoss: altHangingLoss } = getHangingDetails(afterAltOur, myColor);
-      const altGained = matchingMove.captured ? (PIECE_VALUES[matchingMove.captured] || 100) : 0;
-
-      if (
-        altIsStalemate ||
-        altSee < -40 ||
-        altHangingLoss > altGained + 75 ||
-        allowsEnemyMateInOne(afterAltOur, myColor, enemyColor, "-", null)
-      ) {
-        safeAgainstTopBranches = false;
-        break;
-      }
-    }
-  }
+  const safeAgainstTopBranches = bestReplyObj.validatedBranches === dangerousOrReasonableEnemyMoves.length;
 
   let confidence = 0;
   let predictionType = "pv_lookahead";
@@ -1996,22 +2636,22 @@ function computeSmartNextPremove(
     confidence = 99;
     predictionType = "forced_single";
     reasonText = `⚡ 100% ФОРСАЖ: У врага 1 легальный ход (${enemyFrom}→${enemyTo})`;
-  } else if (bestReplyObj.isRealRecapture && scoreGap >= 60) {
-    confidence = 95;
+  } else if (bestReplyObj.isRealRecapture && topPredictionConfidence >= 72) {
+    confidence = Math.min(96, topPredictionConfidence + 7);
     predictionType = "recapture";
-    reasonText = `⚔ ЧЕСТНЫЙ ПЕРЕБОЙ НА ${ourTo.toUpperCase()} (ПОСЛЕ ${enemyFrom}→${enemyTo})`;
+    reasonText = `⚔ ПЕРЕБОЙ НА ${ourTo.toUpperCase()} (ПРОГНОЗ ${topPredictionConfidence}%: ${enemyFrom}→${enemyTo})`;
   } else if (bestReplyObj.isRealRecapture) {
-    confidence = 87;
-    predictionType = "recapture";
-    reasonText = `⚔ ВЕРОЯТНЫЙ РАЗМЕН НА ${ourTo.toUpperCase()} (${enemyFrom}→${enemyTo})`;
-  } else if (scoreGap >= 200 && topEnemy.seeScore >= 0 && safeAgainstTopBranches) {
-    confidence = 89;
-    predictionType = "forced_tactical";
-    reasonText = `⚡ ВЫНУЖДЕННЫЙ ОТВЕТ ВРАГА (${enemyFrom}→${enemyTo})`;
-  } else if (safeAgainstTopBranches && bestReplyObj.ourSee >= 0 && bestReplyObj.worstLoss <= 50) {
-    confidence = 74;
+    confidence = 82;
     predictionType = "safe_universal";
-    reasonText = `🛡 БЕЗОПАСНЫЙ ПРЕМУВ ПРОТИВ ТОП-ЛИНИЙ (${ourFrom}→${ourTo})`;
+    reasonText = `🛡 ПЕРЕБОЙ БЕЗ РИСКА ПРОТИВ ${bestReplyObj.validatedBranches} ЛИНИЙ`;
+  } else if (scoreGap >= 200 && topEnemy.seeScore >= 0 && safeAgainstTopBranches) {
+    confidence = Math.max(82, Math.min(94, topPredictionConfidence + 5));
+    predictionType = "forced_tactical";
+    reasonText = `⚡ ФОРСИРОВАННЫЙ ПРОГНОЗ ${topPredictionConfidence}% (${enemyFrom}→${enemyTo})`;
+  } else if (safeAgainstTopBranches && bestReplyObj.ourSee >= 0 && bestReplyObj.worstLoss <= 50) {
+    confidence = Math.min(91, 78 + bestReplyObj.validatedBranches * 2);
+    predictionType = "safe_universal";
+    reasonText = `🛡 УНИВЕРСАЛЬНЫЙ ПРЕМУВ ПРОТИВ ${bestReplyObj.validatedBranches} ТОП-ЛИНИЙ`;
   } else {
     return { canPremove: false };
   }
@@ -2019,6 +2659,8 @@ function computeSmartNextPremove(
   return {
     canPremove: true,
     confidence,
+    predictionConfidence: topPredictionConfidence,
+    validatedBranches: bestReplyObj.validatedBranches,
     predictionType,
     reasonText,
     forMoveUci: lastOurMove ? lastOurMove.uci : null,
@@ -2047,10 +2689,16 @@ async function analyzeAdaptiveMaster(
   enemySeconds = 999,
   trapRadarEnabled = true,
   recentPositions = [],
-  lastOurMove = null
+  lastOurMove = null,
+  analysisContextKey = "default",
+  uciHistory = [],
+  historyTrusted = false,
+  analysisMeta = null
 ) {
-  const { board, turn, castling, epSquare: fenEp, pieceCount, boardKey } = parseFEN(fen);
+  if (!validateEngineFen(fen)) throw new Error("Invalid analysis FEN");
+  const { board, turn, castling, epSquare: fenEp, halfmoveClock, pieceCount, boardKey } = parseFEN(fen);
   const enemy = turn === "w" ? "b" : "w";
+  const lastAnalyzedState = analyzedStateByClient.get(analysisContextKey) || createAnalyzedState();
 
   let detectedOppMove = null;
   if (clientLastEnemyMove && clientLastEnemyMove.from && clientLastEnemyMove.to) {
@@ -2058,19 +2706,46 @@ async function analyzeAdaptiveMaster(
   } else if (lastAnalyzedState.board) {
     detectedOppMove = detectLastOpponentMove(lastAnalyzedState.board, board, enemy);
   }
-  const activeEpSquare = fenEp || (detectedOppMove ? detectedOppMove.epTarget : null);
+  // FEN is authoritative. A client-side move detector may be stale after navigation,
+  // reconnects, or takebacks and must never manufacture an en-passant right.
+  const activeEpSquare = fenEp;
 
   let legal = generateLegalMoves(board, turn, castling, activeEpSquare);
   if (legal.length === 0) return { best: null, average: null, worst: null };
+  if (halfmoveClock >= 100) {
+    return { best: null, average: null, worst: null, drawReason: "fifty-move" };
+  }
 
+  const inCheckBefore = isKingInCheck(board, turn);
+  const deviceProfile = globalThis.__CC_DEVICE_PROFILE__;
+  const recommendation = deviceProfile?.recommendation || {};
+  const mobile = Boolean(globalThis.__CC_ENGINE_RUNTIME__ || deviceProfile?.recommendation);
+  const constrained = Boolean(deviceProfile?.power?.saveMode || deviceProfile?.power?.backgroundRestricted || Number(deviceProfile?.power?.thermalStatus) >= 2);
+  const tier = constrained ? "LOW" : String(recommendation.tier || "BALANCED").toUpperCase();
+  const positionKey = `${analysisMeta?.sessionId || ""}|${analysisMeta?.positionId || ""}|${fen}`;
+  const annotationOnly = mobile && pass === "deep" && (stockfishWorkByPosition.get(positionKey)?.expiresAt || 0) > Date.now();
+  const rawTimeBudgetMs = pass === "fast" ? (bulletTurbo ? 26 : 48) : (inCheckBefore ? 340 : bulletTurbo ? 95 : 235);
+  const phoneBudgetCap = annotationOnly ? 32 : pass === "fast" ? (tier === "LOW" ? 24 : tier === "HIGH" ? 40 : 32) : (tier === "LOW" ? 60 : tier === "HIGH" ? 120 : 90);
+  const deviceMovetimeScale = Math.max(0.5, Math.min(mobile ? 1 : 1.5, Number(recommendation.movetimeScale) || 1));
+  const timeBudgetMs = Math.max(18, Math.min(mobile ? phoneBudgetCap : 510, Math.round(rawTimeBudgetMs * deviceMovetimeScale)));
+  const budget = createSearchBudget(timeBudgetMs, Math.min(mobile ? 6000 : 50000, timeBudgetMs * 100));
+  let fallbackScore = 0;
+  // Unwind incomplete proof/search frames before constructing a legal fallback.
+  try {
+  checkSearchBudget(budget);
   const nonPawnMaterial = countNonPawnMaterial(board);
   const isEndgame = nonPawnMaterial <= 2200;
   const isPawnEndgame = nonPawnMaterial <= 650;
-  const staticEvalBefore = evaluateBoard(board, turn, style);
+  // Core search remains style-neutral; style bonuses are applied only after
+  // objective tactical and draw safety has been established.
+  const objectiveStyle = "balanced";
+  const staticEvalBefore = evaluateBoard(board, turn, objectiveStyle);
+  fallbackScore = Math.max(-1200, Math.min(1200, staticEvalBefore));
 
   const positionCounts = new Map();
   if (Array.isArray(recentPositions)) {
-    for (const posHash of recentPositions) {
+    for (const posHash of recentPositions.slice(-256)) {
+      checkSearchBudget(budget);
       if (!posHash) continue;
       positionCounts.set(posHash, (positionCounts.get(posHash) || 0) + 1);
     }
@@ -2080,21 +2755,33 @@ async function analyzeAdaptiveMaster(
   const enemyKingSquare = `${FILES[enemyKingPos.c]}${8 - enemyKingPos.r}`;
 
   const profile = GM_STYLES[style] || GM_STYLES.balanced;
-  const inCheckBefore = isKingInCheck(board, turn);
-  const { worstLoss: threatBefore, hangingSquare } = getHangingDetails(board, turn);
-  const bookMoves = OPENING_BOOK[boardKey] || [];
-  const learnedForPos = experienceDB[boardKey] || {};
+  const { worstLoss: threatBefore, hangingSquare } = getHangingDetails(board, turn, budget);
+  const legacyPositionKey = `${boardToFenPart(board)} ${turn}`;
+  const combinedBook = new Map();
+  for (const entry of [...(OPENING_BOOK[legacyPositionKey] || []), ...getLocalEcoBookMoves(uciHistory, historyTrusted)]) {
+    const uci = `${entry.from}${entry.to}${entry.promo || ""}`;
+    const previous = combinedBook.get(uci);
+    if (!previous || Number(entry.bonus) > Number(previous.bonus)) combinedBook.set(uci, entry);
+  }
+  const bookMoves = [...combinedBook.values()];
+  const learnedForPos = experienceDB[boardKey] || experienceDB[legacyPositionKey] || {};
 
-  const dangerStatus = detectKingDangerState(board, turn, enemy, inCheckBefore, threatBefore);
+  const dangerStatus = annotationOnly
+    ? { isDanger: inCheckBefore, reason: "" }
+    : detectKingDangerState(board, turn, enemy, inCheckBefore, threatBefore, castling, activeEpSquare, budget);
   let isDangerPosition = dangerStatus.isDanger;
   let dangerReason = dangerStatus.reason;
 
   let cloudLines = null;
   let syzygyData = null;
-  const startTime = Date.now();
+  const requestStartTime = Date.now();
+  const networkStartedAt = searchNow();
   lastServerSourceTag = pass === "fast" ? "LOCAL FAST CORE" : "LOCAL DEEP CORE";
 
-  if (pieceCount <= 7) {
+  if (annotationOnly) {
+    syzygyData = syzygyCache.get(fen) || null;
+    cloudLines = cloudCache.get(fen) || null;
+  } else if (pieceCount <= 7) {
     if (pass === "fast") {
       syzygyData = syzygyCache.get(fen) || await fetchSyzygyTablebase(fen, pieceCount);
     } else {
@@ -2102,10 +2789,18 @@ async function analyzeAdaptiveMaster(
     }
   } else if (pass === "fast") {
     cloudLines = cloudCache.get(fen) || null;
-    if (cloudLines) lastServerSourceTag = "CLOUD CACHE (0мс)";
+    if (cloudLines) {
+      lastServerSourceTag = cloudLines[0]?.source === "explorer" ? "EXPLORER CACHE (0мс)" : "CLOUD CACHE (0мс)";
+    }
   } else if (elo >= 1800) {
     cloudLines = await fetchLichessCloud3000(fen, pieceCount);
   }
+
+  // Network latency must not consume the local search budget.
+  const networkElapsedMs = searchNow() - networkStartedAt;
+  budget.deadline += networkElapsedMs;
+  budget.startedAt += networkElapsedMs;
+  checkSearchBudget(budget);
 
   const singleBestOnlyMode = !calcAverage && !calcWorst;
   let maxTargetDepth = pass === "fast" ? 2 : (legal.length <= 26 ? 3 : 2);
@@ -2115,59 +2810,75 @@ async function analyzeAdaptiveMaster(
   if (isPawnEndgame && legal.length <= 14 && !syzygyData) {
     maxTargetDepth = pass === "fast" ? 3 : (bulletTurbo ? 4 : 5);
   }
-
-  const timeBudgetMs = pass === "fast"
-    ? (bulletTurbo ? 26 : 48)
-    : (isDangerPosition ? 340 : (bulletTurbo ? 95 : 235));
+  if (annotationOnly) maxTargetDepth = 1;
 
   if (maxTargetDepth >= 3 && !syzygyData) {
     for (let d = 1; d < maxTargetDepth - 1; d++) {
-      if (Date.now() - startTime > timeBudgetMs * 0.42) break;
-      searchPV(board, turn, d, -30000, 30000, style, castling, activeEpSquare, 0, isDangerPosition, 0);
+      if (searchNow() - budget.startedAt > timeBudgetMs * 0.25) break;
+      searchPV(board, turn, d, -30000, 30000, objectiveStyle, castling, activeEpSquare, 0, isDangerPosition, 0, halfmoveClock, budget);
     }
-    const rootHash = `${boardToHash(board, turn, castling, activeEpSquare)}_${style}`;
+    const rootHash = `${boardToHash(board, turn, castling, activeEpSquare, halfmoveClock)}_${objectiveStyle}_${isDangerPosition ? 1 : 0}_0`;
     const rootTT = transpositionTable.get(rootHash);
     if (rootTT && rootTT.bestKey) {
-      legal = generateLegalMoves(board, turn, castling, activeEpSquare, rootTT.bestKey, 0);
+      legal = generateLegalMoves(board, turn, castling, activeEpSquare, rootTT.bestKey, 0, budget);
     }
+  }
+
+  // Pick one root quality before scoring any candidate. If ordering/search warm-up
+  // consumed the budget, lower every root move equally rather than only late moves.
+  let uniformChildDepth = Math.max(1, maxTargetDepth - 1);
+  const rootBudgetRemaining = budget.deadline - searchNow();
+  if (
+    uniformChildDepth > 1 &&
+    (
+      rootBudgetRemaining < timeBudgetMs * 0.45 ||
+      (!isDangerPosition && legal.length > 16 && uniformChildDepth > 2)
+    )
+  ) {
+    uniformChildDepth--;
   }
 
   const enemyMobilityBefore = generateMoves(board, enemy, "-", null).length;
   const isEnemyZeitnot = enemySeconds > 0 && enemySeconds <= 10.5;
   let mateThreatCount = 0;
 
-  const rawEvaluated = legal.map((m, idx) => {
+  const rawEvaluated = legal.map((m) => {
+    checkSearchBudget(budget);
     const nextB = makeMove(board, m);
     const nextCastling = updateCastlingAfterMove(castling, m);
     const nextEp = getNextEpSquare(m);
     const nextBoardPart = boardToFenPart(nextB);
 
     const gainedNow = m.captured ? (PIECE_VALUES[m.captured] || 0) : 0;
-    const { worstLoss: rawThreatAfter } = getHangingDetails(nextB, turn);
+    const { worstLoss: rawThreatAfter } = getHangingDetails(nextB, turn, budget);
     const moveSeeScore = seeExchangeScore(nextB, m.toR, m.toC, m.piece, m.captured, turn);
 
     const givesCheck = isKingInCheck(nextB, enemy);
     const threatAfter = givesCheck ? Math.min(rawThreatAfter, Math.max(0, -moveSeeScore)) : rawThreatAfter;
 
-    const enemyLegalAfter = generateLegalMoves(nextB, enemy, nextCastling, nextEp);
+    const enemyLegalAfter = generateLegalMoves(nextB, enemy, nextCastling, nextEp, null, 0, budget);
     const isMateInOne = givesCheck && enemyLegalAfter.length === 0;
     const isStalemate = !givesCheck && enemyLegalAfter.length === 0;
+    const nextHalfmoveClock = m.piece === "p" || m.captured ? 0 : halfmoveClock + 1;
+    const causesFiftyMoveDraw = !isMateInOne && !isStalemate && nextHalfmoveClock >= 100;
 
     const isForcedMateInTwo =
+      !annotationOnly &&
       !isMateInOne &&
       !isStalemate &&
+      !causesFiftyMoveDraw &&
       (givesCheck || staticEvalBefore >= 350 || pieceCount <= 10) &&
       enemyLegalAfter.length <= 8 &&
-      deliversForcedMateInTwo(nextB, turn, enemy, nextCastling, nextEp);
+      deliversForcedMateInTwo(nextB, turn, enemy, nextCastling, nextEp, budget);
 
-    const blundersMateInOne = !isMateInOne && !isStalemate && allowsEnemyMateInOne(nextB, turn, enemy, nextCastling, nextEp);
+    const blundersMateInOne = !annotationOnly && !isMateInOne && !isStalemate && !causesFiftyMoveDraw && allowsEnemyMateInOne(nextB, turn, enemy, nextCastling, nextEp, budget);
     if (blundersMateInOne) {
       mateThreatCount++;
     }
 
     let blundersMateInTwo = false;
-    if (!isMateInOne && !isStalemate && !isForcedMateInTwo && !blundersMateInOne && idx < 14) {
-      blundersMateInTwo = allowsEnemyForcedMateInTwo(nextB, turn, enemy, nextCastling, nextEp);
+    if (!annotationOnly && !isMateInOne && !isStalemate && !causesFiftyMoveDraw && !isForcedMateInTwo && !blundersMateInOne) {
+      blundersMateInTwo = allowsEnemyForcedMateInTwo(nextB, turn, enemy, nextCastling, nextEp, budget);
       if (blundersMateInTwo) {
         mateThreatCount++;
       }
@@ -2178,13 +2889,19 @@ async function analyzeAdaptiveMaster(
     const promoSuffix = m.promo ? m.promo : "";
     const uci = fromSq + toSq + promoSuffix;
 
-    const timesSeenBefore = positionCounts.get(nextBoardPart) || 0;
+    const nextPositionKey = `${nextBoardPart} ${enemy} ${nextCastling} ${nextEp || "-"}`;
+    const timesSeenBefore = positionCounts.get(nextPositionKey) || positionCounts.get(nextBoardPart) || 0;
     let allowsEnemyRepetition = false;
     if (timesSeenBefore === 0 && positionCounts.size > 0 && staticEvalBefore >= 120 && !m.captured && m.piece !== "p") {
       for (let ei = 0; ei < Math.min(8, enemyLegalAfter.length); ei++) {
+        checkSearchBudget(budget);
         const eb = makeMove(nextB, enemyLegalAfter[ei]);
         const ePart = boardToFenPart(eb);
-        if ((positionCounts.get(ePart) || 0) >= 1) {
+        const enemyMove = enemyLegalAfter[ei];
+        const eCastling = updateCastlingAfterMove(nextCastling, enemyMove);
+        const eEp = getNextEpSquare(enemyMove);
+        const eKey = `${ePart} ${turn} ${eCastling} ${eEp || "-"}`;
+        if ((positionCounts.get(eKey) || positionCounts.get(ePart) || 0) >= 2) {
           allowsEnemyRepetition = true;
           break;
         }
@@ -2209,54 +2926,43 @@ async function analyzeAdaptiveMaster(
     let searchScore = 0;
     let pvResult = { pv: [] };
 
-    const elapsed = Date.now() - startTime;
-    const effectiveChildDepth = (elapsed > timeBudgetMs && idx >= 6)
-      ? Math.max(1, maxTargetDepth - 2)
-      : maxTargetDepth - 1;
-
-    const isObviousBlunderToSkip =
-      singleBestOnlyMode &&
-      idx >= 5 &&
-      !isDangerPosition &&
-      !givesCheck &&
-      !m.captured &&
-      !m.promo &&
-      (moveSeeScore < -150 || (threatAfter > gainedNow + 200));
-
     if (isMateInOne) {
       searchScore = 29900;
     } else if (isForcedMateInTwo) {
       searchScore = 29400;
     } else if (isStalemate) {
       searchScore = staticEvalBefore >= -300 ? -24000 : 0;
+    } else if (causesFiftyMoveDraw) {
+      searchScore = 0;
     } else if (blundersMateInOne) {
       searchScore = -29000;
     } else if (blundersMateInTwo) {
       searchScore = -26500;
     } else if (syzygyEntry) {
       searchScore = syzygyEntry.syzygyScore;
-    } else if (isObviousBlunderToSkip) {
-      searchScore = evaluateBoard(nextB, turn, style) + moveSeeScore * 2 - threatAfter;
+    } else if (annotationOnly) {
+      searchScore = Math.max(-1200, Math.min(1200, -evaluateBoard(nextB, enemy, objectiveStyle)));
     } else {
       pvResult = searchPV(
         nextB,
         enemy,
-        effectiveChildDepth,
+        uniformChildDepth,
         -30000,
         30000,
-        style,
+        objectiveStyle,
         nextCastling,
         nextEp,
         givesCheck ? 1 : 0,
         isDangerPosition,
-        1
+        1,
+        nextHalfmoveClock,
+        budget
       );
       searchScore = -pvResult.score;
     }
 
     return {
       m,
-      idx,
       nextB,
       nextCastling,
       nextEp,
@@ -2273,6 +2979,7 @@ async function analyzeAdaptiveMaster(
       isMateInOne,
       isForcedMateInTwo,
       isStalemate,
+      causesFiftyMoveDraw,
       blundersMateInOne,
       blundersMateInTwo,
       timesSeenBefore,
@@ -2286,15 +2993,16 @@ async function analyzeAdaptiveMaster(
 
   let maxPureSafeScore = -30000;
   for (const item of rawEvaluated) {
-    if (!item.blundersMateInOne && !item.blundersMateInTwo && !item.isStalemate && item.searchScore > maxPureSafeScore) {
+    checkSearchBudget(budget);
+    if (!item.blundersMateInOne && !item.blundersMateInTwo && !item.isStalemate && !item.causesFiftyMoveDraw && item.searchScore > maxPureSafeScore) {
       maxPureSafeScore = item.searchScore;
     }
   }
 
   const scored = rawEvaluated.map((item) => {
+    checkSearchBudget(budget);
     const {
       m,
-      idx,
       nextB,
       nextCastling,
       nextEp,
@@ -2309,6 +3017,7 @@ async function analyzeAdaptiveMaster(
       isMateInOne,
       isForcedMateInTwo,
       isStalemate,
+      causesFiftyMoveDraw,
       blundersMateInOne,
       blundersMateInTwo,
       timesSeenBefore,
@@ -2321,17 +3030,21 @@ async function analyzeAdaptiveMaster(
 
     let cloudBonus = 0;
     let fromCloud = false;
+    let fromExplorer = false;
+    let cloudDepth = 0;
     let cloudPV = null;
     if (cloudLines && !isMateInOne && !isStalemate && !blundersMateInOne && !blundersMateInTwo) {
       const cIdx = cloudLines.findIndex(
         cl => cl.from === fromSq && cl.to === toSq && (cl.promo || null) === (m.promo || null)
       );
       if (cIdx === 0 && timesSeenBefore === 0) {
-        cloudBonus = elo >= 2400 ? 320 : 180;
-        fromCloud = true;
+        fromCloud = cloudLines[0].source === "cloud";
+        fromExplorer = cloudLines[0].source === "explorer";
+        cloudDepth = Number(cloudLines[0].depth) || 0;
+        cloudBonus = fromCloud ? (elo >= 2400 ? 320 : 180) : 65;
         cloudPV = cloudLines[0].pvChain;
       } else if (cIdx === 1 && timesSeenBefore === 0) {
-        cloudBonus = 90;
+        cloudBonus = cloudLines[1].source === "cloud" ? 90 : 25;
       }
     }
 
@@ -2342,6 +3055,9 @@ async function analyzeAdaptiveMaster(
     let antiRepetitionPenalty = 0;
     const weAreNotLosing = maxPureSafeScore >= -80 || staticEvalBefore >= -80;
     if (weAreNotLosing && !isMateInOne && !isForcedMateInTwo) {
+      if (causesFiftyMoveDraw) {
+        antiRepetitionPenalty -= 15000;
+      }
       if (timesSeenBefore >= 2) {
         antiRepetitionPenalty -= 15000;
       } else if (timesSeenBefore === 1) {
@@ -2368,6 +3084,7 @@ async function analyzeAdaptiveMaster(
       !blundersMateInOne &&
       !blundersMateInTwo &&
       !isStalemate &&
+      !causesFiftyMoveDraw &&
       threatAfter > gainedNow + 120 &&
       searchScore >= 240 &&
       (maxPureSafeScore - searchScore) <= 45;
@@ -2376,27 +3093,35 @@ async function analyzeAdaptiveMaster(
       ? Math.min(80, Math.round(profile.sacrificeBoost * 0.25))
       : 0;
 
+    const safetyScale = Math.max(0.8, Math.min(1.3, Number(profile.safety || 2.35) / 2.2));
     const seePenalty = (!isSoundTacticalSacrifice && moveSeeScore < -35)
-      ? Math.round(moveSeeScore * 0.85)
+      ? Math.round(moveSeeScore * 0.85 * safetyScale)
       : 0;
 
     const unaddressedThreat = Math.max(0, threatAfter - gainedNow);
     const netTacticalPenalty = (!isSoundTacticalSacrifice && unaddressedThreat > 35)
-      ? -Math.round(unaddressedThreat * 1.35)
+      ? -Math.round(unaddressedThreat * 1.35 * safetyScale)
       : 0;
 
     const movedPieceSafe =
       !blundersMateInOne &&
       !blundersMateInTwo &&
       !isStalemate &&
+      !causesFiftyMoveDraw &&
       moveSeeScore >= -25 &&
       unaddressedThreat <= 35 &&
       (!isSquareAttacked(nextB, m.toR, m.toC, enemy) || (threatAfter <= gainedNow));
 
-    const isObjectivelyCompetitive = (maxPureSafeScore - searchScore) <= 30 && timesSeenBefore === 0;
+    const objectiveSafetyBonus = movedPieceSafe
+      ? Math.min(45, Math.round(Math.max(0, threatBefore - threatAfter) * 0.16 * safetyScale))
+      : 0;
+
+    const isObjectivelyCompetitive = !causesFiftyMoveDraw && (maxPureSafeScore - searchScore) <= 30 && timesSeenBefore === 0;
 
     let trapInfo = { isTrap: false, trapChance: 0, badReplies: 0, totalReplies: 0, trapSubtitle: "", complexityBranches: 0 };
     if (
+      trapRadarEnabled &&
+      !annotationOnly &&
       !isMateInOne &&
       !isForcedMateInTwo &&
       !isStalemate &&
@@ -2404,10 +3129,9 @@ async function analyzeAdaptiveMaster(
       !blundersMateInTwo &&
       !syzygyEntry &&
       movedPieceSafe &&
-      idx < 8 &&
       (maxPureSafeScore - searchScore) <= 65
     ) {
-      trapInfo = computeTrapMetrics(nextB, m, turn, enemy, nextCastling, nextEp, style);
+      trapInfo = computeTrapMetrics(nextB, m, turn, enemy, nextCastling, nextEp, style, budget);
     }
 
     const trapBonus = (trapRadarEnabled && trapInfo.isTrap && movedPieceSafe && isObjectivelyCompetitive && (profile.trapAffinity || 1.0) >= 1.1)
@@ -2431,8 +3155,9 @@ async function analyzeAdaptiveMaster(
 
     let kingPenalty = 0;
     const isCastling = m.piece === "k" && Math.abs(m.fromC - m.toC) === 2;
+    const hasCastlingRight = turn === "w" ? /[KQ]/.test(castling) : /[kq]/.test(castling);
     if (m.piece === "k") {
-      if (!isEndgame && !inCheckBefore && !isCastling) {
+      if (!isEndgame && !inCheckBefore && !isCastling && hasCastlingRight) {
         kingPenalty = -220;
       } else if (isEndgame && movedPieceSafe) {
         const distCenterBefore = Math.abs(3.5 - m.fromR) + Math.abs(3.5 - m.fromC);
@@ -2502,16 +3227,21 @@ async function analyzeAdaptiveMaster(
         winningProgressBonus +
         antiRepetitionPenalty +
         seePenalty +
-        netTacticalPenalty;
+        netTacticalPenalty +
+        objectiveSafetyBonus;
     }
 
     const movedPieceAttacked = isSquareAttacked(nextB, m.toR, m.toC, enemy);
     const putUnderAttack =
-      blundersMateInOne ||
-      blundersMateInTwo ||
-      (isStalemate && weAreNotLosing) ||
-      moveSeeScore < -50 ||
-      (!isSoundTacticalSacrifice && movedPieceAttacked && (threatAfter > gainedNow + 25));
+      !isMateInOne &&
+      !isForcedMateInTwo &&
+      (
+        blundersMateInOne ||
+        blundersMateInTwo ||
+        (isStalemate && weAreNotLosing) ||
+        moveSeeScore < -50 ||
+        (!isSoundTacticalSacrifice && movedPieceAttacked && (threatAfter > gainedNow + 25))
+      );
 
     const moveLabel = m.promo ? `${fromSq}→${toSq}=${m.promo.toUpperCase()}` : `${fromSq}→${toSq}`;
     let fullPV = "";
@@ -2562,6 +3292,8 @@ async function analyzeAdaptiveMaster(
       stepDist: Math.abs(m.toR - m.fromR),
       isCastling,
       fromCloud,
+      fromExplorer,
+      cloudDepth,
       fromSyzygy: Boolean(syzygyEntry),
       syzygyBadge: syzygyEntry ? syzygyEntry.badgeLabel : null,
       syzygyOutcome: syzygyEntry ? syzygyEntry.ourOutcome : null,
@@ -2580,7 +3312,13 @@ async function analyzeAdaptiveMaster(
       isMateInOne,
       isForcedMateInTwo,
       causesStalemate: Boolean(isStalemate && weAreNotLosing),
-      isRepetitionDrawRisk: Boolean(weAreNotLosing && (timesSeenBefore > 0 || allowsEnemyRepetition || isBackAndForth)),
+      isRepetitionDrawRisk: Boolean(
+        !isMateInOne &&
+        !isForcedMateInTwo &&
+        weAreNotLosing &&
+        (causesFiftyMoveDraw || timesSeenBefore >= 2 || allowsEnemyRepetition)
+      ),
+      causesFiftyMoveDraw,
       isCheckmate: isMateInOne || isForcedMateInTwo || searchScore > 15000 || (syzygyEntry && syzygyEntry.dtm !== null && syzygyEntry.dtm <= 4 && syzygyEntry.ourOutcome === "win"),
       blundersMate: blundersMateInOne || blundersMateInTwo,
       isSacrifice: isSoundTacticalSacrifice,
@@ -2588,9 +3326,9 @@ async function analyzeAdaptiveMaster(
       isFork: movedPieceSafe && isFork,
       isPin: movedPieceSafe && isPin,
       savedHangingPiece: threatBefore >= 75 && threatAfter < 50 && !blundersMateInOne && !blundersMateInTwo && !isStalemate,
-      ignoredHangingPiece: !isSoundTacticalSacrifice && threatBefore >= 75 && threatAfter >= 75 && gainedNow < threatBefore,
+      ignoredHangingPiece: !isMateInOne && !isForcedMateInTwo && !isSoundTacticalSacrifice && threatBefore >= 75 && threatAfter >= 75 && gainedNow < threatBefore,
       underDirectAttack: putUnderAttack,
-      ruinedCastling: kingPenalty < 0,
+      ruinedCastling: !isMateInOne && !isForcedMateInTwo && hasCastlingRight && kingPenalty < 0,
       kicksEnemyPiece: safeKickBonus > 0,
       givesCheck,
       pureSearchScore: searchScore,
@@ -2607,23 +3345,31 @@ async function analyzeAdaptiveMaster(
 
   scored.sort((a, b) => b.trueScore - a.trueScore);
 
-  const topScore = scored[0].trueScore;
-  const solidMoves = scored.filter(m =>
+  const isObjectivelySafeMove = (m) =>
     !m.blundersMate &&
     !m.causesStalemate &&
     !m.isRepetitionDrawRisk &&
     !m.ignoredHangingPiece &&
     !m.underDirectAttack &&
-    !m.ruinedCastling &&
-    (topScore - m.trueScore <= 120)
-  );
+    !m.ruinedCastling;
+  const objectivelySafeMoves = scored.filter(isObjectivelySafeMove);
+  const safeTopScore = objectivelySafeMoves[0]?.trueScore ?? -Infinity;
+  const solidMoves = objectivelySafeMoves.filter(m => safeTopScore - m.trueScore <= 120);
   const nonDrawNonMateMoves = scored.filter(m => !m.blundersMate && !m.causesStalemate && !m.isRepetitionDrawRisk);
-  const nonMateMoves = scored.filter(m => !m.blundersMate && !m.causesStalemate);
-  const safePool = solidMoves.length > 0
-    ? solidMoves
-    : (nonDrawNonMateMoves.length > 0
-        ? [nonDrawNonMateMoves[0]]
-        : (nonMateMoves.length > 0 ? [nonMateMoves[0]] : [scored[0]]));
+  const safetyPenalty = (m) =>
+    (m.blundersMate ? 1000000 : 0) +
+    (m.causesStalemate ? 100000 : 0) +
+    (m.isRepetitionDrawRisk ? 10000 : 0) +
+    (m.ignoredHangingPiece ? 1000 : 0) +
+    (m.underDirectAttack ? 500 : 0) +
+    (m.ruinedCastling ? 100 : 0);
+  const minimumFallbackPenalty = objectivelySafeMoves.length > 0
+    ? 0
+    : Math.min(...scored.map(safetyPenalty));
+  const safestFallbackMoves = objectivelySafeMoves.length > 0
+    ? objectivelySafeMoves
+    : scored.filter(m => safetyPenalty(m) === minimumFallbackPenalty);
+  const safePool = solidMoves.length > 0 ? solidMoves : safestFallbackMoves;
 
   const maxAllowedCpLoss =
     elo >= 2000 ? 0 :
@@ -2642,21 +3388,30 @@ async function analyzeAdaptiveMaster(
     }
   }
 
-  if (bestMove && bestMove.rawMove && !bestMove.isMateInOne && !isDangerPosition) {
+  if (!annotationOnly && bestMove && bestMove.rawMove && !bestMove.isMateInOne && !isDangerPosition) {
     const boardAfterBest = makeMove(board, bestMove.rawMove);
     const nextCast = updateCastlingAfterMove(castling, bestMove.rawMove);
     const nextEpSq = getNextEpSquare(bestMove.rawMove);
-    const updatedRecent = [...recentPositions, boardToFenPart(boardAfterBest)];
-    bestMove.nextPremove = computeSmartNextPremove(
-      boardAfterBest,
-      turn,
-      enemy,
-      nextCast,
-      nextEpSq,
-      bestMove,
-      style,
-      updatedRecent
-    );
+    const boardAfterBestPart = boardToFenPart(boardAfterBest);
+    const updatedRecent = [...recentPositions.slice(-256), `${boardAfterBestPart} ${enemy} ${nextCast} ${nextEpSq || "-"}`];
+    try {
+      bestMove.nextPremove = computeSmartNextPremove(
+        boardAfterBest,
+        turn,
+        enemy,
+        nextCast,
+        nextEpSq,
+        bestMove,
+        style,
+        updatedRecent,
+        null,
+        0,
+        budget
+      );
+    } catch (error) {
+      if (error !== SEARCH_INTERRUPTED) throw error;
+      bestMove.nextPremove = null;
+    }
   }
 
   let averageMove = null;
@@ -2667,18 +3422,13 @@ async function analyzeAdaptiveMaster(
         !m.blundersMate &&
         !m.causesStalemate &&
         !m.isRepetitionDrawRisk &&
-        !(m.from === bestMove.from && m.to === bestMove.to && m.promo === "n")
+        !(m.from === bestMove.from && m.to === bestMove.to)
     );
     averageMove =
       avgCandidates[0] ||
-      scored.find(m =>
+      safestFallbackMoves.find(m =>
         m.uci !== bestMove.uci &&
-        !m.blundersMate &&
-        !m.causesStalemate &&
-        !m.isRepetitionDrawRisk &&
-        !m.underDirectAttack &&
-        !m.ignoredHangingPiece &&
-        !(m.from === bestMove.from && m.to === bestMove.to && m.promo === "n")
+        !(m.from === bestMove.from && m.to === bestMove.to)
       ) ||
       bestMove;
   }
@@ -2704,16 +3454,30 @@ async function analyzeAdaptiveMaster(
     opponentEvalDropPawns = Math.max(0, rawDiff / 100).toFixed(2);
   }
 
-  lastAnalyzedState = {
-    board: board.map(r => r.slice()),
-    boardHash: currentHash,
-    turn,
-    pureBestScoreForWhite: currentPureWhiteScore,
-    prevTurnScoreForWhite: baselinePrevWhiteScore,
-    lastDropPawns: opponentEvalDropPawns
-  };
+  const latestMeta = latestAnalysisMetaByClient.get(analysisContextKey);
+  const canCommitClientState = !analysisMeta || !latestMeta || (
+    analysisMeta.sessionId === latestMeta.sessionId &&
+    analysisMeta.positionId === latestMeta.positionId &&
+    analysisMeta.analysisId === latestMeta.analysisId
+  );
+  if (canCommitClientState) {
+    analyzedStateByClient.set(analysisContextKey, {
+      board: board.map(r => r.slice()),
+      boardHash: currentHash,
+      turn,
+      pureBestScoreForWhite: currentPureWhiteScore,
+      prevTurnScoreForWhite: baselinePrevWhiteScore,
+      lastDropPawns: opponentEvalDropPawns
+    });
+    if (analyzedStateByClient.size > 32) analyzedStateByClient.delete(analyzedStateByClient.keys().next().value);
+  }
 
-  const heatmap = computeBoardControlHeatmap(board, myColor || turn);
+  let heatmap = [];
+  if (!budget.interrupted) {
+    try { heatmap = computeBoardControlHeatmap(board, myColor || turn, budget); } catch (error) {
+      if (error !== SEARCH_INTERRUPTED) throw error;
+    }
+  }
 
   let timeAdvice = null;
   if (enemySeconds > 0 && enemySeconds < 10) {
@@ -2736,10 +3500,12 @@ async function analyzeAdaptiveMaster(
     };
   }
 
-  const safeNonRepeatingUcis = nonDrawNonMateMoves.map(m => m.uci);
+  const safeNonRepeatingUcis = (objectivelySafeMoves.length > 0 ? objectivelySafeMoves : safestFallbackMoves).map(m => m.uci);
+  const legalUcis = legal.map(m => `${FILES[m.fromC]}${8 - m.fromR}${FILES[m.toC]}${8 - m.toR}${m.promo || ""}`);
+  const hardRejectedUcis = scored.filter(m => m.blundersMate || m.causesStalemate).map(m => m.uci);
 
   // Сборка Живой телеметрии 24/7 (Шансы на победу, статус сервера, ближайшие ловушки/маты)
-  const totalElapsedMs = Date.now() - startTime;
+  const totalElapsedMs = Date.now() - requestStartTime;
   const ourPerspectiveScore = turn === myColor ? bestMove.pureSearchScore : -bestMove.pureSearchScore;
   const wdl = computeWinDrawLossChances(
     ourPerspectiveScore,
@@ -2772,13 +3538,19 @@ async function analyzeAdaptiveMaster(
   };
 
   return {
-    pass,
+    pass: annotationOnly ? "fast" : pass,
+    requestedPass: pass,
+    partial: annotationOnly,
+    analysisIncomplete: annotationOnly,
+    search: { ...searchStats(budget), annotationOnly },
     best: bestMove,
     average: averageMove,
     worst: worstMove,
     safeNonRepeatingUcis,
-    isDangerPosition,
-    dangerReason,
+    legalUcis,
+    hardRejectedUcis,
+    isDangerPosition: isDangerPosition || annotationOnly,
+    dangerReason: annotationOnly ? "Local annotations incomplete; waiting for Stockfish" : dangerReason,
     enemyKingSquare,
     hangingSquare: threatBefore >= 75 ? hangingSquare : null,
     lastOpponentMove: detectedOppMove,
@@ -2794,4 +3566,34 @@ async function analyzeAdaptiveMaster(
     totalLearnedGames,
     positionsCount: Object.keys(experienceDB).length
   };
+  } catch (error) {
+    if (error !== SEARCH_INTERRUPTED) throw error;
+    const fallback = m => {
+      const from = `${FILES[m.fromC]}${8 - m.fromR}`;
+      const to = `${FILES[m.toC]}${8 - m.toR}`;
+      return {
+        rawMove: m, from, to, uci: `${from}${to}${m.promo || ""}`, promo: m.promo || null,
+        piece: m.piece, captured: m.captured, isEnPassant: Boolean(m.isEnPassant),
+        isCastling: m.piece === "k" && Math.abs(m.fromC - m.toC) === 2,
+        stepDist: Math.abs(m.toR - m.fromR), trueScore: fallbackScore, pureSearchScore: fallbackScore,
+        pvLine: moveToText(m), evalPawns: (fallbackScore / 100).toFixed(2),
+        whitePerspectiveEval: ((turn === "w" ? fallbackScore : -fallbackScore) / 100).toFixed(2),
+        isMateInOne: false, isForcedMateInTwo: false, isCheckmate: false, isTrap: false,
+        blundersMate: false, analysisIncomplete: true
+      };
+    };
+    const best = fallback(legal[0]);
+    const wdl = computeWinDrawLossChances(turn === myColor ? fallbackScore : -fallbackScore);
+    return {
+      pass: "fast", requestedPass: pass, best,
+      average: calcAverage ? fallback(legal[1] || legal[0]) : null,
+      worst: calcWorst ? fallback(legal[legal.length - 1]) : null,
+      partial: true, analysisIncomplete: true, search: { ...searchStats(budget), annotationOnly },
+      legalUcis: legal.map(m => `${FILES[m.fromC]}${8 - m.fromR}${FILES[m.toC]}${8 - m.toR}${m.promo || ""}`),
+      safeNonRepeatingUcis: [], hardRejectedUcis: [], heatmap: [],
+      isDangerPosition: true, dangerReason: "Local analysis incomplete; waiting for Stockfish",
+      boardKey, pieceCount, elo, style,
+      telemetry: { serverSource: "LOCAL BOUNDED FALLBACK", pingMs: searchStats(budget).elapsedMs, ...wdl, nearestThreatText: best.pvLine }
+    };
+  }
 }

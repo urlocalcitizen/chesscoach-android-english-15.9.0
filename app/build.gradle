@@ -3,40 +3,125 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+def releaseKeystoreFile = System.getenv('ANDROID_KEYSTORE_FILE')
+def releaseStorePassword = System.getenv('STORE_PASSWORD')
+def releaseKeyAlias = System.getenv('KEY_ALIAS')
+def releaseKeyPassword = System.getenv('KEY_PASSWORD')
+def releaseSigningValues = [
+    releaseKeystoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+]
+def releaseSigningConfigured = releaseSigningValues.every { value ->
+    value != null && !value.trim().isEmpty()
+}
+def releaseSigningPartiallyConfigured = releaseSigningValues.any { value ->
+    value != null && !value.trim().isEmpty()
+} && !releaseSigningConfigured
+
+if (releaseSigningPartiallyConfigured) {
+    throw new GradleException(
+        'Release signing requires ANDROID_KEYSTORE_FILE, STORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD.'
+    )
+}
+
 android {
-    namespace 'com.chesscoach.app'
-    compileSdk 34
+    namespace = 'com.chesscoach.app'
+    compileSdk = 36
+    buildToolsVersion = '36.0.0'
 
     defaultConfig {
-        applicationId "com.chesscoach.rework"
-        minSdk 26
-        targetSdk 34
-        versionCode 153
-        versionName "15.3.1-Mobile"
+        applicationId = 'com.chesscoach.rework'
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 1590
+        versionName = '15.9.0-Mobile'
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile = file(releaseKeystoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
     }
 
     buildTypes {
-        release {
-            minifyEnabled false
-            signingConfig signingConfigs.debug
-        }
         debug {
-            debuggable true
+            debuggable = true
+        }
+        release {
+            minifyEnabled = true
+            shrinkResources = false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.release
+            }
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
         jvmTarget = '17'
     }
+
+    buildFeatures {
+        buildConfig = false
+    }
+
+    androidResources {
+        noCompress += ['wasm']
+    }
 }
 
 dependencies {
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'androidx.core:core-ktx:1.18.0'
+    implementation 'androidx.appcompat:appcompat:1.8.0'
+    implementation 'androidx.webkit:webkit:1.18.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
 }
+
+def bundledAssets = fileTree('src/main/assets') {
+    exclude 'cc-assets-manifest.json'
+}
+def assetManifest = file('src/main/assets/cc-assets-manifest.json')
+def updateAssetManifest = tasks.register('updateAssetManifest') {
+    inputs.files(bundledAssets)
+    inputs.property('appVersion', android.defaultConfig.versionName)
+    outputs.file(assetManifest)
+    doLast {
+        def root = file('src/main/assets').toPath()
+        def entries = bundledAssets.files.sort { a, b -> a.path <=> b.path }.collect { asset ->
+            def digest = java.security.MessageDigest.getInstance('SHA-256')
+            asset.withInputStream { stream ->
+                byte[] buffer = new byte[65536]
+                int count
+                while ((count = stream.read(buffer)) != -1) digest.update(buffer, 0, count)
+            }
+            [
+                path: root.relativize(asset.toPath()).toString().replace('\\', '/'),
+                size: asset.length(),
+                sha256: digest.digest().encodeHex().toString()
+            ]
+        }
+        assetManifest.setText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+            version: android.defaultConfig.versionName,
+            hashAlgorithm: 'SHA-256',
+            files: entries
+        ])) + '\n', 'UTF-8')
+    }
+}
+tasks.named('preBuild').configure { dependsOn(updateAssetManifest) }

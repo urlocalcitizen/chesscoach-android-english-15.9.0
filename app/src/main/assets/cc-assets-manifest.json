@@ -1,0 +1,126 @@
+{
+    "version": "15.9.0-Mobile",
+    "hashAlgorithm": "SHA-256",
+    "files": [
+        {
+            "path": "background/background.js",
+            "size": 138194,
+            "sha256": "6433b41eeecf4a35e8d4ef0f61da8e874cae25357bd80bfb7245d1ac573e1b7c"
+        },
+        {
+            "path": "bridge/cc-android-polyfill.js",
+            "size": 42284,
+            "sha256": "e0192934542c2fea52e6f7ca3df61da704292b623918f6852374ff562032e242"
+        },
+        {
+            "path": "bridge/cc-mobile-launcher-orb.js",
+            "size": 94753,
+            "sha256": "f9a3fd4814236d1432017283316d70e60835180052fa13f111928b73fffe421d"
+        },
+        {
+            "path": "content/chesscom.js",
+            "size": 270611,
+            "sha256": "01923755f5b9efc6cbbefe473c3efa87f772277222f65f2917e5078dcc020f51"
+        },
+        {
+            "path": "content/content.css",
+            "size": 34974,
+            "sha256": "8f2e4f1379ed0f52c3573f271c1b5931961134ff88c877301396b8f38d02046c"
+        },
+        {
+            "path": "content/content.js",
+            "size": 267666,
+            "sha256": "7e78f75839006f32a66ede1303397a0e8e601269373a86988a4e869371ca84dd"
+        },
+        {
+            "path": "content/privacy-mask-bootstrap.js",
+            "size": 1527,
+            "sha256": "bf6aeb4540938f102de342d86dec1ebbffccd364a110447867194aa46f1f1b91"
+        },
+        {
+            "path": "data/eco-book.js",
+            "size": 656641,
+            "sha256": "a3e39efb870c48799641d2080af781d47467abc251ee704758fc6d8b2e514a57"
+        },
+        {
+            "path": "engine/engine-host.html",
+            "size": 863,
+            "sha256": "2ec7e144957ba0b0da6ac618b8969c34d0ede6d8aef916e7d19d6746bb51faf5"
+        },
+        {
+            "path": "engine/engine-host.js",
+            "size": 11726,
+            "sha256": "4d03cc37d52a4db95cfee0f31247138cc38d008acd220e31ae2dd78b5c8188cf"
+        },
+        {
+            "path": "engine/engine-runtime.js",
+            "size": 24053,
+            "sha256": "4572e9476c33411b201d4303580da10a6862dedd2204f77f23ffddc4e19972c3"
+        },
+        {
+            "path": "lib/engine-client.js",
+            "size": 38824,
+            "sha256": "34682b6b28438387e2e9886c7dc30ef05b3c2a20f6491f644439dc70a0a5b932"
+        },
+        {
+            "path": "lib/explainer.js",
+            "size": 16318,
+            "sha256": "f559a4c6a35fa3bf34420125e75455df8f602fed0fd80ccd31e8e63dd624079e"
+        },
+        {
+            "path": "lib/openings.js",
+            "size": 12334,
+            "sha256": "289c374ec3a4722f1088cb9ab15dfa4b1a5e37e253056ff278ff2b48fd50f1bc"
+        },
+        {
+            "path": "lib/phonk-fx.js",
+            "size": 22792,
+            "sha256": "9bd777df6c5108e6db53e7a283ff8a1a24066af8aa1fa34bcd1eae5ffb3325f6"
+        },
+        {
+            "path": "lib/privacy-mask.js",
+            "size": 31902,
+            "sha256": "f97261e7d238d7aa2f15a042570cc0bd2174139f9cf82d9a9cc68b486598b485"
+        },
+        {
+            "path": "lib/script-api.js",
+            "size": 63183,
+            "sha256": "586b2b7503ece0d639ff6db1e2986fa1dcfe67d2a599acd76da82e1f2ec87ccc"
+        },
+        {
+            "path": "lib/stockfish-local.js",
+            "size": 3155627,
+            "sha256": "c07dad9a00a89f4b1dcba3971d58d8078715556eac0212368e4aab510e1e27c9"
+        },
+        {
+            "path": "offscreen/offscreen.js",
+            "size": 21243,
+            "sha256": "94348eb4487ad4591980367374fd88967756127a23df46d03a9775b8e5543006"
+        },
+        {
+            "path": "scripts/sample.js",
+            "size": 4494,
+            "sha256": "931c978ad6aa345ab11bb8359f06dcf04caca7c709f7bdf0c7658e6e3e63c7d5"
+        },
+        {
+            "path": "vendor/stockfish/COPYING.txt",
+            "size": 35149,
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        },
+        {
+            "path": "vendor/stockfish/SOURCE.txt",
+            "size": 601,
+            "sha256": "6e558eab1137fccf1a6d0b5fa384a7195ee08170728f3e2b99129a5205497252"
+        },
+        {
+            "path": "vendor/stockfish/stockfish-19-single.js",
+            "size": 28130,
+            "sha256": "8071dee87312f74805a859de933e1a1ef465579ab1a51fbd597388cdce9d444d"
+        },
+        {
+            "path": "vendor/stockfish/stockfish-19-single.wasm",
+            "size": 99169054,
+            "sha256": "991bede2f253ebb08ff01fcc48270f4b9c8e66b12d5bd5f8d6f52eb3e3b3a740"
+        }
+    ]
+}

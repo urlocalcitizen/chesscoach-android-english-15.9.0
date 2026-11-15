@@ -238,28 +238,26 @@ window.ChessOpenings = {
     }
 
     const historyStr = uciMoveList.join(" ");
-    let bestPrefixMatch = null;
-    let minRemainingLen = Infinity;
+    let exactMatch = null;
+    let futureMatches = 0;
     let bestPastMatch = null;
     let maxPastLen = 0;
 
     for (const item of this.database) {
-      if (item.moves === historyStr || item.moves.startsWith(historyStr + " ")) {
-        const remaining = item.moves.length - historyStr.length;
-        if (remaining < minRemainingLen) {
-          minRemainingLen = remaining;
-          bestPrefixMatch = item;
-        }
+      if (item.moves === historyStr) {
+        exactMatch = item;
+      } else if (item.moves.startsWith(historyStr + " ")) {
+        futureMatches++;
       } else if (historyStr.startsWith(item.moves + " ") && item.moves.length > maxPastLen) {
         maxPastLen = item.moves.length;
         bestPastMatch = item;
       }
     }
 
-    if (bestPrefixMatch) {
+    if (exactMatch) {
       return {
-        name: bestPrefixMatch.name,
-        plan: bestPrefixMatch.plan,
+        name: exactMatch.name,
+        plan: exactMatch.plan,
         inBook: true
       };
     }
@@ -268,6 +266,13 @@ window.ChessOpenings = {
         name: bestPastMatch.name,
         plan: bestPastMatch.plan,
         inBook: false
+      };
+    }
+    if (futureMatches > 0) {
+      return {
+        name: "Дебютная подготовка",
+        plan: `Позиция совпадает с ${futureMatches} дебютными ветками. Не называем вариант до определяющего хода соперника.`,
+        inBook: true
       };
     }
 

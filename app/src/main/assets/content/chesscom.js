@@ -1,5 +1,15 @@
 (function () {
-  console.log("[ChessCoach STEALTH LEGIT v15.2 — Chess.com Fair Play Bypass, T1 Limiter & Bezier Engine] Запущен!");
+  const CONTENT_INSTANCE_KEY = Symbol.for("cc.chesscom.content.instance");
+  const previousContentInstance = window[CONTENT_INSTANCE_KEY];
+  try {
+    if (previousContentInstance?.isAlive?.()) return;
+    previousContentInstance?.shutdown?.();
+  } catch (e) {}
+  try { window.ChessFX?.revive?.(); } catch (e) {}
+  try { window.CC?.revive?.(); } catch (e) {}
+  try { window.ChessCoachEngine?.revive?.(); } catch (e) {}
+
+  console.log("[ChessCoach REWORK v15.8.1 — Engine Core 2, Full NNUE & Position-ID] Запущен!");
 
   function isStrictBrilliantMove(moveObj) {
     if (!moveObj) return false;
@@ -42,10 +52,33 @@
     gold: ["#ffbe0b", "#fb5607"],
     matrix: ["#38b000", "#ccff33"],
     titanium: ["#e0fbfc", "#98c1d9"],
-    obsidian: ["#f8fafc", "#94a3b8"]
+    obsidian: ["#f8fafc", "#94a3b8"],
+    nebula: ["#67e8f9", "#d946ef"],
+    grandmaster: ["#f8d477", "#6ee7b7"]
   };
+  const ARROW_STYLE_IDS = new Set([
+    "sq_cyber_frame", "sq_Step_badges", "sq_hologram_tiles", "sq_minimal_dots",
+    "curved_neon", "comet_trail", "cyber_chevron", "quantum_portal", "tube_3d", "plasma",
+    "sniper_3d", "dna_wave", "chroma_rgb", "laser", "classic", "dotted"
+  ]);
+  const MATE_STYLE_IDS = new Set(["phonk_skull", "orbital_laser", "royal_exec", "rofl_classic"]);
 
   const FILES = "abcdefgh";
+  const STORAGE_PREFIX = "chesscom.";
+  const SETTINGS_KEYS = Object.freeze([
+    "workMode", "activeTabId", "panelLeft", "panelTop", "panelMinimized", "panelHidden",
+    "customBgDataUrl", "customBgDim", "customBgBlur",
+    "liveTelemetryEnabled", "teleShowClocks", "teleShowEngine", "teleShowWdl", "teleShowThreats",
+    "elo", "style", "showArrows", "showEvalBar", "showAverageMove", "showWorstMove", "turnMode", "forcedMyColor",
+    "useStockfishWasm", "engineMaxMode", "trapRadarEnabled", "audioRadarEnabled", "heatmapAlwaysOn",
+    "uiTheme", "arrowStyle", "arrowScale", "arrowOpacity",
+    "phonkEditEnabled", "mateStyle", "roflMode", "safeAntiBanGuard", "welcomeBannerHidden",
+    "autoMoveEnabled", "legitAutoTiming", "humanHesitationEnabled", "autoT1LimiterEnabled", "maxSafeT1Percent",
+    "autoMoveDelayMs", "autoMoveJitterMs", "autoMoveTriggerRate",
+    "useAverageMoveSometimes", "averageMoveFrequency", "protectCriticalMoves", "autoClickMethod",
+    "chesscomVisualMaskV1"
+  ]);
+  const storageKey = key => `${STORAGE_PREFIX}${key}`;
 
   // На Chess.com доступны только безопасные профили: "legit" (по умолчанию) и "all" (расширенный легит)
   let workMode = "legit";
@@ -95,6 +128,7 @@
   let forcedMyColor = "auto";
 
   let useStockfishWasm = true;
+  let engineMaxMode = false;
   let trapRadarEnabled = true;
   let audioRadarEnabled = true;
   let heatmapAlwaysOn = false;
@@ -121,20 +155,53 @@
   let phonkEditEnabled = false;
   let mateStyle = "phonk_skull";
   let roflMode = true;
-  let safeAntiBanGuard = false;
+  let safeAntiBanGuard = true;
   let welcomeBannerHidden = false;
+
+  const DEFAULT_VISUAL_MASK = Object.freeze({
+    version: 1,
+    enabled: false,
+    myPresetId: "anonymous",
+    opponentPresetId: "nakamura",
+    style: "broadcast",
+    maskDetails: true,
+    maskPageTitle: true,
+    blockProfileHover: true,
+    autoRotateOpponent: false,
+    my: { nickname: "HiddenKnight", elo: 2400, title: "GM", countryCode: "", avatarUrl: "" },
+    opponent: { nickname: "Hikaru", elo: 2802, title: "GM", countryCode: "US", avatarUrl: "https://images.chesscomfiles.com/uploads/v1/user/15448422.88c010c1.200x200o.3c5619f5441e.png" }
+  });
+  let visualMask = normalizeVisualMask(DEFAULT_VISUAL_MASK);
+  let privacyMaskManager = null;
+  let privacyMaskFoundPlayers = 0;
+  let privacySaveTimer = null;
+  let uiAbortController = null;
 
   let castlingRights = { K: true, Q: true, k: true, q: true };
   let prevGridState = null;
   let prevBoardPartForHistory = "";
   let currentEpSquare = "-";
+  let halfmoveClock = 0;
+  let fullmoveNumber = 1;
   let lastPathname = location.pathname;
+  let historyBoardElement = null;
+  let lastObservedActualTurn = null;
   let lastRealEnemyMove = null;
   let lastOurExecutedMove = null;
 
   let committedBoardKey = "";
   let committedEnemyBoardKey = "";
   let analysisRequestId = 0;
+  let activeEngineBoardKey = "";
+  const analysisSessionId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  let positionId = 0;
+  let positionAnalysisId = 0;
+  let positionRequestId = 0;
+  let currentPositionKey = "";
+  let boardDirty = true;
+  let analysisRetryCount = 0;
+  let finalEngineRetryCount = 0;
+  let pendingAnalysisRetry = null;
   let cachedMoves = {
     best: null,
     average: null,
@@ -158,6 +225,9 @@
   let autoMoveTimer = null;
   let animRetryTimer = null;
   let isExecutingMove = false;
+  let activeNativeMove = null;
+  let nativeMoveFailureKey = "";
+  let nativeMoveFailures = 0;
   let moveCooldownUntil = 0;
   let currentTurnDecision = {
     boardKey: "",
@@ -176,192 +246,13 @@
 
   let shadowRoot = null;
   let extensionInvalidated = false;
+  let contentInstanceHandle = null;
   let mainIntervalId = null;
   let neuralCanvasRafId = null;
 
-  const StockfishWasmEngine = (function () {
-    let worker = null;
-    let isReady = false;
-    let isInitializing = false;
-    let activeJob = null;
-    let awaitingReadySync = false;
-
-    async function initWorker() {
-      if (worker || isInitializing || extensionInvalidated || !isContextValid()) return;
-      isInitializing = true;
-      try {
-        const scriptUrl = chrome.runtime.getURL("lib/stockfish-local.js");
-        const resp = await fetch(scriptUrl);
-        if (!resp.ok) throw new Error("Не удалось загрузить stockfish-local.js");
-        const codeText = await resp.text();
-        const blob = new Blob([codeText], { type: "application/javascript" });
-        const blobUrl = URL.createObjectURL(blob);
-
-        worker = new Worker(blobUrl);
-        worker.onmessage = (e) => handleEngineLine(String(e.data || ""));
-        worker.onerror = () => {
-          isReady = false;
-          isInitializing = false;
-        };
-
-        worker.postMessage("uci");
-        worker.postMessage("setoption name Threads value 1");
-        worker.postMessage("setoption name Hash value 16");
-        worker.postMessage("setoption name MultiPV value 3");
-        worker.postMessage("isready");
-      } catch (err) {
-        isInitializing = false;
-        worker = null;
-      }
-    }
-
-    function handleEngineLine(line) {
-      if (!line) return;
-      if (line.includes("uciok")) {
-        isReady = true;
-        isInitializing = false;
-        return;
-      }
-      if (line.includes("readyok")) {
-        isReady = true;
-        isInitializing = false;
-        if (awaitingReadySync && activeJob) {
-          awaitingReadySync = false;
-          try {
-            worker.postMessage(`setoption name MultiPV value ${activeJob.multiPv}`);
-            if (activeJob.useStartposMoves && activeJob.uciMoves && activeJob.uciMoves.length > 0) {
-              worker.postMessage(`position startpos moves ${activeJob.uciMoves.join(" ")}`);
-            } else {
-              worker.postMessage(`position fen ${activeJob.fen}`);
-            }
-            worker.postMessage(`go movetime ${activeJob.movetimeMs}`);
-          } catch (e) {}
-        }
-        return;
-      }
-
-      if (!activeJob || awaitingReadySync) return;
-
-      if (line.startsWith("info ") && line.includes(" pv ")) {
-        const depthMatch = line.match(/\bdepth\s+(\d+)/);
-        const mpvMatch = line.match(/\bmultipv\s+(\d+)/);
-        const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/);
-        const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/);
-        const pvSplit = line.split(" pv ");
-
-        if (pvSplit.length > 1) {
-          const moves = pvSplit[1].trim().split(/\s+/);
-          const firstUci = moves[0] || "";
-          if (firstUci.length >= 4) {
-            const mpvIdx = mpvMatch ? parseInt(mpvMatch[1], 10) : 1;
-            const depth = depthMatch ? parseInt(depthMatch[1], 10) : 1;
-            let scoreCp = 0;
-            let isMate = false;
-            let mateIn = null;
-
-            if (mateMatch) {
-              mateIn = parseInt(mateMatch[1], 10);
-              isMate = true;
-              scoreCp = mateIn > 0 ? (30000 - mateIn * 20) : (-30000 - mateIn * 20);
-            } else if (cpMatch) {
-              scoreCp = parseInt(cpMatch[1], 10);
-            }
-
-            activeJob.lines[mpvIdx] = {
-              uci: firstUci,
-              from: firstUci.slice(0, 2),
-              to: firstUci.slice(2, 4),
-              promo: firstUci.length > 4 ? firstUci[4].toLowerCase() : null,
-              depth,
-              scoreCp,
-              isMate,
-              mateIn,
-              pvChain: moves.slice(0, 4).map(u => `${u.slice(0, 2)}→${u.slice(2, 4)}`).join(" ➔ ")
-            };
-          }
-        }
-      } else if (line.startsWith("bestmove ")) {
-        const job = activeJob;
-        activeJob = null;
-        if (job.timer) clearTimeout(job.timer);
-        const parts = line.split(/\s+/);
-        const bestUci = parts[1] && parts[1] !== "(none)" ? parts[1] : null;
-        job.resolve({
-          bestUci,
-          lines: job.lines
-        });
-      }
-    }
-
-    function analyze(fen, movetimeMs = 190, multiPv = 3, uciMoves = [], useStartposMoves = false) {
-      return new Promise((resolve) => {
-        if (!useStockfishWasm || extensionInvalidated) {
-          resolve(null);
-          return;
-        }
-        if (!worker) {
-          initWorker();
-          resolve(null);
-          return;
-        }
-        if (!isReady) {
-          resolve(null);
-          return;
-        }
-
-        if (activeJob) {
-          if (activeJob.timer) clearTimeout(activeJob.timer);
-          activeJob.resolve(null);
-          activeJob = null;
-        }
-
-        const job = {
-          fen,
-          movetimeMs,
-          multiPv,
-          uciMoves: Array.isArray(uciMoves) ? uciMoves.slice() : [],
-          useStartposMoves: Boolean(useStartposMoves),
-          lines: {},
-          resolve,
-          timer: setTimeout(() => {
-            if (activeJob === job) {
-              try { worker.postMessage("stop"); } catch (e) {}
-              activeJob = null;
-              awaitingReadySync = false;
-              resolve({ bestUci: job.lines[1]?.uci || null, lines: job.lines });
-            }
-          }, movetimeMs + 160)
-        };
-
-        activeJob = job;
-        awaitingReadySync = true;
-        try {
-          worker.postMessage("stop");
-          worker.postMessage("isready");
-        } catch (e) {
-          clearTimeout(job.timer);
-          activeJob = null;
-          awaitingReadySync = false;
-          resolve(null);
-        }
-      });
-    }
-
-    function terminate() {
-      if (worker) {
-        try { worker.terminate(); } catch (e) {}
-        worker = null;
-        isReady = false;
-      }
-    }
-
-    return {
-      initWorker,
-      analyze,
-      terminate,
-      isReady: () => isReady
-    };
-  })();
+  const StockfishWasmEngine = window.ChessCoachEngine.create({
+    isEnabled: () => useStockfishWasm && !extensionInvalidated && isContextValid()
+  });
 
   function isContextValid() {
     try {
@@ -371,22 +262,90 @@
     }
   }
 
+  function handleAsyncStorageError(operation, error = null) {
+    let runtimeError = error;
+    if (!runtimeError) {
+      try {
+        runtimeError = chrome.runtime?.lastError || null;
+      } catch (e) {
+        runtimeError = e;
+      }
+    }
+    if (!runtimeError) return false;
+    const message = String(runtimeError.message || runtimeError);
+    console.warn(`[ChessCoach] ${operation}: ${message}`);
+    if (!isContextValid() || /extension context invalidated/i.test(message)) {
+      shutdownOrphanedScript();
+    } else {
+      setAutoStatusText("Ошибка доступа к настройкам Chrome", "#ffbe0b");
+    }
+    return true;
+  }
+
+  function handleEngineVisibilityChange(event) {
+    cancelNativeMove("visibility");
+    clearAnalysisRetry();
+    if (event?.type === "visibilitychange" && !document.hidden) {
+      committedBoardKey = "";
+      committedEnemyBoardKey = "";
+      activeEngineBoardKey = "";
+      forceRecalculate();
+      return;
+    }
+    analysisRequestId++;
+    activeEngineBoardKey = "";
+    resetTurnDecision();
+    StockfishWasmEngine.cancel?.();
+  }
+
   function shutdownOrphanedScript() {
+    if (extensionInvalidated) return;
     extensionInvalidated = true;
-    StockfishWasmEngine.terminate();
+    cancelNativeMove("shutdown");
+    clearAnalysisRetry();
+    try { StockfishWasmEngine.terminate(); } catch (e) {}
     if (mainIntervalId) { clearInterval(mainIntervalId); mainIntervalId = null; }
     if (neuralCanvasRafId) { cancelAnimationFrame(neuralCanvasRafId); neuralCanvasRafId = null; }
     if (autoMoveTimer) { clearTimeout(autoMoveTimer); autoMoveTimer = null; }
     if (animRetryTimer) { clearTimeout(animRetryTimer); animRetryTimer = null; }
-    if (window.ChessFX && shadowRoot) {
-      window.ChessFX.stopPhonkEdit(shadowRoot);
-    }
-    window.removeEventListener("scroll", syncVisualPosition);
+    if (privacySaveTimer) { clearTimeout(privacySaveTimer); privacySaveTimer = null; }
+    if (privacyMaskManager) { privacyMaskManager.destroy(); privacyMaskManager = null; }
+    if (uiAbortController) { uiAbortController.abort(); uiAbortController = null; }
+    try { chrome.storage?.onChanged?.removeListener(handleStorageChanges); } catch (e) {}
+    try {
+      if (typeof window.ChessFX?.shutdown === "function") window.ChessFX.shutdown(shadowRoot);
+      else if (window.ChessFX && shadowRoot) window.ChessFX.stopPhonkEdit(shadowRoot);
+    } catch (e) {}
+    try {
+      const destroyScripts = window.CC?.destroy || window.CC?.cleanup;
+      if (typeof destroyScripts === "function") destroyScripts.call(window.CC);
+    } catch (e) {}
+    window.removeEventListener("scroll", syncVisualPosition, true);
     window.removeEventListener("resize", syncVisualPosition);
+    document.removeEventListener?.("visibilitychange", handleEngineVisibilityChange);
+    window.removeEventListener("pagehide", handleEngineVisibilityChange);
+    window.removeEventListener("cc-mobile-lifecycle", handleMobileMoveLifecycle);
     try {
       if (domObserver) domObserver.disconnect();
+      if (boardResizeObserver) boardResizeObserver.disconnect();
     } catch (e) {}
+    if (shadowRoot?.host?.isConnected) shadowRoot.host.remove();
+    shadowRoot = null;
+    cachedChessComBoardElement = null;
+    cachedChessComRoots = [];
+    observedBoardNode = null;
+    observedBoardRoots = [];
+    window.__CHESSCOACH_BOARD_STATE__ = null;
+    if (window[CONTENT_INSTANCE_KEY] === contentInstanceHandle) {
+      try { delete window[CONTENT_INSTANCE_KEY]; } catch (e) {}
+    }
   }
+
+  contentInstanceHandle = Object.freeze({
+    isAlive: () => !extensionInvalidated && isContextValid(),
+    shutdown: () => shutdownOrphanedScript()
+  });
+  Object.defineProperty(window, CONTENT_INSTANCE_KEY, { value: contentInstanceHandle, configurable: true });
 
   function safeSendMessage(payload, callback) {
     if (extensionInvalidated || !isContextValid()) {
@@ -396,24 +355,33 @@
     try {
       chrome.runtime.sendMessage(payload, (res) => {
         try {
-          if (chrome.runtime.lastError) return;
+          if (chrome.runtime.lastError) {
+            if (callback) callback({ error: chrome.runtime.lastError.message, status: "error", meta: payload.meta || null });
+            return;
+          }
           if (callback) callback(res);
         } catch (err) {
           shutdownOrphanedScript();
         }
       });
     } catch (err) {
-      shutdownOrphanedScript();
+      if (callback) callback({ error: String(err?.message || err), status: "error", meta: payload.meta || null });
     }
   }
 
   function getShadow() {
-    if (shadowRoot) return shadowRoot;
+    if (shadowRoot) {
+      if (!shadowRoot.host.isConnected) document.documentElement.appendChild(shadowRoot.host);
+      return shadowRoot;
+    }
     // Полный DOM-стелс: никаких data-атрибутов или ID на хост-элементе в основном документе Chess.com
     const host = document.createElement("div");
     host.style.cssText = "all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483646;";
     document.documentElement.appendChild(host);
     shadowRoot = host.attachShadow({ mode: "closed" });
+    if (typeof window.__ChessCoachRegisterHudShadow === "function") {
+      window.__ChessCoachRegisterHudShadow(shadowRoot);
+    }
 
     if (isContextValid()) {
       const linkEl = document.createElement("link");
@@ -432,10 +400,16 @@
     if (extensionInvalidated || !isContextValid()) return;
     try {
       if (chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set(obj);
+        const scoped = Object.fromEntries(Object.entries(obj || {}).map(([key, value]) => [storageKey(key), value]));
+        const maybePromise = chrome.storage.local.set(scoped, () => {
+          handleAsyncStorageError("chrome.storage.local.set");
+        });
+        if (maybePromise?.catch) {
+          maybePromise.catch(error => handleAsyncStorageError("chrome.storage.local.set", error));
+        }
       }
     } catch (e) {
-      shutdownOrphanedScript();
+      handleAsyncStorageError("chrome.storage.local.set", e);
     }
   }
 
@@ -550,6 +524,7 @@
       useStockfishWasm = true;
       showAverageMove = true;
       showWorstMove = false;
+      engineMaxMode = false;
       legitAutoTiming = true;
       humanHesitationEnabled = true;
       autoT1LimiterEnabled = true;
@@ -568,6 +543,7 @@
           useStockfishWasm: true,
           showAverageMove: true,
           showWorstMove: false,
+          engineMaxMode: false,
           legitAutoTiming: true,
           protectCriticalMoves: true,
           useAverageMoveSometimes: true,
@@ -594,6 +570,7 @@
     const bottomUser = document.querySelector(
       ".board-layout-bottom .user-tagline-username, .board-layout-bottom [data-test-element='user-tagline-username'], .player-bottom .user-tagline-username"
     );
+    if (visualMask.enabled) return visualMask.my.nickname;
     if (bottomUser && bottomUser.textContent) {
       const clean = bottomUser.textContent.trim();
       if (clean && clean.length >= 2 && clean.length <= 24) return clean;
@@ -611,10 +588,15 @@
   }
 
   function initNeuralCanvasBackground(panel) {
+    if (window.__CC_ANDROID_RUNTIME__) return;
     const canvas = $("cc-neural-canvas");
     if (!canvas || !panel) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
 
     let width = 600;
     let height = 560;
@@ -638,7 +620,7 @@
       mouse.y = -999;
     });
 
-    const particles = Array.from({ length: 26 }, () => ({
+    const particles = Array.from({ length: 20 }, () => ({
       x: Math.random() * width,
       y: Math.random() * height,
       vx: (Math.random() - 0.5) * 0.45,
@@ -646,12 +628,24 @@
       r: Math.random() * 1.8 + 0.9
     }));
 
-    const renderFrame = () => {
+    let lastFrameAt = 0;
+    const renderFrame = (timestamp = 0) => {
       if (extensionInvalidated) return;
       if (panel.classList.contains("cc-minimized") || panel.style.display === "none") {
         neuralCanvasRafId = requestAnimationFrame(renderFrame);
         return;
       }
+      const performanceMode = window.ChessCoachEngine.getPerformanceMode?.() || "normal";
+      if (performanceMode === "critical") {
+        neuralCanvasRafId = requestAnimationFrame(renderFrame);
+        return;
+      }
+      const frameInterval = performanceMode === "constrained" ? 80 : 42;
+      if (timestamp - lastFrameAt < frameInterval) {
+        neuralCanvasRafId = requestAnimationFrame(renderFrame);
+        return;
+      }
+      lastFrameAt = timestamp;
 
       if (canvas.width !== panel.clientWidth || canvas.height !== panel.clientHeight) {
         updateSize();
@@ -709,26 +703,30 @@
     try {
       if (chrome.storage && chrome.storage.local) {
         chrome.storage.local.get(
-          [
-            "activeTabId", "panelLeft", "panelTop", "panelMinimized",
-            "customBgDataUrl", "customBgDim", "customBgBlur",
-            "liveTelemetryEnabled", "teleShowClocks", "teleShowEngine", "teleShowWdl", "teleShowThreats",
-            "elo", "style", "showArrows", "showEvalBar", "showAverageMove", "showWorstMove",
-            "useStockfishWasm", "trapRadarEnabled", "audioRadarEnabled", "heatmapAlwaysOn",
-            "uiTheme", "arrowStyle", "arrowScale", "arrowOpacity",
-            "phonkEditEnabled", "mateStyle", "roflMode", "safeAntiBanGuard", "welcomeBannerHidden",
-            "autoMoveEnabled", "legitAutoTiming", "humanHesitationEnabled", "autoT1LimiterEnabled", "maxSafeT1Percent",
-            "autoMoveDelayMs", "autoMoveJitterMs", "autoMoveTriggerRate",
-            "useAverageMoveSometimes", "averageMoveFrequency", "protectCriticalMoves", "autoClickMethod"
-          ],
+          [...SETTINGS_KEYS, ...SETTINGS_KEYS.map(storageKey)],
           (res) => {
-            if (!isContextValid() || !res) return;
-            workMode = "legit";
+            const storageFailed = handleAsyncStorageError("chrome.storage.local.get");
+            if (extensionInvalidated || !isContextValid()) return;
+            if (storageFailed || !res) res = {};
+            const rawSettings = res;
+            const migratedSettings = {};
+            res = {};
+            for (const key of SETTINGS_KEYS) {
+              const scopedName = storageKey(key);
+              if (Object.hasOwn(rawSettings, scopedName)) {
+                res[key] = rawSettings[scopedName];
+              } else if (Object.hasOwn(rawSettings, key)) {
+                res[key] = rawSettings[key];
+                migratedSettings[key] = rawSettings[key];
+              }
+            }
+            if (Object.keys(migratedSettings).length > 0) saveSetting(migratedSettings);
+            workMode = res.workMode === "all" ? "all" : "legit";
             if (res.activeTabId) activeTabId = res.activeTabId;
             if (typeof res.panelLeft === "number") panelLeft = res.panelLeft;
             if (typeof res.panelTop === "number") panelTop = res.panelTop;
             if (typeof res.panelMinimized === "boolean") panelMinimized = res.panelMinimized;
-            panelHidden = false;
+            if (typeof res.panelHidden === "boolean") panelHidden = res.panelHidden;
 
             if (typeof res.customBgDataUrl === "string") customBgDataUrl = res.customBgDataUrl;
             if (res.customBgDim !== undefined) customBgDim = Number(res.customBgDim);
@@ -740,18 +738,22 @@
             if (typeof res.teleShowWdl === "boolean") teleShowWdl = res.teleShowWdl;
             if (typeof res.teleShowThreats === "boolean") teleShowThreats = res.teleShowThreats;
 
-            if (res.elo) currentElo = Number(res.elo);
-            if (res.style) currentStyle = res.style;
+            const storedElo = Number(res.elo);
+            if (Number.isFinite(storedElo)) currentElo = Math.max(400, Math.min(3000, Math.round(storedElo)));
+            if (typeof res.style === "string" && Object.hasOwn(ALL_STYLE_NAMES, res.style)) currentStyle = res.style;
             if (typeof res.showArrows === "boolean") showArrows = res.showArrows;
             if (typeof res.showEvalBar === "boolean") showEvalBar = res.showEvalBar;
-            showAverageMove = true;
+            if (typeof res.showAverageMove === "boolean") showAverageMove = res.showAverageMove;
             if (typeof res.showWorstMove === "boolean") showWorstMove = res.showWorstMove;
+            if (["my", "auto", "w", "b"].includes(res.turnMode)) turnMode = res.turnMode;
+            if (["auto", "w", "b"].includes(res.forcedMyColor)) forcedMyColor = res.forcedMyColor;
             if (typeof res.useStockfishWasm === "boolean") useStockfishWasm = res.useStockfishWasm;
+            if (typeof res.engineMaxMode === "boolean") engineMaxMode = res.engineMaxMode;
             if (typeof res.trapRadarEnabled === "boolean") trapRadarEnabled = res.trapRadarEnabled;
             if (typeof res.audioRadarEnabled === "boolean") audioRadarEnabled = res.audioRadarEnabled;
             if (typeof res.heatmapAlwaysOn === "boolean") heatmapAlwaysOn = res.heatmapAlwaysOn;
 
-            if (res.uiTheme) uiTheme = res.uiTheme;
+            if (typeof res.uiTheme === "string" && THEME_ACCENT_COLORS[res.uiTheme]) uiTheme = res.uiTheme;
             if (res.arrowStyle) arrowStyle = res.arrowStyle;
             if (res.arrowScale) arrowScale = Number(res.arrowScale);
             if (res.arrowOpacity) arrowOpacity = Number(res.arrowOpacity);
@@ -775,10 +777,20 @@
             if (res.autoClickMethod === "bezier_click" || res.autoClickMethod === "bezier_drag") {
               autoClickMethod = res.autoClickMethod;
             }
-
-            if (useStockfishWasm) {
-              StockfishWasmEngine.initWorker();
+            if (engineMaxMode) {
+              useStockfishWasm = true;
+              currentElo = 3000;
+              currentStyle = "balanced";
+              showAverageMove = false;
+              useAverageMoveSometimes = false;
+              autoT1LimiterEnabled = false;
+              humanHesitationEnabled = false;
+              legitAutoTiming = false;
+              autoMoveTriggerRate = 100;
             }
+            visualMask = normalizeVisualMask(res.chesscomVisualMaskV1 || DEFAULT_VISUAL_MASK);
+            ensurePrivacyMaskManager();
+            privacyMaskManager?.update();
 
             ensurePanel();
             applyCustomBackgroundToPanel();
@@ -799,18 +811,20 @@
     if (!card) return;
     card.style.display = liveTelemetryEnabled ? "flex" : "none";
     if (!liveTelemetryEnabled) return;
+    const telemetry = lastTelemetryData || {};
 
     const mySecs = getMyRemainingSeconds();
     const enSecs = getEnemyRemainingSeconds();
-    const diffSecs = (mySecs < 900 && enSecs < 900) ? Math.round(mySecs - enSecs) : 0;
-    const diffStr = diffSecs > 0 ? `+${diffSecs}с` : `${diffSecs}с`;
+    const clocksKnown = Number.isFinite(mySecs) && Number.isFinite(enSecs);
+    const diffSecs = clocksKnown ? Math.round(mySecs - enSecs) : 0;
+    const diffStr = clocksKnown ? (diffSecs > 0 ? `+${diffSecs}с` : `${diffSecs}с`) : "—";
 
     const boxClocks = $("cc-tele-box-clocks");
     if (boxClocks) {
       boxClocks.style.display = teleShowClocks ? "block" : "none";
       const valEl = $("cc-tele-clocks-val");
       if (valEl) {
-        valEl.innerHTML = `<span style="color:#00f5d4;">${formatClockMMSS(mySecs)}</span> vs <span style="color:#ff4d94;">${formatClockMMSS(enSecs)}</span> <small style="color:#ffbe0b;">(${diffStr})</small>`;
+        valEl.innerHTML = `<span style="color:var(--cc-positive);">${formatClockMMSS(mySecs)}</span> vs <span style="color:var(--cc-negative);">${formatClockMMSS(enSecs)}</span> <small style="color:var(--cc-warning);">(${diffStr})</small>`;
       }
     }
 
@@ -819,20 +833,21 @@
       boxEngine.style.display = teleShowEngine ? "block" : "none";
       const valEl = $("cc-tele-engine-val");
       if (valEl) {
-        const wasmBadge = useStockfishWasm ? "SF WASM" : "JS CORE";
-        valEl.textContent = `${wasmBadge} • ${lastTelemetryData.serverSource || "STEALTH"}`;
+        const wasmBadge = useStockfishWasm ? "SF LOCAL" : "JS CORE";
+        const source = telemetry.serverSource || "STEALTH";
+        valEl.textContent = source.startsWith("SF LOCAL") ? source : `${wasmBadge} • ${source}`;
       }
     }
 
     const boxWdl = $("cc-tele-box-wdl");
     if (boxWdl) {
       boxWdl.style.display = teleShowWdl ? "block" : "none";
-      const w = lastTelemetryData.myWin ?? 50;
-      const d = lastTelemetryData.draw ?? 30;
-      const l = lastTelemetryData.enemyWin ?? 20;
+      const w = telemetry.myWin ?? 50;
+      const d = telemetry.draw ?? 30;
+      const l = telemetry.enemyWin ?? 20;
       const valEl = $("cc-tele-wdl-val");
       if (valEl) {
-        valEl.innerHTML = `<span style="color:#00f5d4;">Поб: ${w}%</span> • <span style="color:#cbd5e1;">Нич: ${d}%</span> • <span style="color:#ff4d94;">Пор: ${l}%</span>`;
+        valEl.innerHTML = `<span style="color:var(--cc-positive);">Поб: ${w}%</span> • <span style="color:var(--cc-text-secondary);">Нич: ${d}%</span> • <span style="color:var(--cc-negative);">Пор: ${l}%</span>`;
       }
       if ($("cc-wdl-fill-w")) $("cc-wdl-fill-w").style.width = `${w}%`;
       if ($("cc-wdl-fill-d")) $("cc-wdl-fill-d").style.width = `${d}%`;
@@ -844,7 +859,7 @@
       boxThreats.style.display = teleShowThreats ? "block" : "none";
       const valEl = $("cc-tele-threats-val");
       if (valEl) {
-        valEl.textContent = lastTelemetryData.nearestThreatText || "Угроз не обнаружено";
+        valEl.textContent = telemetry.nearestThreatText || "Угроз не обнаружено";
       }
     }
   }
@@ -858,10 +873,7 @@
       btn.classList.toggle("active", btn.dataset.mode === workMode);
     });
 
-    const allThemes = [
-      "theme-minimal", "theme-cyberpunk", "theme-aurora", "theme-hologram",
-      "theme-crimson", "theme-gold", "theme-matrix", "theme-titanium", "theme-obsidian"
-    ];
+    const allThemes = Object.keys(THEME_ACCENT_COLORS).map(name => `theme-${name}`);
     allThemes.forEach((cls) => panel.classList.remove(cls));
     panel.classList.add(`theme-${uiTheme}`);
 
@@ -880,13 +892,20 @@
       }
       const wasmChip = $("cc-welcome-chip-wasm");
       if (wasmChip) {
-        wasmChip.textContent = useStockfishWasm ? "⚡ SF WASM + Безье: ВКЛ" : "⚙ JS Core + Безье: ВКЛ";
+        wasmChip.textContent = useStockfishWasm ? "⚡ SF LOCAL + Безье: ВКЛ" : "⚙ JS Core + Безье: ВКЛ";
       }
     }
 
     if ($("cc-elo-slider")) $("cc-elo-slider").value = currentElo;
     if ($("cc-elo-val")) $("cc-elo-val").textContent = `${currentElo} ELO`;
     if ($("cc-elo-badge")) $("cc-elo-badge").textContent = `${currentElo} ELO`;
+    const enginePower = $("cc-engine-power");
+    if (enginePower && (!cachedMoves.engineMeta || !useStockfishWasm)) {
+      const resources = StockfishWasmEngine.getResourceProfile?.() || { dualWorker: false, totalHashMb: 64 };
+      enginePower.textContent = useStockfishWasm
+        ? `${resources.fullNnue ? "SF FULL" : "SF"} ${resources.dualWorker ? 2 : 1}C · H${resources.totalHashMb}M`
+        : "JS CORE";
+    }
 
     const styleLabel = ALL_STYLE_NAMES[currentStyle] || "✦ Таль";
     const bestMv = cachedMoves.best;
@@ -915,6 +934,7 @@
     if ($("cc-show-worst-chk")) $("cc-show-worst-chk").checked = showWorstMove;
 
     if ($("cc-sf-wasm-chk")) $("cc-sf-wasm-chk").checked = useStockfishWasm;
+    if ($("cc-engine-max-chk")) $("cc-engine-max-chk").checked = engineMaxMode;
     if ($("cc-trap-radar-chk")) $("cc-trap-radar-chk").checked = trapRadarEnabled;
     if ($("cc-audio-radar-chk")) $("cc-audio-radar-chk").checked = audioRadarEnabled;
     if ($("cc-heatmap-always-chk")) $("cc-heatmap-always-chk").checked = heatmapAlwaysOn;
@@ -957,6 +977,7 @@
     if ($("cc-auto-avg-freq-val")) $("cc-auto-avg-freq-val").textContent = `${averageMoveFrequency}%`;
     if ($("cc-auto-protect-chk")) $("cc-auto-protect-chk").checked = protectCriticalMoves;
     setSelectSafe($("cc-auto-method-select"), autoClickMethod, "bezier_click");
+    setSelectSafe($("cc-turn-select"), turnMode, "my");
 
     setSelectSafe($("cc-vis-theme"), uiTheme, "cyberpunk");
     setSelectSafe($("cc-vis-arrow-style"), arrowStyle, "curved_neon");
@@ -976,6 +997,33 @@
     if ($("cc-bg-blur-slider")) $("cc-bg-blur-slider").value = customBgBlur;
     if ($("cc-bg-blur-val")) $("cc-bg-blur-val").textContent = `${customBgBlur}px`;
 
+    if ($("cc-mask-enabled-chk")) $("cc-mask-enabled-chk").checked = visualMask.enabled;
+    if ($("cc-mask-details-chk")) $("cc-mask-details-chk").checked = visualMask.maskDetails;
+    if ($("cc-mask-title-chk")) $("cc-mask-title-chk").checked = visualMask.maskPageTitle;
+    if ($("cc-mask-hover-chk")) $("cc-mask-hover-chk").checked = visualMask.blockProfileHover;
+    if ($("cc-mask-rotate-chk")) $("cc-mask-rotate-chk").checked = visualMask.autoRotateOpponent;
+    setSelectSafe($("cc-mask-style-select"), visualMask.style, "broadcast");
+    setSelectSafe($("cc-mask-my-preset"), visualMask.myPresetId, "custom");
+    setSelectSafe($("cc-mask-opponent-preset"), visualMask.opponentPresetId, "custom");
+    setSelectSafe($("cc-mask-my-title"), visualMask.my.title, "");
+    setSelectSafe($("cc-mask-opponent-title"), visualMask.opponent.title, "");
+    if ($("cc-mask-my-name")) $("cc-mask-my-name").value = visualMask.my.nickname;
+    if ($("cc-mask-opponent-name")) $("cc-mask-opponent-name").value = visualMask.opponent.nickname;
+    if ($("cc-mask-my-elo")) $("cc-mask-my-elo").value = visualMask.my.elo;
+    if ($("cc-mask-opponent-elo")) $("cc-mask-opponent-elo").value = visualMask.opponent.elo;
+    const preview = $("cc-mask-preview");
+    if (preview) preview.setAttribute("data-mask-style", visualMask.style);
+    if ($("cc-mask-preview-my-name")) $("cc-mask-preview-my-name").textContent = `${visualMask.my.title ? `${visualMask.my.title} ` : ""}${visualMask.my.nickname}`;
+    if ($("cc-mask-preview-my-elo")) $("cc-mask-preview-my-elo").textContent = `${visualMask.my.elo}`;
+    if ($("cc-mask-preview-opponent-name")) $("cc-mask-preview-opponent-name").textContent = `${visualMask.opponent.title ? `${visualMask.opponent.title} ` : ""}${visualMask.opponent.nickname}`;
+    if ($("cc-mask-preview-opponent-elo")) $("cc-mask-preview-opponent-elo").textContent = `${visualMask.opponent.elo}`;
+    const privacyApi = window.ChessCoachPrivacyMask;
+    if ($("cc-mask-preview-my-avatar")) $("cc-mask-preview-my-avatar").src = visualMask.my.avatarUrl || privacyApi?.makeGeneratedAvatar(visualMask.my.nickname) || "";
+    if ($("cc-mask-preview-opponent-avatar")) $("cc-mask-preview-opponent-avatar").src = visualMask.opponent.avatarUrl || privacyApi?.makeGeneratedAvatar(visualMask.opponent.nickname) || "";
+    if ($("cc-mask-preview-my-flag")) $("cc-mask-preview-my-flag").textContent = privacyApi?.countryCodeToEmoji(visualMask.my.countryCode) || "♟";
+    if ($("cc-mask-preview-opponent-flag")) $("cc-mask-preview-opponent-flag").textContent = privacyApi?.countryCodeToEmoji(visualMask.opponent.countryCode) || "♟";
+    updatePrivacyMaskStatus();
+
     getShadow().querySelectorAll(".cc-style-btn").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.style === currentStyle);
     });
@@ -992,6 +1040,55 @@
     }
   }
 
+  function setMoveExecutionState(executing, reason = "") {
+    isExecutingMove = Boolean(executing);
+    window.dispatchEvent(new CustomEvent("cc-core-state", {
+      detail: { source: "chesscoach-core", platform: "chesscom", executing: isExecutingMove, allowOverlayPassthrough: isExecutingMove, reason }
+    }));
+  }
+
+  function cancelNativeMove(reason) {
+    if (!activeNativeMove) return;
+    const action = activeNativeMove;
+    action.controller.abort();
+    if (action.failureKey === nativeMoveFailureKey && action.attempt === nativeMoveFailures) nativeMoveFailures = Math.max(0, nativeMoveFailures - 1);
+    try { window.__CC_ANDROID_RUNTIME__?.nativeRequest("input.cancel", {}).catch(() => {}); } catch (e) {}
+    activeNativeMove = null;
+    setMoveExecutionState(false, reason);
+  }
+
+  function handleMobileMoveLifecycle(event) {
+    const detail = event?.detail;
+    if (detail?.cancelPendingMoves === true || detail?.state === "settings") {
+      resetTurnDecision();
+      cancelNativeMove("mobile-pause");
+      if (autoMoveEnabled) setAutoStatusText(detail?.state === "settings" ? "Автоход на паузе: открыты настройки" : "Автоход приостановлен", "#ffbe0b");
+    } else if (detail?.state === "active") {
+      scheduleAutoMoveIfNeeded();
+    }
+  }
+
+  function clearAnalysisRetry() {
+    if (pendingAnalysisRetry) clearTimeout(pendingAnalysisRetry.timer);
+    pendingAnalysisRetry = null;
+  }
+
+  function scheduleAnalysisRetry(state, delayMs) {
+    clearAnalysisRetry();
+    const retry = { positionId: state.positionId, positionKey: state.positionKey, url: location.href, notBefore: Date.now() + delayMs, timer: null };
+    pendingAnalysisRetry = retry;
+    committedBoardKey = state.boardKey;
+    retry.timer = setTimeout(() => {
+      if (pendingAnalysisRetry !== retry) return;
+      pendingAnalysisRetry = null;
+      if (extensionInvalidated || document.hidden || location.href !== retry.url ||
+          positionId !== retry.positionId || currentPositionKey !== retry.positionKey) return;
+      // Unlock immediately before the retry, never while the polling interval is still active.
+      committedBoardKey = "";
+      runCycle(false);
+    }, delayMs);
+  }
+
   function resetTurnDecision() {
     clearTimeout(autoMoveTimer);
     autoMoveTimer = null;
@@ -1006,25 +1103,134 @@
     };
   }
 
-  function forceRecalculate() {
+  function clearPositionPresentation(label = "СИНХРОНИЗАЦИЯ ПОЗИЦИИ...") {
+    if (autoMoveTimer) { clearTimeout(autoMoveTimer); autoMoveTimer = null; }
+    cachedMoves = { best: null, average: null, worst: null, heatmap: [], boardKey: "", positionId: -1, qualityRank: -1 };
     committedBoardKey = "";
     committedEnemyBoardKey = "";
+    activeEngineBoardKey = "";
+    resetTurnDecision();
+    hideArrows();
+    renderEvalBar(null, 0);
+    const activeBox = $("cc-my-turn-active");
+    if (activeBox) activeBox.style.display = "flex";
+    if ($("cc-best-desc")) $("cc-best-desc").textContent = label;
+    if ($("cc-best-eval")) $("cc-best-eval").textContent = "--";
+    if ($("cc-best-pv")) $("cc-best-pv").textContent = "Ожидаем стабильную доску";
+    if ($("cc-avg-box")) $("cc-avg-box").style.display = "none";
+    if ($("cc-worst-box")) $("cc-worst-box").style.display = "none";
+    for (const id of ["cc-mate-banner", "cc-time-sniper-banner", "cc-roast-box"]) {
+      const node = $(id); if (node) node.style.display = "none";
+    }
+    if ($("cc-opening-name")) $("cc-opening-name").textContent = "◈ ОБНОВЛЕНИЕ ПОЗИЦИИ";
+    if ($("cc-opening-plan")) $("cc-opening-plan").textContent = "Ожидаем новый анализ";
+    if ($("cc-tele-threats-val")) $("cc-tele-threats-val").textContent = "Синхронизация позиции...";
+    lastTelemetryData = null;
+    updateEvalMoodAndEngineBadge(null, null);
+  }
+
+  function markBoardDirty(reason = "DOM") {
+    if (boardDirty && reason !== "BOARD_REPLACED") return;
+    boardDirty = true;
+    hideArrows();
+    // Piece styling alone must not cancel or restart canonical-position analysis.
+    if (reason !== "BOARD_REPLACED" && reason !== "NO_BOARD") return;
+    clearAnalysisRetry();
+    positionAnalysisId++;
+    analysisRequestId++;
+    StockfishWasmEngine.cancel?.();
+    clearPositionPresentation("СИНХРОНИЗАЦИЯ ПОЗИЦИИ...");
+  }
+
+  function adoptPositionState(state) {
+    if (!state?.positionKey) return null;
+    const restoreArrows = boardDirty && state.positionKey === currentPositionKey && cachedMoves.boardKey === state.boardKey;
+    if (state.positionKey !== currentPositionKey) {
+      clearAnalysisRetry();
+      if (currentPositionKey) {
+        analysisRequestId++;
+        StockfishWasmEngine.cancel?.();
+        clearPositionPresentation("НОВАЯ ПОЗИЦИЯ • АНАЛИЗ...");
+      }
+      currentPositionKey = state.positionKey;
+      positionId++;
+      positionAnalysisId++;
+      analysisRetryCount = 0;
+      finalEngineRetryCount = 0;
+    }
+    boardDirty = false;
+    state.sessionId = analysisSessionId;
+    state.positionId = positionId;
+    state.positionKey = currentPositionKey;
+    if (window.__CHESSCOACH_BOARD_STATE__) {
+      window.__CHESSCOACH_BOARD_STATE__.positionId = positionId;
+      window.__CHESSCOACH_BOARD_STATE__.positionKey = currentPositionKey;
+    }
+    if (restoreArrows) renderArrowsOverlay(state, cachedMoves);
+    return state;
+  }
+
+  function createAnalysisMeta(state, pass, analysisId) {
+    return {
+      sessionId: analysisSessionId,
+      positionId: state.positionId,
+      analysisId,
+      requestId: ++positionRequestId,
+      pass,
+      positionKey: state.positionKey,
+      analysisKey: state.boardKey,
+      elo: currentElo,
+      engineMaxMode
+    };
+  }
+
+  function isCurrentAnalysisMeta(meta) {
+    if (boardDirty && meta?.sessionId === analysisSessionId && meta.positionId === positionId && meta.analysisId === positionAnalysisId) {
+      const fresh = captureBoardState(true);
+      if (!fresh || fresh.animating) {
+        committedBoardKey = "";
+        activeEngineBoardKey = "";
+        return false;
+      }
+      adoptPositionState(fresh);
+    }
+    return Boolean(meta && !boardDirty && meta.sessionId === analysisSessionId && meta.positionId === positionId && meta.analysisId === positionAnalysisId && meta.positionKey === currentPositionKey);
+  }
+
+  function isCachedAnalysisCurrent(state = null) {
+    const hasVisual = Boolean(cachedMoves?.best || cachedMoves?.heatmap?.length);
+    if (!currentPositionKey) return Boolean(hasVisual && (!state || !cachedMoves.boardKey || cachedMoves.boardKey === state.boardKey));
+    return Boolean(!boardDirty && hasVisual && cachedMoves.positionId === positionId && (!state || state.positionKey === currentPositionKey));
+  }
+
+  function forceRecalculate() {
+    cancelNativeMove("recalculate");
+    clearAnalysisRetry();
+    committedBoardKey = "";
+    committedEnemyBoardKey = "";
+    finalEngineRetryCount = 0;
+    positionAnalysisId++;
     resetTurnDecision();
     runCycle(true);
   }
 
   function switchTab(tabId, saveToStorage = true) {
-    activeTabId = tabId;
-    getShadow().querySelectorAll(".cc-tab-btn").forEach((b) => {
-      b.classList.toggle("active", b.dataset.tab === tabId);
+    const buttons = [...getShadow().querySelectorAll(".cc-tab-btn")];
+    const panes = [...getShadow().querySelectorAll(".cc-tab-pane")];
+    const isValid = buttons.some(button => button.dataset.tab === tabId) && panes.some(pane => pane.id === `cc-pane-${tabId}`);
+    const scriptsPendingInjection = tabId === "scripts" && !isValid;
+    const safeTabId = isValid ? tabId : "analyzer";
+    activeTabId = scriptsPendingInjection ? "scripts" : safeTabId;
+    buttons.forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === safeTabId);
     });
-    getShadow().querySelectorAll(".cc-tab-pane").forEach((p) => {
-      p.classList.toggle("active", p.id === `cc-pane-${tabId}`);
+    panes.forEach((p) => {
+      p.classList.toggle("active", p.id === `cc-pane-${safeTabId}`);
     });
-    if (saveToStorage) {
-      saveSetting({ activeTabId: tabId });
+    if (saveToStorage || (!isValid && !scriptsPendingInjection)) {
+      saveSetting({ activeTabId: safeTabId });
     }
-    if (tabId === "analyzer") {
+    if (safeTabId === "analyzer") {
       renderLiveEvalGraph();
     }
   }
@@ -1032,7 +1238,7 @@
   function buildCurrentConfigPayload(configName = "ChessCom_Legit", includeBg = true) {
     return {
       signature: "CHESSCOACH_CONFIG_V15",
-      version: "15.2.0",
+      version: "15.8.0",
       platform: "chess.com",
       name: configName,
       exportedAt: new Date().toISOString(),
@@ -1047,6 +1253,7 @@
         turnMode,
         forcedMyColor,
         useStockfishWasm,
+        engineMaxMode,
         trapRadarEnabled,
         audioRadarEnabled,
         heatmapAlwaysOn,
@@ -1075,6 +1282,7 @@
         mateStyle,
         roflMode,
         safeAntiBanGuard,
+        visualMask,
         customBgDataUrl: includeBg ? customBgDataUrl : "",
         customBgDim,
         customBgBlur
@@ -1086,19 +1294,26 @@
     if (!rawObj || typeof rawObj !== "object") return false;
     const s = (rawObj.signature === "CHESSCOACH_CONFIG_V15" && rawObj.settings) ? rawObj.settings : rawObj;
     if (!s || typeof s !== "object") return false;
+    const knownKeys = [
+      "workMode", "elo", "style", "showArrows", "showEvalBar", "showAverageMove", "showWorstMove",
+      "turnMode", "forcedMyColor", "useStockfishWasm", "engineMaxMode", "uiTheme", "arrowStyle", "visualMask",
+      "autoMoveEnabled", "customBgDataUrl"
+    ];
+    if (!knownKeys.some(key => Object.prototype.hasOwnProperty.call(s, key))) return false;
 
-    workMode = "legit";
+    if (s.workMode === "legit" || s.workMode === "all") workMode = s.workMode;
     if (s.elo !== undefined) currentElo = Math.max(400, Math.min(3000, Number(s.elo) || 2400));
     if (typeof s.style === "string" && ALL_STYLE_NAMES[s.style]) currentStyle = s.style;
 
     if (typeof s.showArrows === "boolean") showArrows = s.showArrows;
     if (typeof s.showEvalBar === "boolean") showEvalBar = s.showEvalBar;
-    showAverageMove = true;
+    if (typeof s.showAverageMove === "boolean") showAverageMove = s.showAverageMove;
     if (typeof s.showWorstMove === "boolean") showWorstMove = s.showWorstMove;
-    if (typeof s.turnMode === "string") turnMode = s.turnMode;
-    if (typeof s.forcedMyColor === "string") forcedMyColor = s.forcedMyColor;
+    if (["my", "auto", "w", "b"].includes(s.turnMode)) turnMode = s.turnMode;
+    if (["auto", "w", "b"].includes(s.forcedMyColor)) forcedMyColor = s.forcedMyColor;
 
     if (typeof s.useStockfishWasm === "boolean") useStockfishWasm = s.useStockfishWasm;
+    if (typeof s.engineMaxMode === "boolean") engineMaxMode = s.engineMaxMode;
     if (typeof s.trapRadarEnabled === "boolean") trapRadarEnabled = s.trapRadarEnabled;
     if (typeof s.audioRadarEnabled === "boolean") audioRadarEnabled = s.audioRadarEnabled;
     if (typeof s.heatmapAlwaysOn === "boolean") heatmapAlwaysOn = s.heatmapAlwaysOn;
@@ -1113,31 +1328,32 @@
     if (typeof s.legitAutoTiming === "boolean") legitAutoTiming = s.legitAutoTiming;
     if (typeof s.humanHesitationEnabled === "boolean") humanHesitationEnabled = s.humanHesitationEnabled;
     if (typeof s.autoT1LimiterEnabled === "boolean") autoT1LimiterEnabled = s.autoT1LimiterEnabled;
-    if (s.maxSafeT1Percent !== undefined) maxSafeT1Percent = Number(s.maxSafeT1Percent);
-    if (s.autoMoveDelayMs !== undefined) autoMoveDelayMs = Math.max(220, Number(s.autoMoveDelayMs));
-    if (s.autoMoveJitterMs !== undefined) autoMoveJitterMs = Number(s.autoMoveJitterMs);
-    if (s.autoMoveTriggerRate !== undefined) autoMoveTriggerRate = Number(s.autoMoveTriggerRate);
+    if (s.maxSafeT1Percent !== undefined) maxSafeT1Percent = Math.max(50, Math.min(80, Number(s.maxSafeT1Percent) || 66));
+    if (s.autoMoveDelayMs !== undefined) autoMoveDelayMs = Math.max(220, Math.min(2500, Number(s.autoMoveDelayMs) || 540));
+    if (s.autoMoveJitterMs !== undefined) autoMoveJitterMs = Math.max(60, Math.min(1000, Number(s.autoMoveJitterMs) || 260));
+    if (s.autoMoveTriggerRate !== undefined) autoMoveTriggerRate = Math.max(20, Math.min(100, Number(s.autoMoveTriggerRate) || 85));
     if (typeof s.useAverageMoveSometimes === "boolean") useAverageMoveSometimes = s.useAverageMoveSometimes;
-    if (s.averageMoveFrequency !== undefined) averageMoveFrequency = Number(s.averageMoveFrequency);
+    if (s.averageMoveFrequency !== undefined) averageMoveFrequency = Math.max(10, Math.min(75, Number(s.averageMoveFrequency) || 30));
     if (typeof s.protectCriticalMoves === "boolean") protectCriticalMoves = s.protectCriticalMoves;
     if (s.autoClickMethod === "bezier_click" || s.autoClickMethod === "bezier_drag") {
       autoClickMethod = s.autoClickMethod;
     }
 
-    if (typeof s.uiTheme === "string") uiTheme = s.uiTheme;
-    if (typeof s.arrowStyle === "string") arrowStyle = s.arrowStyle;
-    if (s.arrowScale !== undefined) arrowScale = Number(s.arrowScale);
-    if (s.arrowOpacity !== undefined) arrowOpacity = Number(s.arrowOpacity);
+    if (typeof s.uiTheme === "string" && THEME_ACCENT_COLORS[s.uiTheme]) uiTheme = s.uiTheme;
+    if (ARROW_STYLE_IDS.has(s.arrowStyle)) arrowStyle = s.arrowStyle;
+    if (s.arrowScale !== undefined) arrowScale = Math.max(0.6, Math.min(1.6, Number(s.arrowScale) || 1));
+    if (s.arrowOpacity !== undefined) arrowOpacity = Math.max(0.3, Math.min(1, Number(s.arrowOpacity) || 0.88));
     if (typeof s.phonkEditEnabled === "boolean") phonkEditEnabled = s.phonkEditEnabled;
-    if (typeof s.mateStyle === "string") mateStyle = s.mateStyle;
+    if (MATE_STYLE_IDS.has(s.mateStyle)) mateStyle = s.mateStyle;
     if (typeof s.roflMode === "boolean") roflMode = s.roflMode;
     if (typeof s.safeAntiBanGuard === "boolean") safeAntiBanGuard = s.safeAntiBanGuard;
 
-    if (typeof s.customBgDataUrl === "string" && s.customBgDataUrl.length > 0) {
+    if (typeof s.customBgDataUrl === "string" && (s.customBgDataUrl === "" || s.customBgDataUrl.startsWith("data:image/"))) {
       customBgDataUrl = s.customBgDataUrl;
     }
-    if (s.customBgDim !== undefined) customBgDim = Number(s.customBgDim);
-    if (s.customBgBlur !== undefined) customBgBlur = Number(s.customBgBlur);
+    if (s.customBgDim !== undefined) customBgDim = Math.max(0.2, Math.min(0.92, Number(s.customBgDim) || 0.72));
+    if (s.customBgBlur !== undefined) customBgBlur = Math.max(0, Math.min(16, Number(s.customBgBlur) || 0));
+    if (s.visualMask && typeof s.visualMask === "object") visualMask = normalizeVisualMask(s.visualMask);
 
     if (useStockfishWasm) {
       StockfishWasmEngine.initWorker();
@@ -1151,7 +1367,10 @@
       showEvalBar,
       showAverageMove,
       showWorstMove,
+      turnMode,
+      forcedMyColor,
       useStockfishWasm,
+      engineMaxMode,
       trapRadarEnabled,
       audioRadarEnabled,
       heatmapAlwaysOn,
@@ -1180,12 +1399,15 @@
       mateStyle,
       roflMode,
       safeAntiBanGuard,
+      chesscomVisualMaskV1: visualMask,
       customBgDataUrl,
       customBgDim,
       customBgBlur
     });
 
     applyCustomBackgroundToPanel();
+    ensurePrivacyMaskManager();
+    privacyMaskManager?.update();
     updateUIValues();
     forceRecalculate();
     return true;
@@ -1207,6 +1429,7 @@
           <span class="cc-brand-dot"></span>
           <span>CHESSCOACH // CHESS.COM STEALTH</span>
           <span class="cc-badge" id="cc-elo-badge">${currentElo} ELO</span>
+          <span class="cc-engine-power" id="cc-engine-power">JS CORE</span>
           <span class="cc-deep-status" id="cc-deep-status">⚡ ДОРАСЧЕТ...</span>
         </div>
         <div class="cc-header-controls">
@@ -1242,6 +1465,9 @@
             </button>
             <button class="cc-tab-btn" data-tab="visuals">
               <span class="cc-tab-icon">✦</span> ВИЗУАЛ
+            </button>
+            <button class="cc-tab-btn" data-tab="privacy">
+              <span class="cc-tab-icon">◉</span> ЗАПИСЬ
             </button>
             <button class="cc-tab-btn" data-tab="misc">
               <span class="cc-tab-icon">❖</span> БАЗА / КФГ
@@ -1281,7 +1507,7 @@
               <div class="cc-welcome-chips">
                 <span class="cc-welcome-chip" id="cc-welcome-chip-mode">🛡 Профиль: Stealth Legit</span>
                 <span class="cc-welcome-chip" id="cc-welcome-chip-cpu">🎯 T1-Лимитер: <= 66%</span>
-                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF WASM + Безье: ВКЛ</span>
+                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF LOCAL + Безье: ВКЛ</span>
               </div>
             </div>
 
@@ -1322,7 +1548,7 @@
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-engine">
                   <div class="cc-tele-box-title">🛰️ ДВИЖОК / СТЕЛС</div>
-                  <div class="cc-tele-box-val" id="cc-tele-engine-val" style="color:#c77dff;">SF WASM • STEALTH</div>
+                  <div class="cc-tele-box-val" id="cc-tele-engine-val" style="color:#c77dff;">SF LOCAL • CHESS.COM</div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-wdl" style="grid-column: span 2;">
                   <div class="cc-tele-box-title" style="display:flex; justify-content:space-between;">
@@ -1384,7 +1610,7 @@
               <div id="cc-eval-graph-card">
                 <div class="cc-graph-header">
                   <span>📈 ЖИВОЙ ГРАФИК ПЕРЕВЕСА</span>
-                  <span id="cc-eval-graph-label" style="color:var(--cc-accent); font-family:monospace;">0.00</span>
+                  <span class="cc-graph-meta"><span id="cc-eval-mood-label">РАВНО</span><span id="cc-eval-graph-label">0.00</span></span>
                 </div>
                 <canvas id="cc-eval-graph-canvas" width="410" height="42"></canvas>
               </div>
@@ -1545,11 +1771,15 @@
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>🧠 ГИБРИДНЫЙ STOCKFISH WASM + ТЕЛЕМЕТРИЯ 24/7</span>
+                <span>🧠 ГИБРИДНЫЙ STOCKFISH 19 LOCAL + ТЕЛЕМЕТРИЯ 24/7</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>🧠 Фоновый WebWorker Stockfish WASM</span>
+                <span>🧠 Фоновый WebWorker Stockfish 19 Local</span>
                 <input type="checkbox" id="cc-sf-wasm-chk" checked>
+              </div>
+              <div class="cc-Switch-row">
+                <span>♚ ENGINE MAX: primary SF без T1/average/humanization</span>
+                <input type="checkbox" id="cc-engine-max-chk">
               </div>
               <div class="cc-Switch-row">
                 <span>📡 Положение партии 24/7 (Часы, WDL%, Угрозы)</span>
@@ -1643,7 +1873,7 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>✦ ТЕМА МЕНЮ (9 СТИЛЕЙ VISION GLASS)</span></div>
+              <div class="cc-section-title"><span>✦ ТЕМА МЕНЮ (11 СТИЛЕЙ VISION GLASS)</span></div>
               <select class="cc-select" id="cc-vis-theme">
                 <option value="cyberpunk">🌌 Liquid Cyan Wave (Неоновая волна)</option>
                 <option value="minimal">⚪ Pure Minimal (Чистый минимализм)</option>
@@ -1654,6 +1884,8 @@
                 <option value="matrix">🧪 Matrix Toxic (Кибер-Матрица)</option>
                 <option value="titanium">❄️ Vision Pro Titanium (Матовый титан)</option>
                 <option value="obsidian">🌑 Obsidian Stealth (Темный обсидиан)</option>
+                <option value="nebula">🌠 Nebula Director (Космическая студия)</option>
+                <option value="grandmaster">♛ Grandmaster Club (Изумруд и золото)</option>
               </select>
             </div>
 
@@ -1731,6 +1963,82 @@
             </div>
           </div>
 
+          <div class="cc-tab-pane" id="cc-pane-privacy">
+            <div class="cc-mask-hero">
+              <div>
+                <strong>◉ STREAMER MASK // РЕЖИМ ЗАПИСИ</strong>
+                <span>Реальные данные остаются в Chess.com и только визуально скрываются на экране.</span>
+              </div>
+              <span id="cc-mask-status">ВЫКЛЮЧЕНА</span>
+            </div>
+
+            <div class="cc-glass-card" style="border-left:3.5px solid #67e8f9;">
+              <div class="cc-Switch-row" style="padding-top:0;">
+                <div>
+                  <span style="font-weight:900;color:#fff;">Включить маскировку для записи</span>
+                  <div style="font-size:9.5px;color:#94a3b8;">Ctrl + Shift + M — мгновенное включение/выключение</div>
+                </div>
+                <input type="checkbox" id="cc-mask-enabled-chk">
+              </div>
+              <div class="cc-control-row" style="margin-top:6px;">
+                <span>Стиль карточек:</span>
+                <select class="cc-select" id="cc-mask-style-select" style="width:220px;">
+                  <option value="broadcast">🌌 Broadcast Neon</option>
+                  <option value="royal">♛ Royal Grandmaster</option>
+                  <option value="chesscom">♟ Chess.com Original</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="cc-mask-preview" id="cc-mask-preview" data-mask-style="broadcast">
+              <div class="cc-mask-preview-label">ПРЕДПРОСМОТР ТРАНСЛЯЦИИ</div>
+              <div class="cc-mask-preview-player opponent">
+                <img class="cc-mask-preview-avatar" id="cc-mask-preview-opponent-avatar" alt="">
+                <div class="cc-mask-preview-identity"><span id="cc-mask-preview-opponent-name">GM Hikaru</span><small id="cc-mask-preview-opponent-flag">🇺🇸</small><strong id="cc-mask-preview-opponent-elo">2802</strong></div>
+              </div>
+              <div class="cc-mask-preview-vs">VS</div>
+              <div class="cc-mask-preview-player my">
+                <img class="cc-mask-preview-avatar" id="cc-mask-preview-my-avatar" alt="">
+                <div class="cc-mask-preview-identity"><span id="cc-mask-preview-my-name">GM HiddenKnight</span><small id="cc-mask-preview-my-flag">♟</small><strong id="cc-mask-preview-my-elo">2400</strong></div>
+              </div>
+            </div>
+
+            <div class="cc-mask-editor-grid">
+              <div class="cc-glass-card cc-mask-editor-card">
+                <div class="cc-section-title"><span>ВАШ ПРОФИЛЬ / АВТООПРЕДЕЛЕНИЕ</span></div>
+                <select class="cc-select" id="cc-mask-my-preset">${getPrivacyProfileOptions()}</select>
+                <label class="cc-mask-field">Ник<input class="cc-text-input" id="cc-mask-my-name" maxlength="32" value="HiddenKnight"></label>
+                <div class="cc-mask-field-row">
+                  <label class="cc-mask-field">ELO<input class="cc-text-input" type="number" id="cc-mask-my-elo" min="0" max="9999" value="2400"></label>
+                  <label class="cc-mask-field">Титул<select class="cc-select" id="cc-mask-my-title"><option value="">—</option><option value="GM">GM</option><option value="IM">IM</option><option value="FM">FM</option><option value="CM">CM</option><option value="WGM">WGM</option></select></label>
+                </div>
+              </div>
+
+              <div class="cc-glass-card cc-mask-editor-card">
+                <div class="cc-section-title"><span>ПРОФИЛЬ СОПЕРНИКА</span></div>
+                <select class="cc-select" id="cc-mask-opponent-preset">${getPrivacyProfileOptions()}</select>
+                <label class="cc-mask-field">Ник<input class="cc-text-input" id="cc-mask-opponent-name" maxlength="32" value="GMHikaru"></label>
+                <div class="cc-mask-field-row">
+                  <label class="cc-mask-field">ELO<input class="cc-text-input" type="number" id="cc-mask-opponent-elo" min="0" max="9999" value="2802"></label>
+                  <label class="cc-mask-field">Титул<select class="cc-select" id="cc-mask-opponent-title"><option value="">—</option><option value="GM">GM</option><option value="IM">IM</option><option value="FM">FM</option><option value="CM">CM</option><option value="WGM">WGM</option></select></label>
+                </div>
+              </div>
+            </div>
+
+            <div class="cc-glass-card">
+              <div class="cc-Switch-row" style="padding-top:0;"><span>Подменять аватар, флаг и скрывать flair</span><input type="checkbox" id="cc-mask-details-chk" checked></div>
+              <div class="cc-Switch-row"><span>Маскировать заголовок вкладки браузера</span><input type="checkbox" id="cc-mask-title-chk" checked></div>
+              <div class="cc-Switch-row"><span>Блокировать hover-карточки реальных профилей</span><input type="checkbox" id="cc-mask-hover-chk" checked></div>
+              <div class="cc-Switch-row"><span>Новый случайный GM-соперник при новой партии</span><input type="checkbox" id="cc-mask-rotate-chk"></div>
+            </div>
+
+            <div class="cc-actions-bar cc-mask-actions">
+              <button class="cc-btn" id="cc-mask-random-btn">🎲 СЛУЧАЙНЫЙ GM</button>
+              <button class="cc-btn" id="cc-mask-swap-btn">⇄ ПОМЕНЯТЬ МЕСТАМИ</button>
+              <button class="cc-btn cc-btn-primary" id="cc-mask-reveal-btn" style="grid-column:span 2;">👁 УДЕРЖИВАТЬ: ПОКАЗАТЬ ОРИГИНАЛ</button>
+            </div>
+          </div>
+
           <div class="cc-tab-pane" id="cc-pane-misc">
             <!-- СИСТЕМА КОНФИГОВ (.CHESS) -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #00f5d4; background: linear-gradient(135deg, rgba(0, 245, 212, 0.12), rgba(199, 125, 255, 0.08));">
@@ -1801,6 +2109,9 @@
     applyCustomBackgroundToPanel();
     applyPersistentPanelGeometry();
     updateUIValues();
+    if (uiAbortController) uiAbortController.abort();
+    uiAbortController = new AbortController();
+    const uiSignal = uiAbortController.signal;
     const header = $("chesscoach-header");
     let dragging = false, ox = 0, oy = 0;
     header.addEventListener("mousedown", (e) => {
@@ -1818,13 +2129,13 @@
       panel.style.right = "auto";
       panelLeft = nx;
       panelTop = ny;
-    });
+    }, { signal: uiSignal });
     window.addEventListener("mouseup", () => {
       if (dragging) {
         dragging = false;
         saveSetting({ panelLeft, panelTop });
       }
-    });
+    }, { signal: uiSignal });
 
     getShadow().querySelectorAll(".cc-mode-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -1843,6 +2154,7 @@
     });
 
     window.addEventListener("keydown", (e) => {
+      if (extensionInvalidated) return;
       const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : "";
       if (tag === "INPUT" || tag === "TEXTAREA") return;
 
@@ -1865,7 +2177,7 @@
           executeMoveOnBoard(picked.move, st, true);
         }
       }
-    });
+    }, { signal: uiSignal });
 
     window.addEventListener("keyup", (e) => {
       if (e.key === "Alt" && isAltPressed) {
@@ -1873,7 +2185,7 @@
         const st = captureBoardState(true);
         if (st && !st.animating) renderArrowsOverlay(st, cachedMoves);
       }
-    });
+    }, { signal: uiSignal });
 
     window.addEventListener("blur", () => {
       if (uciHistoryList.length > 0 && !gameResultRecorded) {
@@ -1885,7 +2197,7 @@
         const st = captureBoardState(true);
         if (st && !st.animating) renderArrowsOverlay(st, cachedMoves);
       }
-    });
+    }, { signal: uiSignal });
 
     // Управление полями Живой телеметрии 24/7
     $("cc-tele-gear-btn").addEventListener("click", () => {
@@ -2006,12 +2318,15 @@
       if (forcedMyColor === "auto") forcedMyColor = "w";
       else if (forcedMyColor === "w") forcedMyColor = "b";
       else forcedMyColor = "auto";
+      saveSetting({ forcedMyColor });
       updateUIValues();
       forceRecalculate();
     });
 
     const toggleAutoMoveMaster = (newState) => {
       autoMoveEnabled = newState;
+      if (newState) { nativeMoveFailureKey = ""; nativeMoveFailures = 0; }
+      if (!newState) cancelNativeMove("automation-disabled");
       saveSetting({ autoMoveEnabled });
       updateUIValues();
       resetTurnDecision();
@@ -2093,7 +2408,27 @@
     $("cc-sf-wasm-chk").addEventListener("change", (e) => {
       useStockfishWasm = e.target.checked;
       if (useStockfishWasm) StockfishWasmEngine.initWorker();
+      else StockfishWasmEngine.terminate();
       saveSetting({ useStockfishWasm });
+      updateUIValues();
+      forceRecalculate();
+    });
+    $("cc-engine-max-chk").addEventListener("change", (e) => {
+      engineMaxMode = e.target.checked;
+      if (engineMaxMode) {
+        currentElo = 3000;
+        currentStyle = "balanced";
+        useStockfishWasm = true;
+        showAverageMove = false;
+        useAverageMoveSometimes = false;
+        autoT1LimiterEnabled = false;
+        humanHesitationEnabled = false;
+        legitAutoTiming = false;
+        autoMoveTriggerRate = 100;
+        StockfishWasmEngine.initWorker();
+      }
+      saveSetting({ engineMaxMode, elo: currentElo, style: currentStyle, useStockfishWasm, showAverageMove, useAverageMoveSometimes, autoT1LimiterEnabled, humanHesitationEnabled, legitAutoTiming, autoMoveTriggerRate });
+      setAutoStatusText(engineMaxMode ? "♚ ENGINE MAX: ОЖИДАНИЕ PRIMARY STOCKFISH" : "ENGINE MAX ВЫКЛЮЧЕН", engineMaxMode ? "#64cdb9" : "#94a3b8");
       updateUIValues();
       forceRecalculate();
     });
@@ -2136,7 +2471,7 @@
 
     $("cc-play-once").addEventListener("click", () => {
       const state = captureBoardState(true);
-      if (state && !state.animating && cachedMoves.best) {
+      if (state && !state.animating && isCachedAnalysisCurrent(state)) {
         const picked = chooseAutoMoveOnce(cachedMoves) || { move: cachedMoves.best, typeLabel: "1-Я ЛИНИЯ" };
         setAutoStatusText(`🎯 Выполняем ход: ${picked.move.from}→${picked.move.to} [${picked.typeLabel}]`, "#00f5d4");
         executeMoveOnBoard(picked.move, state, true);
@@ -2144,17 +2479,22 @@
     });
 
     $("cc-auto-test-best").addEventListener("click", () => {
+      if (engineMaxMode && !cachedMoves.engineMeta && !cachedMoves.best?.fromSyzygy) {
+        setAutoStatusText("♚ ENGINE MAX: дождитесь завершения primary Stockfish", "#d9ad58");
+        return;
+      }
       const state = captureBoardState(true);
-      if (state && !state.animating && cachedMoves.best) {
+      if (state && !state.animating && isCachedAnalysisCurrent(state)) {
         setAutoStatusText(`Лучший ход: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
         executeMoveOnBoard(cachedMoves.best, state, true);
       }
     });
 
     $("cc-auto-test-avg").addEventListener("click", () => {
+      if (usesStrictBestMovePolicy()) return;
       const state = captureBoardState(true);
       const move = cachedMoves.average || cachedMoves.best;
-      if (state && !state.animating && move) {
+      if (state && !state.animating && move && isCachedAnalysisCurrent(state)) {
         setAutoStatusText(`Средний ход (2-я линия): ${move.from}→${move.to}`, "#ffbe0b");
         executeMoveOnBoard(move, state, true);
       }
@@ -2182,6 +2522,7 @@
 
     $("cc-turn-select").addEventListener("change", (e) => {
       turnMode = e.target.value;
+      saveSetting({ turnMode });
       forceRecalculate();
     });
 
@@ -2259,8 +2600,75 @@
       showEvalBar = e.target.checked;
       saveSetting({ showEvalBar });
       const st = captureBoardState(true);
-      if (st && !st.animating) renderEvalBar(st, cachedMoves.best?.whitePerspectiveEval || 0);
+      if (st && !st.animating) renderEvalBar(st, cachedMoves.best?.whitePerspectiveEval ?? 0);
     });
+
+    $("cc-mask-enabled-chk").addEventListener("change", (e) => {
+      visualMask = normalizeVisualMask({ ...visualMask, enabled: e.target.checked });
+      persistVisualMask();
+    });
+    $("cc-mask-style-select").addEventListener("change", (e) => {
+      visualMask = normalizeVisualMask({ ...visualMask, style: e.target.value });
+      persistVisualMask();
+    });
+    $("cc-mask-details-chk").addEventListener("change", (e) => {
+      visualMask = normalizeVisualMask({ ...visualMask, maskDetails: e.target.checked });
+      persistVisualMask();
+    });
+    $("cc-mask-title-chk").addEventListener("change", (e) => {
+      visualMask = normalizeVisualMask({ ...visualMask, maskPageTitle: e.target.checked });
+      persistVisualMask();
+    });
+    $("cc-mask-hover-chk").addEventListener("change", (e) => {
+      visualMask = normalizeVisualMask({ ...visualMask, blockProfileHover: e.target.checked });
+      persistVisualMask();
+    });
+    $("cc-mask-rotate-chk").addEventListener("change", (e) => {
+      visualMask = normalizeVisualMask({ ...visualMask, autoRotateOpponent: e.target.checked });
+      persistVisualMask();
+    });
+    $("cc-mask-my-preset").addEventListener("change", (e) => applyPrivacyPreset("my", e.target.value));
+    $("cc-mask-opponent-preset").addEventListener("change", (e) => applyPrivacyPreset("opponent", e.target.value));
+
+    const bindMaskIdentityField = (role, id, field, eventName = "input") => {
+      $(id).addEventListener(eventName, (e) => {
+        visualMask = normalizeVisualMask({
+          ...visualMask,
+          [`${role}PresetId`]: "custom",
+          [role]: { ...visualMask[role], [field]: e.target.value }
+        });
+        previewVisualMaskAndSave();
+      });
+    };
+    bindMaskIdentityField("my", "cc-mask-my-name", "nickname");
+    bindMaskIdentityField("my", "cc-mask-my-elo", "elo");
+    bindMaskIdentityField("my", "cc-mask-my-title", "title", "change");
+    bindMaskIdentityField("opponent", "cc-mask-opponent-name", "nickname");
+    bindMaskIdentityField("opponent", "cc-mask-opponent-elo", "elo");
+    bindMaskIdentityField("opponent", "cc-mask-opponent-title", "title", "change");
+
+    $("cc-mask-random-btn").addEventListener("click", randomizePrivacyOpponent);
+    $("cc-mask-swap-btn").addEventListener("click", () => {
+      visualMask = normalizeVisualMask({
+        ...visualMask,
+        myPresetId: visualMask.opponentPresetId,
+        opponentPresetId: visualMask.myPresetId,
+        my: visualMask.opponent,
+        opponent: visualMask.my
+      });
+      persistVisualMask();
+    });
+
+    const revealButton = $("cc-mask-reveal-btn");
+    const setReveal = (revealed) => {
+      privacyMaskManager?.setRevealed(revealed);
+      revealButton.textContent = revealed ? "👁 ОРИГИНАЛ ПОКАЗАН" : "👁 УДЕРЖИВАТЬ: ПОКАЗАТЬ ОРИГИНАЛ";
+      if (!revealed) updatePrivacyMaskStatus();
+    };
+    revealButton.addEventListener("pointerdown", (e) => { e.preventDefault(); setReveal(true); });
+    revealButton.addEventListener("pointerup", () => setReveal(false));
+    revealButton.addEventListener("pointercancel", () => setReveal(false));
+    revealButton.addEventListener("pointerleave", () => setReveal(false));
 
     $("cc-train-good").addEventListener("click", () => {
       if (!cachedMoves.best || !cachedMoves.boardKey) return;
@@ -2399,13 +2807,41 @@
     });
   }
 
-  function isRatedGameAgainstHuman() {
-    if (location.pathname.includes("/computer") || location.pathname.includes("/analysis") || location.pathname.includes("/Solo")) {
-      return false;
+  function getAutoMoveGuardReason() {
+    const path = location.pathname.toLowerCase();
+    if (/(?:^|\/)(?:computer|bots?|analysis|puzzles?|lessons?|solo(?:-chess)?|practice|drills?|classroom)(?:\/|$)/.test(path)) return "";
+    const isVisible = node => {
+      if (!node?.isConnected) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    for (const badge of document.querySelectorAll(".board-layout-top .user-chess-title, .player-top .user-chess-title, [data-cy='opponent-bot']")) {
+      if (isVisible(badge) && (badge.matches("[data-cy='opponent-bot']") || /\bBOT\b/i.test(badge.textContent || ""))) return "";
     }
-    const botBadge = document.querySelector(".board-layout-top .user-chess-title, [data-cy='bot-selection']");
-    if (botBadge && (botBadge.textContent || "").includes("BOT")) return false;
-    return true;
+    const board = findChessComBoardElement();
+    const boardContext = new Set();
+    for (let node = board; node; node = node.parentElement || node.getRootNode?.()?.host) boardContext.add(node);
+    const metadata = [...boardContext, ...document.querySelectorAll(
+      ".game-info, .game-info-component, .game-details, .game-details-component, .game-type, .live-game-info, " +
+      "[data-cy='game-info'], [data-cy='game-details'], [data-cy='game-type'], [data-cy='game-rated'], [data-cy='game-rating-type']"
+    )].filter(isVisible);
+    let rated = false;
+    let casual = false;
+    for (const node of metadata) {
+      for (const attribute of ["data-rated", "data-is-rated", "data-game-rated", "rated"]) {
+        const value = String(node.getAttribute(attribute) || "").trim().toLowerCase();
+        if (["true", "1", "rated"].includes(value)) rated = true;
+        if (["false", "0", "unrated", "casual"].includes(value)) casual = true;
+      }
+      if (boardContext.has(node)) continue;
+      const text = `${node.textContent || ""} ${node.getAttribute("aria-label") || ""}`.toLowerCase();
+      if (/\b(?:unrated|casual|friendly)\b|без рейтинга|нерейтингов|товарищеск/.test(text)) casual = true;
+      if (/\brated\b|(?:^|\s)рейтингов(?:ая|ый|ое)(?:\s|$|[.,:])/.test(text)) rated = true;
+    }
+    if (rated) return "Автоход заблокирован: рейтинговая партия против человека. Сходите вручную.";
+    if (casual) return "";
+    return "Автоход приостановлен: рейтинговый статус партии не подтверждён. Разрешены только явно нерейтинговые, учебные игры и боты.";
   }
 
   function parseChessComClock(selectors) {
@@ -2427,7 +2863,7 @@
         return hrs * 3600 + mins * 60 + secs;
       }
     }
-    return 999;
+    return Number.POSITIVE_INFINITY;
   }
 
   function getMyRemainingSeconds() {
@@ -2449,8 +2885,14 @@
   }
 
   function formatClockMMSS(sec) {
-    if (sec === undefined || sec === null || sec >= 900) return "--:--";
+    if (!Number.isFinite(sec)) return "--:--";
     const s = Math.max(0, sec);
+    if (s >= 3600) {
+      const hours = Math.floor(s / 3600);
+      const mins = Math.floor((s % 3600) / 60);
+      const secs = Math.floor(s % 60);
+      return `${hours}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    }
     const mins = Math.floor(s / 60);
     const rem = s - mins * 60;
     if (mins === 0 && rem < 10) {
@@ -2491,12 +2933,68 @@
     }
   }
 
-  function recordEvalPoint(boardKey, whiteEvalPawns, dropPawns = 0) {
-    if (!boardKey || boardKey === lastRecordedGraphBoardKey) return;
-    lastRecordedGraphBoardKey = boardKey;
+  function updateEvalMoodAndEngineBadge(state, res) {
+    const panel = $("chesscoach-panel");
+    const moodLabel = $("cc-eval-mood-label");
+    const powerBadge = $("cc-engine-power");
+    if (!state || !res?.best) {
+      if (panel) panel.dataset.evalMood = "neutral";
+      if (moodLabel) moodLabel.textContent = "ОЖИДАНИЕ";
+      if (powerBadge) {
+        powerBadge.textContent = "ENGINE IDLE";
+        delete powerBadge.dataset.consensus;
+      }
+      return;
+    }
 
-    const numEval = Math.max(-10, Math.min(10, parseFloat(whiteEvalPawns) || 0));
-    const numDrop = parseFloat(dropPawns) || 0;
+    let whiteEval = Number(res.best.whitePerspectiveEval);
+    if (!Number.isFinite(whiteEval)) {
+      const sideEval = Number.parseFloat(res.best.evalPawns);
+      whiteEval = Number.isFinite(sideEval) ? (state.sideToAnalyze === "w" ? sideEval : -sideEval) : 0;
+    }
+    const myEval = state.myColor === "w" ? whiteEval : -whiteEval;
+    const mood = res.isDangerPosition || myEval <= -2.5
+      ? "critical"
+      : myEval >= 0.75 ? "ahead" : myEval <= -0.75 ? "behind" : "neutral";
+    if (panel) panel.dataset.evalMood = mood;
+    if (moodLabel) {
+      moodLabel.textContent = mood === "critical" ? "КРИТИЧНО" : mood === "ahead" ? "ПЕРЕВЕС" : mood === "behind" ? "ПОД ДАВЛЕНИЕМ" : "РАВНО";
+    }
+
+    if (powerBadge) {
+      const meta = res.engineMeta;
+      if (meta) {
+        powerBadge.textContent = `${meta.fullNnue ? "SF FULL" : "SF"} ${meta.workers || 1}C · H${meta.hashMb || "?"}M · D${meta.depth || "?"}`;
+        powerBadge.title = `${meta.consensus || "primary"} · seldepth ${meta.selDepth || meta.depth || "?"} · NPS ${meta.nps ? Math.round(meta.nps / 1000) + "k" : "—"}`;
+        powerBadge.dataset.consensus = meta.consensus || "primary-only";
+      } else if (res.best.fromCloud) {
+        powerBadge.textContent = `CLOUD · D${res.best.cloudDepth || "?"}`;
+        delete powerBadge.dataset.consensus;
+      } else {
+        powerBadge.textContent = "JS CORE";
+        delete powerBadge.dataset.consensus;
+      }
+    }
+  }
+
+  function recordEvalPoint(boardKey, whiteEvalPawns, dropPawns = 0) {
+    if (!boardKey) return;
+    const parsedEval = Number.parseFloat(whiteEvalPawns);
+    const parsedDrop = Number.parseFloat(dropPawns);
+    const numEval = Math.max(-10, Math.min(10, Number.isFinite(parsedEval) ? parsedEval : 0));
+    const numDrop = Number.isFinite(parsedDrop) ? parsedDrop : 0;
+
+    if (boardKey === lastRecordedGraphBoardKey && evalGraphHistory.length > 0) {
+      evalGraphHistory[evalGraphHistory.length - 1] = {
+        boardKey,
+        evalVal: numEval,
+        isBlunder: numDrop >= 1.5,
+        drop: numDrop
+      };
+      renderLiveEvalGraph();
+      return;
+    }
+    lastRecordedGraphBoardKey = boardKey;
 
     evalGraphHistory.push({
       boardKey,
@@ -2531,14 +3029,21 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    if (evalGraphHistory.length === 0) return;
+    if (evalGraphHistory.length === 0) {
+      const emptyLabel = $("cc-eval-graph-label");
+      if (emptyLabel) {
+        emptyLabel.textContent = "0.00";
+        delete emptyLabel.dataset.tone;
+      }
+      return;
+    }
 
     const lastPt = evalGraphHistory[evalGraphHistory.length - 1];
     const lbl = $("cc-eval-graph-label");
     if (lbl && lastPt) {
       const sign = lastPt.evalVal > 0 ? "+" : "";
       lbl.textContent = `${sign}${lastPt.evalVal.toFixed(2)}`;
-      lbl.style.color = lastPt.evalVal >= 0 ? "#00f5d4" : "#ff4d94";
+      lbl.dataset.tone = lastPt.evalVal >= 0 ? "positive" : "negative";
     }
 
     const [accent1, accent2] = THEME_ACCENT_COLORS[uiTheme] || THEME_ACCENT_COLORS.cyberpunk;
@@ -2606,6 +3111,49 @@
     return myColor === "w" ? p === p.toUpperCase() : p === p.toLowerCase();
   }
 
+  function usesStrictBestMovePolicy() {
+    return engineMaxMode || currentElo >= 2000;
+  }
+
+  function getStructuredMoveScore(move) {
+    if (!move) return null;
+    const rawMate = move.mateIn;
+    const mateIn = rawMate === null || rawMate === undefined ? NaN : Number(rawMate);
+    if (move.isMate && Number.isFinite(mateIn) && mateIn !== 0) {
+      return { type: "mate", mateIn };
+    }
+    if (move.isMateInOne) return { type: "mate", mateIn: 1 };
+    if (move.isForcedMateInTwo) return { type: "mate", mateIn: 2 };
+    if (move.blundersMate) return { type: "mate", mateIn: -1 };
+
+    for (const key of ["scoreCp", "pureSearchScore", "trueScore"]) {
+      if (move[key] === null || move[key] === undefined) continue;
+      const value = Number(move[key]);
+      if (Number.isFinite(value)) return { type: "cp", scoreCp: value };
+    }
+    return null;
+  }
+
+  function structuredScoreValue(score) {
+    if (!score) return null;
+    if (score.type === "mate") {
+      const distance = Math.min(999, Math.abs(score.mateIn)) * 100;
+      return score.mateIn > 0 ? 1000000 - distance : -1000000 + distance;
+    }
+    return Number.isFinite(score.scoreCp) ? score.scoreCp : null;
+  }
+
+  function isNegativeMateMove(move) {
+    const score = getStructuredMoveScore(move);
+    return Boolean(score?.type === "mate" && score.mateIn < 0);
+  }
+
+  function isFinalAutoAnalysis(res) {
+    if (res?.best?.fromSyzygy || res?.syzygyActive) return true;
+    if (usesStrictBestMovePolicy()) return Boolean(res?.analysisFinalized && res?.engineMeta);
+    return Boolean(res?.analysisFinalized);
+  }
+
   /**
    * УМНЫЙ ВЫБОР ЛЕГИТНОГО ХОДА С ФИЛЬТРОМ АНТИ-БАНА T1%:
    * Если текущий процент совпадений с 1-й линией Stockfish превышает порог (например, 66%),
@@ -2613,6 +3161,11 @@
    */
   function chooseAutoMoveOnce(res) {
     if (!res || !res.best) return null;
+    if (engineMaxMode) return { move: res.best, typeLabel: "♚ ENGINE MAX / PRIMARY SF", choiceKind: "engine-max" };
+    if (currentElo >= 2000) {
+      const typeLabel = res.best.fromSyzygy ? "🔮 SYZYGY" : "♚ PRIMARY STOCKFISH";
+      return { move: res.best, typeLabel, choiceKind: "best" };
+    }
 
     if (protectCriticalMoves || res.isDangerPosition) {
       if (
@@ -2627,7 +3180,7 @@
         const label = res.isDangerPosition
           ? "🛡 ЗАЩИТА КОРОЛЯ"
           : (res.best.fromSyzygy ? "🔮 SYZYGY" : "1-Я ЛИНИЯ (КРИТ.)");
-        return { move: res.best, typeLabel: label };
+        return { move: res.best, typeLabel: label, choiceKind: "best" };
       }
     }
 
@@ -2637,14 +3190,18 @@
       !res.average.blundersMate &&
       !res.average.causesStalemate &&
       !res.average.isRepetitionDrawRisk &&
+      !isNegativeMateMove(res.average) &&
       !res.average.underDirectAttack &&
       !res.average.ignoredHangingPiece &&
       !res.average.ruinedCastling
     );
 
     if (avgIsSafe) {
-      const bestEval = parseFloat(res.best.evalPawns) || 0;
-      const avgEval = parseFloat(res.average.evalPawns) || 0;
+      const bestEval = structuredScoreValue(getStructuredMoveScore(res.best));
+      const avgEval = structuredScoreValue(getStructuredMoveScore(res.average));
+      if (!Number.isFinite(bestEval) || !Number.isFinite(avgEval)) {
+        return { move: res.best, typeLabel: "✦ 1-Я ЛИНИЯ", choiceKind: "best" };
+      }
       const evalDiff = Math.abs(bestEval - avgEval);
 
       // 1. Принудительное снижение T1% при превышении безопасного порога Chess.com
@@ -2653,20 +3210,20 @@
         legitStats.totalMyMoves >= 4 &&
         getT1MatchPercent() > maxSafeT1Percent &&
         bestEval >= avgEval &&
-        evalDiff <= 0.48
+        evalDiff <= 48
       ) {
-        return { move: res.average, typeLabel: `🛡 T1-ЛИМИТЕР (2-Я ЛИНИЯ)` };
+        return { move: res.average, typeLabel: `🛡 T1-ЛИМИТЕР (2-Я ЛИНИЯ)`, choiceKind: "average" };
       }
 
       // 2. Естественное вероятностное подмешивание 2-й линии
-      if (useAverageMoveSometimes && bestEval >= avgEval && evalDiff <= 0.38) {
+      if (useAverageMoveSometimes && bestEval >= avgEval && evalDiff <= 38) {
         if (Math.random() * 100 < averageMoveFrequency) {
-          return { move: res.average, typeLabel: "❖ 2-Я ЛИНИЯ (HUMAN)" };
+          return { move: res.average, typeLabel: "❖ 2-Я ЛИНИЯ (HUMAN)", choiceKind: "average" };
         }
       }
     }
 
-    return { move: res.best, typeLabel: "✦ 1-Я ЛИНИЯ" };
+    return { move: res.best, typeLabel: "✦ 1-Я ЛИНИЯ", choiceKind: "best" };
   }
 
   /**
@@ -2721,17 +3278,37 @@
   }
 
   function scheduleAutoMoveIfNeeded() {
-    if (!autoMoveEnabled || extensionInvalidated) return;
+    if (!autoMoveEnabled || extensionInvalidated || document.hidden) return;
+    if (window.__CC_ANDROID_SETTINGS_OPEN__ === true) {
+      setAutoStatusText("Автоход на паузе: открыты настройки", "#ffbe0b");
+      return;
+    }
     if (isExecutingMove || Date.now() < moveCooldownUntil) return;
     if (autoMoveTimer) return;
 
     const state = captureBoardState(false);
     if (!state || state.animating || state.actualTurn !== state.myColor) return;
-    if (!cachedMoves || !cachedMoves.best || cachedMoves.boardKey !== state.boardKey) return;
+    const guardReason = safeAntiBanGuard ? getAutoMoveGuardReason() : "";
+    if (guardReason) {
+      setAutoStatusText(guardReason, "#ffbe0b");
+      return;
+    }
+    if (boardDirty || state.positionKey !== currentPositionKey || !isCachedAnalysisCurrent(state) || cachedMoves.boardKey !== state.boardKey) return;
+    if (cachedMoves.analysisIncomplete && !cachedMoves.engineMeta && !cachedMoves.syzygyActive && !cachedMoves.best?.fromSyzygy) {
+      setAutoStatusText("Автоход на паузе: ждём завершённый анализ Stockfish.", "#ffbe0b");
+      return;
+    }
+    if (usesStrictBestMovePolicy() && !isFinalAutoAnalysis(cachedMoves)) {
+      setAutoStatusText(
+        engineMaxMode ? "♚ ENGINE MAX: ЖДЕМ PRIMARY STOCKFISH..." : "♚ ELO 2000+: ЖДЕМ FINAL STOCKFISH / SYZYGY...",
+        "#64cdb9"
+      );
+      return;
+    }
 
     if (currentTurnDecision.boardKey !== state.boardKey || !currentTurnDecision.decided) {
       const triggerRoll = Math.random() * 100;
-      if (autoMoveTriggerRate < 100 && triggerRoll > autoMoveTriggerRate) {
+      if (!usesStrictBestMovePolicy() && autoMoveTriggerRate < 100 && triggerRoll > autoMoveTriggerRate) {
         currentTurnDecision = {
           boardKey: state.boardKey,
           decided: true,
@@ -2750,7 +3327,9 @@
 
       const mySecs = getMyRemainingSeconds();
       let totalDelay = 540;
-      if (legitAutoTiming) {
+      if (engineMaxMode) {
+        totalDelay = 130 + Math.floor(Math.random() * 46);
+      } else if (legitAutoTiming) {
         totalDelay = computeLegitHumanDelayMs(picked.move, mySecs, cachedMoves.isDangerPosition);
       } else {
         const jitter = autoMoveJitterMs > 0 ? Math.round((Math.random() * 2 - 1) * autoMoveJitterMs) : 0;
@@ -2759,10 +3338,13 @@
 
       currentTurnDecision = {
         boardKey: state.boardKey,
+        sessionId: analysisSessionId,
+        positionId,
         decided: true,
         skip: false,
         move: picked.move,
         typeLabel: `${picked.typeLabel} • ${(totalDelay / 1000).toFixed(2)}с`,
+        choiceKind: picked.choiceKind || "policy",
         totalDelay,
         attempts: 0
       };
@@ -2783,19 +3365,21 @@
     );
 
     const expectedBoardKey = state.boardKey;
+    const expectedPositionId = positionId;
 
     autoMoveTimer = setTimeout(() => {
       autoMoveTimer = null;
-      if (!autoMoveEnabled || extensionInvalidated) return;
+      if (!autoMoveEnabled || extensionInvalidated || document.hidden || window.__CC_ANDROID_SETTINGS_OPEN__ === true || boardDirty || expectedPositionId !== positionId) return;
 
       const fresh = captureBoardState(false);
       if (!fresh || fresh.animating) {
         scheduleAutoMoveIfNeeded();
         return;
       }
-      if (fresh.actualTurn !== fresh.myColor || fresh.boardKey !== expectedBoardKey) {
+      if (fresh.actualTurn !== fresh.myColor || fresh.boardKey !== expectedBoardKey || fresh.positionKey !== currentPositionKey) {
         return;
       }
+      if (cachedMoves.analysisIncomplete && !cachedMoves.engineMeta && !cachedMoves.syzygyActive && !cachedMoves.best?.fromSyzygy) return;
 
       currentTurnDecision.attempts++;
       const moveNow = currentTurnDecision.move || cachedMoves.best;
@@ -2805,37 +3389,403 @@
     }, delayToWait);
   }
 
+  let cachedChessComBoardElement = null;
+  let cachedChessComRoots = [];
+  const CHESSCOM_BOARD_SELECTOR = "wc-chess-board, chess-board, #board-single, #board-play-computer, #board-vs-personalities, .board-layout-chessboard .board, .board";
+
+  function getChessComBoardRoots(boardEl) {
+    if (boardEl === cachedChessComBoardElement && cachedChessComRoots.length &&
+        cachedChessComRoots.every(root => !root.host || root.host.isConnected)) {
+      return cachedChessComRoots;
+    }
+    const roots = [boardEl];
+    // querySelector and MutationObserver do not cross web-component shadow boundaries.
+    for (let i = 0; i < roots.length; i++) {
+      for (const node of [roots[i], ...roots[i].querySelectorAll("*")]) {
+        if (node.shadowRoot && !roots.includes(node.shadowRoot)) roots.push(node.shadowRoot);
+        if (node.tagName === "SLOT") {
+          for (const assigned of node.assignedElements({ flatten: true })) {
+            if (!roots.includes(assigned)) roots.push(assigned);
+          }
+        }
+      }
+    }
+    if (boardEl === cachedChessComBoardElement) cachedChessComRoots = roots;
+    return roots;
+  }
+
+  function normalizeVisualMask(raw) {
+    const api = window.ChessCoachPrivacyMask;
+    const source = raw && typeof raw === "object" ? raw : {};
+    const base = DEFAULT_VISUAL_MASK || source;
+    const normalized = api?.normalizeConfig ? api.normalizeConfig({
+      enabled: typeof source.enabled === "boolean" ? source.enabled : base.enabled,
+      style: source.style || base.style,
+      maskDetails: typeof source.maskDetails === "boolean" ? source.maskDetails : base.maskDetails,
+      maskPageTitle: typeof source.maskPageTitle === "boolean" ? source.maskPageTitle : base.maskPageTitle,
+      blockProfileHover: typeof source.blockProfileHover === "boolean" ? source.blockProfileHover : base.blockProfileHover,
+      my: source.my || base.my,
+      opponent: source.opponent || base.opponent
+    }) : {
+      enabled: Boolean(source.enabled),
+      style: source.style === "royal" ? "royal" : "broadcast",
+      maskDetails: source.maskDetails !== false,
+      maskPageTitle: source.maskPageTitle !== false,
+      blockProfileHover: source.blockProfileHover !== false,
+      my: { ...(source.my || base.my) },
+      opponent: { ...(source.opponent || base.opponent) }
+    };
+    const profileIds = new Set((api?.profiles || []).map(profile => profile.id));
+    const validPreset = (value, fallback) => profileIds.size === 0 || profileIds.has(value) ? value : fallback;
+    const myPresetId = validPreset(source.myPresetId || base.myPresetId, "custom");
+    const opponentPresetId = validPreset(source.opponentPresetId || base.opponentPresetId, "custom");
+    const fillPresetAssets = (identity, presetId) => {
+      const profile = api?.getProfile?.(presetId);
+      if (!profile || profile.id === "custom") return identity;
+      return {
+        ...identity,
+        countryCode: identity.countryCode || profile.countryCode || "",
+        avatarUrl: profile.avatarUrl || identity.avatarUrl || ""
+      };
+    };
+    return {
+      version: 1,
+      ...normalized,
+      my: fillPresetAssets(normalized.my, myPresetId),
+      opponent: fillPresetAssets(normalized.opponent, opponentPresetId),
+      myPresetId,
+      opponentPresetId,
+      autoRotateOpponent: Boolean(source.autoRotateOpponent)
+    };
+  }
+
+  function getPrivacyProfileOptions() {
+    const profiles = window.ChessCoachPrivacyMask?.profiles || [
+      { id: "custom", label: "Свой профиль" },
+      { id: "anonymous", label: "Анонимный стример" }
+    ];
+    return profiles.map(profile => `<option value="${profile.id}">${profile.label}</option>`).join("");
+  }
+
+  function updatePrivacyMaskStatus() {
+    const badge = $("cc-mask-status");
+    if (badge) {
+      badge.textContent = visualMask.enabled
+        ? (privacyMaskFoundPlayers === 2 ? "АКТИВНА • 2/2 КАРТОЧКИ" : `ПОИСК КАРТОЧЕК • ${privacyMaskFoundPlayers}/2`)
+        : "ВЫКЛЮЧЕНА";
+      badge.style.color = visualMask.enabled && privacyMaskFoundPlayers === 2 ? "#6ee7b7" : (visualMask.enabled ? "#f8d477" : "#94a3b8");
+    }
+  }
+
+  function ensurePrivacyMaskManager() {
+    if (privacyMaskManager || !window.ChessCoachPrivacyMask) return;
+    privacyMaskManager = window.ChessCoachPrivacyMask.create({
+      getConfig: () => visualMask,
+      getBoardElement: () => findChessComBoardElement(),
+      onToggle: enabled => {
+        visualMask = normalizeVisualMask({ ...visualMask, enabled });
+        saveSetting({ chesscomVisualMaskV1: visualMask });
+        privacyMaskManager?.update();
+        updateUIValues();
+      },
+      onStatus: status => {
+        privacyMaskFoundPlayers = status.foundPlayers;
+        updatePrivacyMaskStatus();
+      }
+    });
+  }
+
+  function persistVisualMask() {
+    visualMask = normalizeVisualMask(visualMask);
+    saveSetting({ chesscomVisualMaskV1: visualMask });
+    ensurePrivacyMaskManager();
+    privacyMaskManager?.update();
+    updateUIValues();
+  }
+
+  function previewVisualMaskAndSave() {
+    visualMask = normalizeVisualMask(visualMask);
+    ensurePrivacyMaskManager();
+    privacyMaskManager?.update();
+    updateUIValues();
+    clearTimeout(privacySaveTimer);
+    privacySaveTimer = setTimeout(() => {
+      privacySaveTimer = null;
+      saveSetting({ chesscomVisualMaskV1: visualMask });
+    }, 180);
+  }
+
+  function applyPrivacyPreset(role, presetId) {
+    const profile = window.ChessCoachPrivacyMask?.getProfile(presetId);
+    visualMask = normalizeVisualMask({
+      ...visualMask,
+      [`${role}PresetId`]: presetId,
+      [role]: profile && profile.id !== "custom"
+        ? { nickname: profile.nickname, elo: profile.elo, title: profile.title, countryCode: profile.countryCode || "", avatarUrl: profile.avatarUrl || "" }
+        : visualMask[role]
+    });
+    persistVisualMask();
+  }
+
+  function randomizePrivacyOpponent() {
+    const profile = window.ChessCoachPrivacyMask?.randomProfile([visualMask.myPresetId, visualMask.opponentPresetId]);
+    if (!profile) return;
+    visualMask = normalizeVisualMask({
+      ...visualMask,
+      opponentPresetId: profile.id,
+      opponent: { nickname: profile.nickname, elo: profile.elo, title: profile.title, countryCode: profile.countryCode || "", avatarUrl: profile.avatarUrl || "" }
+    });
+    persistVisualMask();
+  }
+
+  function handleStorageChanges(changes, areaName) {
+    if (areaName !== "local") return;
+    const activeTabChange = changes[storageKey("activeTabId")];
+    const maskChange = changes[storageKey("chesscomVisualMaskV1")];
+    if (typeof activeTabChange?.newValue === "string") activeTabId = activeTabChange.newValue;
+    if (!maskChange) return;
+    visualMask = normalizeVisualMask(maskChange.newValue || DEFAULT_VISUAL_MASK);
+    ensurePrivacyMaskManager();
+    privacyMaskManager?.update();
+    updateUIValues();
+  }
+
+  function queryChessComBoard(boardEl, selector) {
+    return Array.from(new Set(getChessComBoardRoots(boardEl).flatMap((root, i) => [
+      ...(i > 0 && root.matches?.(selector) ? [root] : []),
+      ...root.querySelectorAll(selector)
+    ])));
+  }
+
+  function isElementVisibleInViewport(node, minWidth = 1, minHeight = 1) {
+    if (!node?.isConnected || node.ownerDocument !== document) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width < minWidth || rect.height < minHeight ||
+        rect.right <= 0 || rect.bottom <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) {
+      return false;
+    }
+
+    for (let current = node; current; current = current.parentElement || current.getRootNode?.()?.host || null) {
+      if (current.nodeType !== Node.ELEMENT_NODE) continue;
+      const style = getComputedStyle(current);
+      const opacity = Number.parseFloat(style.opacity);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" ||
+          style.contentVisibility === "hidden" || (Number.isFinite(opacity) && opacity <= 0.01) ||
+          current.hidden || current.inert || current.getAttribute("aria-hidden") === "true") {
+        return false;
+      }
+    }
+
+    if (typeof node.checkVisibility === "function") {
+      try {
+        if (!node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      } catch (e) {}
+    }
+    return true;
+  }
+
+  function isUsableChessComBoard(node) {
+    if (!isElementVisibleInViewport(node, 120, 120)) return false;
+    return queryChessComBoard(node, ".piece").some(piece => {
+      const cls = piece.getAttribute("class") || "";
+      return /\b[wb][pnbrqk]\b/i.test(cls) && /\bsquare-[1-8][1-8]\b/.test(cls);
+    });
+  }
+
   function findChessComBoardElement() {
-    const candidates = document.querySelectorAll(
-      "wc-chess-board, chess-board, #board-single, #board-play-computer, #board-vs-personalities, .board-layout-chessboard .board, .board"
-    );
+    if (isUsableChessComBoard(cachedChessComBoardElement)) {
+      return cachedChessComBoardElement;
+    }
+    cachedChessComBoardElement = null;
+    cachedChessComRoots = [];
+    const candidates = new Set(document.querySelectorAll(CHESSCOM_BOARD_SELECTOR));
+    if (!candidates.size) {
+      for (const node of queryChessComBoard(document, CHESSCOM_BOARD_SELECTOR)) candidates.add(node);
+    }
+    for (const node of candidates) {
+      for (const inner of queryChessComBoard(node, CHESSCOM_BOARD_SELECTOR)) candidates.add(inner);
+    }
+    const visibleBoards = [];
+    for (const node of candidates) {
+      if (!isUsableChessComBoard(node)) continue;
+      visibleBoards.push(node);
+    }
 
     let bestBoard = null;
     let maxArea = 0;
 
-    for (const node of candidates) {
+    for (const node of visibleBoards) {
+      // Prefer the actual inner playing surface over a larger component/container.
+      if (queryChessComBoard(node, CHESSCOM_BOARD_SELECTOR).some(inner => visibleBoards.includes(inner))) continue;
       const rect = node.getBoundingClientRect();
       const area = rect.width * rect.height;
-      // Выбираем самую крупную реальную доску на экране (минимум 180x180 px)
-      if (rect.width >= 180 && rect.height >= 180 && area > maxArea) {
+      if (area >= maxArea) {
         maxArea = area;
         bestBoard = node;
       }
     }
+    cachedChessComBoardElement = bestBoard;
+    cachedChessComRoots = [];
     return bestBoard;
   }
 
-  /**
-   * БИОМЕТРИЧЕСКИЙ STEALTH-ДВИЖОК МЫШИ ДЛЯ CHESS.COM:
-   * 1. Гауссово смещение точки клика внутри клетки (никогда не бьет в центр 0.5, 0.5).
-   * 2. Генерация кривой Безье из промежуточных pointermove/mousemove событий.
-   * 3. Время полета курсора по Закону Фиттса + живое удержание кнопки (68–135 мс).
-   */
-  function executeMoveOnBoard(moveObj, state, manualClick = false) {
-    if (!moveObj || !moveObj.from || !moveObj.to || !state || !state.grid) return;
+  async function executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece) {
+    if (isExecutingMove || document.hidden || extensionInvalidated || (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true)) return;
+    const runtime = window.__CC_ANDROID_RUNTIME__;
+    const failureKey = `${location.href}|${state.positionId}|${state.positionKey}`;
+    if (nativeMoveFailureKey !== failureKey) { nativeMoveFailureKey = failureKey; nativeMoveFailures = 0; }
+    if (!manualClick && nativeMoveFailures >= 3) {
+      setAutoStatusText("Нативный ввод не подтверждён после 3 попыток. Сходите вручную.", "#ffbe0b");
+      return;
+    }
+    const attempt = ++nativeMoveFailures;
+    const action = { controller: new AbortController(), failureKey, attempt };
+    activeNativeMove = action;
+    const pageUrl = location.href;
+    const previousMove = lastOurExecutedMove;
+    let boardEl = null;
+    let layoutFrame = null;
+    let completed = false;
+    const fromCol = FILES.indexOf(moveObj.from[0]);
+    const fromRow = 8 - Number(moveObj.from[1]);
+    const toCol = FILES.indexOf(moveObj.to[0]);
+    const toRow = 8 - Number(moveObj.to[1]);
+    const movingPiece = state.grid[fromRow]?.[fromCol];
+    const expectedPiece = promoPiece ? (state.myColor === "w" ? promoPiece.toUpperCase() : promoPiece) : movingPiece;
+    const wait = ms => new Promise((resolve, reject) => {
+      const signal = action.controller.signal;
+      if (signal.aborted) { reject(new Error("Ввод отменён")); return; }
+      const onAbort = () => { clearTimeout(timer); reject(new Error("Ввод отменён")); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const requireVisibleContext = () => {
+      if (activeNativeMove !== action || action.controller.signal.aborted || extensionInvalidated || document.hidden ||
+          location.href !== pageUrl || !boardEl?.isConnected || runtime.disposed || (!manualClick && !autoMoveEnabled)) throw new Error("Контекст хода изменился");
+      if (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true) throw new Error("Автоход на паузе: открыты настройки");
+      if (findChessComBoardElement() !== boardEl) throw new Error("Доска была заменена");
+      const guardReason = !manualClick && safeAntiBanGuard ? getAutoMoveGuardReason() : "";
+      if (guardReason) throw new Error(guardReason);
+    };
+    const requireCurrentPosition = () => {
+      requireVisibleContext();
+      // Selection animations are not a move; compare the canonical board before another tap.
+      const fresh = captureBoardState(true);
+      if (!fresh || fresh.animating || fresh.boardElement !== boardEl || fresh.positionKey !== state.positionKey ||
+          fresh.boardKey !== state.boardKey || fresh.actualTurn !== fresh.myColor || fresh.myColor !== state.myColor ||
+          fresh.isBlackOrientation !== state.isBlackOrientation || !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) {
+        throw new Error("Позиция или очередь хода изменилась");
+      }
+    };
+    const pointFor = square => {
+      const rect = boardEl.getBoundingClientRect();
+      if (rect.width < 50 || rect.height < 50) throw new Error("Доска недоступна");
+      const file = FILES.indexOf(square[0]);
+      const rank = Number(square[1]) - 1;
+      const col = state.isBlackOrientation ? 7 - file : file;
+      const row = state.isBlackOrientation ? rank : 7 - rank;
+      return { x: rect.left + (col + 0.5) * rect.width / 8, y: rect.top + (row + 0.5) * rect.height / 8 };
+    };
+    const sendGesture = async (actionType, points, target = boardEl) => {
+      requireVisibleContext();
+      for (const point of points) {
+        let hit = document.elementFromPoint(point.x, point.y);
+        const visited = new Set();
+        while (hit?.shadowRoot?.elementFromPoint && !visited.has(hit)) {
+          visited.add(hit);
+          const inner = hit.shadowRoot.elementFromPoint(point.x, point.y);
+          if (!inner || inner === hit) break;
+          hit = inner;
+        }
+        let inside = false;
+        for (let node = hit; node; node = node.parentElement || node.getRootNode?.()?.host) {
+          if (node === target) { inside = true; break; }
+        }
+        if (!inside) throw new Error("Доска перекрыта меню или другим элементом");
+      }
+      const result = await runtime.nativeRequest("input.gesture", { action: actionType, points, durationMs: actionType === "tap" ? 80 : 180 });
+      if (result?.ok !== true || result?.dispatched !== true) throw new Error("Android не подтвердил отправку касания");
+    };
+    const moveConfirmed = fresh => Boolean(fresh && fresh.boardElement === boardEl && fresh.boardKey !== state.boardKey &&
+      fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === expectedPiece);
+    setMoveExecutionState(true, "move-start");
+    setAutoStatusText(`Нативный ввод: ${moveObj.from} -> ${moveObj.to}...`, "#00f5d4");
+    try {
+      const layout = new Promise(resolve => {
+        layoutFrame = requestAnimationFrame(() => { layoutFrame = requestAnimationFrame(resolve); });
+      });
+      await Promise.race([layout, wait(400).then(() => { throw new Error("Меню не успело освободить доску"); })]);
+      boardEl = findChessComBoardElement();
+      if (state.boardElement && state.boardElement !== boardEl) throw new Error("Доска была заменена");
+      requireCurrentPosition();
+      const p1 = pointFor(moveObj.from);
+      const p2 = pointFor(moveObj.to);
+      if (autoClickMethod === "bezier_drag" || attempt > 1) {
+        await sendGesture("drag", [p1, { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, p2]);
+      } else {
+        await sendGesture("tap", [p1]);
+        requireCurrentPosition();
+        await sendGesture("tap", [pointFor(moveObj.to)]);
+      }
+      if (promoPiece) {
+        const chooserDeadline = Date.now() + 900;
+        while (Date.now() < chooserDeadline) {
+          requireVisibleContext();
+          const fresh = captureBoardState(true);
+          if (moveConfirmed(fresh)) break;
+          if (fresh && fresh.boardKey !== state.boardKey &&
+              !(fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === movingPiece)) {
+            throw new Error("Позиция изменилась до выбора превращения");
+          }
+          const color = state.myColor === "b" ? "b" : "w";
+          const selector = `.promotion-window .promotion-piece.${color}${promoPiece}, .promotion-menu [data-piece='${color}${promoPiece}'], .promotion-piece.${color}${promoPiece}`;
+          const root = boardEl.getRootNode();
+          const node = queryChessComBoard(root.host ? root : boardEl, selector)[0] || document.querySelector(selector);
+          const rect = node?.getBoundingClientRect();
+          if (rect?.width > 0 && rect.height > 0) {
+            await sendGesture("tap", [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }], node);
+            break;
+          }
+          await wait(60);
+        }
+      }
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        requireVisibleContext();
+        const fresh = captureBoardState(true);
+        if (moveConfirmed(fresh) && !queryChessComBoard(boardEl, ".piece.dragging, .piece.animating").length) {
+          completed = true;
+          break;
+        }
+        await wait(75);
+      }
+      if (!completed) throw new Error(promoPiece ? "Превращение не подтверждено на доске" : "Касания отправлены, но ход на доске не подтверждён");
+      lastOurExecutedMove = moveObj;
+      setAutoStatusText(`Ход подтверждён: ${moveObj.from} -> ${moveObj.to}`, "#38b000");
+    } catch (error) {
+      if (activeNativeMove === action) {
+        lastOurExecutedMove = previousMove;
+        setAutoStatusText(`Нативный ввод: ${error.message || "ошибка"}${error.code ? ` [${error.code}]` : ""}`, "#ffbe0b");
+      }
+    } finally {
+      if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+      action.controller.abort();
+      if (activeNativeMove === action) {
+        activeNativeMove = null;
+        moveCooldownUntil = Date.now() + (completed ? 180 : 350);
+        setMoveExecutionState(false, completed ? "confirmed" : "failed");
+        triggerDebouncedCycle();
+      }
+    }
+  }
 
-    if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("🛡 Автоход заблокирован в Rated-игре (нажмите [X] или сходите сами)", "#ffbe0b");
+  function executeMoveOnBoard(moveObj, state, manualClick = false) {
+    if (!moveObj || !/^[a-h][1-8]$/.test(moveObj.from || "") || !/^[a-h][1-8]$/.test(moveObj.to || "") || moveObj.from === moveObj.to || !state || !state.grid) return;
+    if (boardDirty || state.positionId !== positionId || state.positionKey !== currentPositionKey) return;
+
+    const guardReason = !manualClick && safeAntiBanGuard ? getAutoMoveGuardReason() : "";
+    if (guardReason) {
+      setAutoStatusText(guardReason, "#ffbe0b");
       return;
     }
 
@@ -2846,17 +3796,32 @@
       return;
     }
 
+    const movingPiece = state.grid[8 - Number(fromSq[1])]?.[FILES.indexOf(fromSq[0])]?.toLowerCase();
+    const isPromotion = movingPiece === "p" && (toSq[1] === "8" || toSq[1] === "1");
+    const promoPiece = isPromotion ? String(moveObj.promo || moveObj.uci?.[4] || "q").toLowerCase() : null;
+    if (isPromotion && !["q", "r", "b", "n"].includes(promoPiece)) {
+      setAutoStatusText("Автоход отменён: неизвестная фигура превращения.", "#ffbe0b");
+      return;
+    }
+    if (window.__CC_ANDROID_RUNTIME__) {
+      const uci = `${fromSq}${toSq}${promoPiece || ""}`;
+      if (state.actualTurn !== state.myColor ||
+          (Array.isArray(cachedMoves.legalUcis) && cachedMoves.legalUcis.length && !cachedMoves.legalUcis.includes(uci))) {
+        setAutoStatusText("Ход отменён: очередь хода или список легальных ходов изменились.", "#ffbe0b");
+        return;
+      }
+      executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece);
+      return;
+    }
+
     const boardEl = findChessComBoardElement();
-    if (!boardEl) return;
+    if (!boardEl || (state.boardElement && state.boardElement !== boardEl)) return;
 
     const r = boardEl.getBoundingClientRect();
     if (r.width < 50) return;
 
-    const isPromotion = moveObj.piece === "p" && (toSq[1] === "8" || toSq[1] === "1");
-    const promoPiece = isPromotion ? (moveObj.promo || "q") : null;
-
     lastOurExecutedMove = moveObj;
-    isExecutingMove = true;
+    setMoveExecutionState(true, "move-start");
     moveCooldownUntil = Date.now() + 450;
 
     const cellW = r.width / 8;
@@ -2882,16 +3847,42 @@
     const p1 = sqToHumanPoint(fromSq);
     const p2 = sqToHumanPoint(toSq);
 
-    performBezierStealthMove(boardEl, p1, p2, promoPiece, state.myColor, () => {
-      isExecutingMove = false;
+    performBezierStealthMove(boardEl, p1, p2, promoPiece, state.myColor, toSq, state.boardKey, (completed = true) => {
+      setMoveExecutionState(false, completed ? "dispatched" : "failed");
+      if (!completed) {
+        lastOurExecutedMove = null;
+        committedBoardKey = "";
+        boardDirty = true;
+        moveCooldownUntil = Date.now() + 180;
+        setAutoStatusText(
+          promoPiece ? `Автоход отменён: превращение ${promoPiece.toUpperCase()} не подтверждено` : "Автоход отменён: позиция изменилась",
+          "#d9ad58"
+        );
+        triggerDebouncedCycle();
+        return;
+      }
       setAutoStatusText(`✅ Сделан легит-ход: ${fromSq} → ${toSq}`, "#38b000");
       triggerDebouncedCycle();
     });
   }
 
-  function performBezierStealthMove(boardEl, p1, p2, promoPiece, myColor, onDone) {
+  function performBezierStealthMove(boardEl, p1, p2, promoPiece, myColor, toSquare, expectedBoardKey, onDone) {
+    const actionPositionId = positionId;
+    let finished = false;
+    const finish = (success) => {
+      if (finished) return;
+      finished = true;
+      if (onDone) onDone(Boolean(success));
+    };
+    const actionStillCurrent = () => !extensionInvalidated && boardEl.isConnected && positionId === actionPositionId;
     const firePointerAndMouse = (type, x, y, buttons) => {
-      const target = document.elementFromPoint(x, y) || boardEl;
+      if (!actionStillCurrent()) return;
+      let target = document.elementFromPoint(x, y) || boardEl;
+      while (target.shadowRoot?.elementFromPoint) {
+        const inner = target.shadowRoot.elementFromPoint(x, y);
+        if (!inner || inner === target) break;
+        target = inner;
+      }
       const evInit = {
         bubbles: true,
         cancelable: true,
@@ -2931,6 +3922,11 @@
       let step = 1;
       const stepInterval = Math.max(14, Math.round(durationMs / stepsCount));
       const stepTimer = setInterval(() => {
+        if (!actionStillCurrent()) {
+          clearInterval(stepTimer);
+          finish(false);
+          return;
+        }
         const t = step / stepsCount;
         const inv = 1 - t;
         const bx = Math.round(inv * inv * p1.x + 2 * inv * t * midX + t * t * p2.x + (Math.random() - 0.5) * 1.6);
@@ -2946,29 +3942,56 @@
 
     const handlePromotionIfNeeded = () => {
       if (!promoPiece) {
-        if (onDone) onDone();
+        finish(true);
         return;
       }
-      setTimeout(() => {
+      const chooserDeadline = Date.now() + 900;
+      const findAndSelectPromotion = () => {
+        if (extensionInvalidated || !boardEl.isConnected) {
+          finish(false);
+          return;
+        }
         const colChar = myColor === "b" ? "b" : "w";
         const pChar = promoPiece.toLowerCase();
-        const promoNode = document.querySelector(
-          `.promotion-window .promotion-piece.${colChar}${pChar}, .promotion-menu [data-piece='${colChar}${pChar}'], .promotion-piece.${colChar}q`
-        );
-        if (promoNode) {
-          const pr = promoNode.getBoundingClientRect();
-          const px = Math.round(pr.left + pr.width / 2 + (Math.random() - 0.5) * 6);
-          const py = Math.round(pr.top + pr.height / 2 + (Math.random() - 0.5) * 6);
-          firePointerAndMouse("mousedown", px, py, 1);
-          setTimeout(() => {
-            firePointerAndMouse("mouseup", px, py, 0);
-            promoNode.click();
-            if (onDone) onDone();
-          }, 65);
-        } else if (onDone) {
-          onDone();
+        const selector = `.promotion-window .promotion-piece.${colChar}${pChar}, .promotion-menu [data-piece='${colChar}${pChar}'], .promotion-piece.${colChar}${pChar}`;
+        const root = boardEl.getRootNode();
+        const promoNode = queryChessComBoard(root.host ? root : boardEl, selector)[0] || document.querySelector(selector);
+        if (!promoNode) {
+          if (Date.now() < chooserDeadline) setTimeout(findAndSelectPromotion, 60);
+          else finish(false);
+          return;
         }
-      }, 95);
+        const pr = promoNode.getBoundingClientRect();
+        const px = Math.round(pr.left + pr.width / 2 + (Math.random() - 0.5) * 6);
+        const py = Math.round(pr.top + pr.height / 2 + (Math.random() - 0.5) * 6);
+        firePointerAndMouse("mousedown", px, py, 1);
+        setTimeout(() => {
+          firePointerAndMouse("mouseup", px, py, 0);
+          if (!extensionInvalidated && boardEl.isConnected && promoNode.isConnected) promoNode.click();
+          const verifyDeadline = Date.now() + 1500;
+          const verifyPromotion = () => {
+            if (extensionInvalidated || !boardEl.isConnected) {
+              finish(false);
+              return;
+            }
+            const fresh = captureBoardState(true);
+            const toCol = FILES.indexOf(toSquare?.[0]);
+            const toRow = 8 - Number(toSquare?.[1]);
+            const expectedPiece = myColor === "w" ? pChar.toUpperCase() : pChar;
+            const confirmed = Boolean(
+              fresh &&
+              fresh.boardKey !== expectedBoardKey &&
+              toRow >= 0 && toRow < 8 && toCol >= 0 && toCol < 8 &&
+              fresh.grid?.[toRow]?.[toCol] === expectedPiece
+            );
+            if (confirmed) finish(true);
+            else if (Date.now() < verifyDeadline) setTimeout(verifyPromotion, 75);
+            else finish(false);
+          };
+          setTimeout(verifyPromotion, 75);
+        }, 65);
+      };
+      setTimeout(findAndSelectPromotion, 95);
     };
 
     // Наведение на стартовую фигуру и нажатие
@@ -3031,162 +4054,212 @@
 
       if (fromSq && toSq) {
         const promo = (oldPiece === "p" && newPiece && newPiece !== "p") ? newPiece : "";
+        const toCol = FILES.indexOf(toSq[0]);
+        const toRow = 8 - parseInt(toSq[1], 10);
+        const capturedOnTarget = prevGrid[toRow]?.[toCol];
+        const isCapture = Boolean(capturedOnTarget && !isCol(capturedOnTarget)) || (oldPiece === "p" && fromSq[0] !== toSq[0]);
         return {
           uci: `${fromSq}${toSq}${promo}`,
           from: fromSq,
           to: toSq,
           piece: oldPiece || "p",
-          color
+          color,
+          isCapture
         };
       }
     }
     return null;
   }
 
-  function updateCastlingEpAndRealHistory(grid, boardPart, myColor) {
+  function resetLegitHistoryStats() {
+    legitStats = {
+      totalMyMoves: 0,
+      top1Matches: 0,
+      secondLineMatches: 0,
+      windowBlursCount: 0,
+      lastBestUciOnMyTurn: "",
+      lastAvgUciOnMyTurn: ""
+    };
+    updateLegitAntiBanMeterUI();
+  }
+
+  function resetTrackedGame(grid, boardPart, boardEl, trustStartPosition) {
+    analysisRequestId++;
+    activeEngineBoardKey = "";
+    StockfishWasmEngine.cancel?.();
+    committedBoardKey = "";
+    committedEnemyBoardKey = "";
+    resetTurnDecision();
+    const trustedStart = Boolean(trustStartPosition);
+    castlingRights = { K: trustedStart, Q: trustedStart, k: trustedStart, q: trustedStart };
+    prevGridState = grid.map(row => row.slice());
+    prevBoardPartForHistory = boardPart;
+    historyBoardElement = boardEl;
+    currentEpSquare = "-";
+    halfmoveClock = 0;
+    fullmoveNumber = 1;
+    lastObservedActualTurn = trustedStart ? "w" : null;
+    lastRealEnemyMove = null;
+    lastOurExecutedMove = null;
+    sessionMoveHistory = [];
+    uciHistoryList = [];
+    recentPositionHistory = trustedStart ? [`${boardPart} w KQkq -`] : [];
+    gameStartedFromInitial = trustedStart;
+    evalGraphHistory = [];
+    lastRecordedGraphBoardKey = "";
+    renderLiveEvalGraph();
+    lastTelemetryData = null;
+    updateEvalMoodAndEngineBadge(null, null);
+    gameResultRecorded = false;
+    suspectEngineStreak = 0;
+    resetLegitHistoryStats();
+    const peerBanner = $("cc-peer-detector-banner");
+    if (peerBanner) peerBanner.style.display = "none";
+  }
+
+  function invalidateTrackedHistory(grid, boardPart, boardEl) {
+    resetTrackedGame(grid, boardPart, boardEl, false);
+    currentEpSquare = "-";
+  }
+
+  function countDifferencesFromInitialGrid(grid) {
+    const initialRows = [
+      "rnbqkbnr", "pppppppp", "........", "........",
+      "........", "........", "PPPPPPPP", "RNBQKBNR"
+    ];
+    let differences = 0;
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const expected = initialRows[row][col] === "." ? null : initialRows[row][col];
+        if (grid[row][col] !== expected) differences++;
+      }
+    }
+    return differences;
+  }
+
+  function updateCastlingEpAndRealHistory(grid, boardPart, myColor, boardEl, turnHint = null) {
     const startFenBoard = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+    const isStartPosition = boardPart === startFenBoard;
     const isNewUrl = location.pathname !== lastPathname;
-    const isFreshStartBoard =
-      boardPart === startFenBoard &&
-      prevBoardPartForHistory !== "" &&
-      prevBoardPartForHistory !== startFenBoard;
+    const isNewBoardElement = Boolean(historyBoardElement && historyBoardElement !== boardEl);
+    const isFreshStartBoard = isStartPosition && prevBoardPartForHistory !== "" && prevBoardPartForHistory !== startFenBoard;
+    const isLikelyNewGame = Boolean(
+      prevGridState &&
+      uciHistoryList.length >= 2 &&
+      countDifferencesFromInitialGrid(grid) <= 4 &&
+      countDifferencesFromInitialGrid(prevGridState) > 4
+    );
 
-    if (isNewUrl || isFreshStartBoard) {
+    if (isNewUrl || isNewBoardElement || isFreshStartBoard || isLikelyNewGame) {
       lastPathname = location.pathname;
-      castlingRights = {
-        K: grid[7][4] === "K" && grid[7][7] === "R",
-        Q: grid[7][4] === "K" && grid[7][0] === "R",
-        k: grid[0][4] === "k" && grid[0][7] === "r",
-        q: grid[0][4] === "k" && grid[0][0] === "r"
-      };
-      prevGridState = grid.map(r => r.slice());
-      prevBoardPartForHistory = boardPart;
-      currentEpSquare = "-";
-      lastRealEnemyMove = null;
-      lastOurExecutedMove = null;
-      sessionMoveHistory = [];
-      uciHistoryList = [];
-      recentPositionHistory = [boardPart];
-      gameStartedFromInitial = (boardPart === startFenBoard);
-      evalGraphHistory = [];
-      lastRecordedGraphBoardKey = "";
-      renderLiveEvalGraph();
-      gameResultRecorded = false;
-      suspectEngineStreak = 0;
-
-      // Сброс счетчика T1% на новую партию
-      legitStats = {
-        totalMyMoves: 0,
-        top1Matches: 0,
-        secondLineMatches: 0,
-        windowBlursCount: 0,
-        lastBestUciOnMyTurn: "",
-        lastAvgUciOnMyTurn: ""
-      };
-      updateLegitAntiBanMeterUI();
-
-      const peerBanner = $("cc-peer-detector-banner");
-      if (peerBanner) peerBanner.style.display = "none";
+      resetTrackedGame(grid, boardPart, boardEl, isStartPosition);
+      if ((isNewUrl || isFreshStartBoard) && visualMask.enabled && visualMask.autoRotateOpponent) {
+        randomizePrivacyOpponent();
+      }
       return;
     }
 
     if (!prevGridState) {
-      castlingRights = {
-        K: grid[7][4] === "K" && grid[7][7] === "R",
-        Q: grid[7][4] === "K" && grid[7][0] === "R",
-        k: grid[0][4] === "k" && grid[0][7] === "r",
-        q: grid[0][4] === "k" && grid[0][0] === "r"
-      };
-      prevGridState = grid.map(r => r.slice());
+      castlingRights = { K: isStartPosition, Q: isStartPosition, k: isStartPosition, q: isStartPosition };
+      prevGridState = grid.map(row => row.slice());
       prevBoardPartForHistory = boardPart;
+      historyBoardElement = boardEl;
       currentEpSquare = "-";
-      recentPositionHistory = [boardPart];
-      gameStartedFromInitial = (boardPart === startFenBoard);
+      halfmoveClock = 0;
+      fullmoveNumber = 1;
+      lastObservedActualTurn = isStartPosition ? "w" : turnHint;
+      recentPositionHistory = isStartPosition ? [`${boardPart} w KQkq -`] : [];
+      gameStartedFromInitial = isStartPosition;
       return;
     }
 
     let diffCount = 0;
     let epFound = "-";
-
     for (let c = 0; c < 8; c++) {
-      if (prevGridState[6][c] === "P" && !grid[6][c] && !grid[5][c] && grid[4][c] === "P") {
-        epFound = `${FILES[c]}3`;
-      }
-      if (prevGridState[1][c] === "p" && !grid[1][c] && !grid[2][c] && grid[3][c] === "p") {
-        epFound = `${FILES[c]}6`;
-      }
+      if (prevGridState[6][c] === "P" && !grid[6][c] && !grid[5][c] && grid[4][c] === "P") epFound = `${FILES[c]}3`;
+      if (prevGridState[1][c] === "p" && !grid[1][c] && !grid[2][c] && grid[3][c] === "p") epFound = `${FILES[c]}6`;
     }
-
     for (let r = 0; r < 8; r++) {
       for (let c = 0; c < 8; c++) {
         if (prevGridState[r][c] !== grid[r][c]) diffCount++;
       }
     }
+    if (diffCount === 0) return;
+    if (diffCount === 1) return false;
+    if (diffCount > 4) {
+      invalidateTrackedHistory(grid, boardPart, boardEl);
+      return;
+    }
 
-    if (diffCount > 0 && diffCount <= 4) {
-      if (grid[7][4] !== "K") { castlingRights.K = false; castlingRights.Q = false; }
-      if (grid[7][7] !== "R") castlingRights.K = false;
-      if (grid[7][0] !== "R") castlingRights.Q = false;
+    const realMove = detectRealMoveBetweenGrids(prevGridState, grid);
+    const isSingleCastling = Boolean(realMove?.piece === "k" && Math.abs(FILES.indexOf(realMove.from[0]) - FILES.indexOf(realMove.to[0])) === 2);
+    const isSingleEnPassant = Boolean(realMove?.piece === "p" && realMove.from[0] !== realMove.to[0] && diffCount === 3);
+    const expectedMover = gameStartedFromInitial ? (uciHistoryList.length % 2 === 0 ? "w" : "b") : null;
+    const ambiguousDelta =
+      !realMove?.uci ||
+      (diffCount === 4 && !isSingleCastling) ||
+      (diffCount === 3 && !isSingleEnPassant) ||
+      (expectedMover && realMove.color !== expectedMover) ||
+      (turnHint && realMove.color === turnHint) ||
+      gameResultRecorded;
+    if (ambiguousDelta) {
+      invalidateTrackedHistory(grid, boardPart, boardEl);
+      return;
+    }
 
-      if (grid[0][4] !== "k") { castlingRights.k = false; castlingRights.q = false; }
-      if (grid[0][7] !== "r") castlingRights.k = false;
-      if (grid[0][0] !== "r") castlingRights.q = false;
+    if (grid[7][4] !== "K") { castlingRights.K = false; castlingRights.Q = false; }
+    if (grid[7][7] !== "R") castlingRights.K = false;
+    if (grid[7][0] !== "R") castlingRights.Q = false;
+    if (grid[0][4] !== "k") { castlingRights.k = false; castlingRights.q = false; }
+    if (grid[0][7] !== "r") castlingRights.k = false;
+    if (grid[0][0] !== "r") castlingRights.q = false;
 
-      currentEpSquare = epFound;
+    currentEpSquare = epFound;
+    const nextTurn = realMove.color === "w" ? "b" : "w";
+    lastObservedActualTurn = gameStartedFromInitial || turnHint ? nextTurn : null;
 
-      if (recentPositionHistory[recentPositionHistory.length - 1] !== boardPart) {
-        recentPositionHistory.push(boardPart);
-        if (recentPositionHistory.length > 80) {
-          recentPositionHistory.shift();
-        }
+    if (gameStartedFromInitial) {
+      halfmoveClock = realMove.piece === "p" || realMove.isCapture ? 0 : halfmoveClock + 1;
+      if (realMove.color === "b") fullmoveNumber++;
+      const repetitionKey = `${boardPart} ${nextTurn} ${getCastlingString()} ${currentEpSquare}`;
+      if (recentPositionHistory[recentPositionHistory.length - 1] !== repetitionKey) {
+        recentPositionHistory.push(repetitionKey);
+        if (recentPositionHistory.length > 80) recentPositionHistory.shift();
       }
+      uciHistoryList.push(realMove.uci);
 
-      const realMove = detectRealMoveBetweenGrids(prevGridState, grid);
-      if (realMove && realMove.uci) {
-        if (uciHistoryList[uciHistoryList.length - 1] !== realMove.uci) {
-          uciHistoryList.push(realMove.uci);
-        }
-        if (realMove.color === myColor && prevBoardPartForHistory) {
-          const prevFenKey = `${prevBoardPartForHistory} ${myColor}`;
-          sessionMoveHistory.push({ fenKey: prevFenKey, uci: realMove.uci });
-          lastOurExecutedMove = realMove;
-          lastRealEnemyMove = null;
-
-          // Учет нашего хода в статистике Fair Play T1%
-          legitStats.totalMyMoves++;
-          if (legitStats.lastBestUciOnMyTurn && realMove.uci === legitStats.lastBestUciOnMyTurn) {
-            legitStats.top1Matches++;
-          } else if (legitStats.lastAvgUciOnMyTurn && realMove.uci === legitStats.lastAvgUciOnMyTurn) {
-            legitStats.secondLineMatches++;
-          }
-          updateLegitAntiBanMeterUI();
-        } else if (realMove.color !== myColor) {
-          lastRealEnemyMove = {
-            from: realMove.from,
-            to: realMove.to,
-            piece: realMove.piece,
-            color: realMove.color,
-            epTarget: epFound !== "-" ? epFound : null
-          };
-        }
+      if (realMove.color === myColor && prevBoardPartForHistory) {
+        sessionMoveHistory.push({ fenKey: `${prevBoardPartForHistory} ${myColor}`, uci: realMove.uci });
+        legitStats.totalMyMoves++;
+        if (legitStats.lastBestUciOnMyTurn && realMove.uci === legitStats.lastBestUciOnMyTurn) legitStats.top1Matches++;
+        else if (legitStats.lastAvgUciOnMyTurn && realMove.uci === legitStats.lastAvgUciOnMyTurn) legitStats.secondLineMatches++;
+        updateLegitAntiBanMeterUI();
       }
+    } else {
+      halfmoveClock = 0;
+      fullmoveNumber = 1;
+      uciHistoryList = [];
+      recentPositionHistory = [];
+    }
 
-      prevGridState = grid.map(r => r.slice());
-      prevBoardPartForHistory = boardPart;
-    } else if (diffCount > 4) {
-      castlingRights = {
-        K: grid[7][4] === "K" && grid[7][7] === "R",
-        Q: grid[7][4] === "K" && grid[7][0] === "R",
-        k: grid[0][4] === "k" && grid[0][7] === "r",
-        q: grid[0][4] === "k" && grid[0][0] === "r"
-      };
-      prevGridState = grid.map(r => r.slice());
-      prevBoardPartForHistory = boardPart;
-      gameStartedFromInitial = (boardPart === startFenBoard);
-      if (recentPositionHistory[recentPositionHistory.length - 1] !== boardPart) {
-        recentPositionHistory.push(boardPart);
+    if (gameStartedFromInitial || turnHint) {
+      if (realMove.color === myColor) {
+        lastOurExecutedMove = realMove;
+        lastRealEnemyMove = null;
+      } else {
+        lastRealEnemyMove = {
+          from: realMove.from,
+          to: realMove.to,
+          piece: realMove.piece,
+          color: realMove.color,
+          epTarget: epFound !== "-" ? epFound : null
+        };
       }
     }
+
+    prevGridState = grid.map(row => row.slice());
+    prevBoardPartForHistory = boardPart;
+    historyBoardElement = boardEl;
   }
 
   function getCastlingString() {
@@ -3196,6 +4269,55 @@
     if (castlingRights.k) s += "k";
     if (castlingRights.q) s += "q";
     return s || "-";
+  }
+
+  function detectActiveClockTurn(bottomColor, topColor) {
+    const hasVisibleMatch = (selector) => Array.from(document.querySelectorAll(selector))
+      .some(node => isElementVisibleInViewport(node));
+    const bottomActive = hasVisibleMatch(
+      ".board-layout-bottom .clock-player-turn, .board-layout-bottom .clock-running, " +
+      ".clock-bottom.clock-player-turn, .clock-bottom.clock-running, " +
+      ".player-bottom .clock-player-turn, .player-bottom .clock-running"
+    );
+    const topActive = hasVisibleMatch(
+      ".board-layout-top .clock-player-turn, .board-layout-top .clock-running, " +
+      ".clock-top.clock-player-turn, .clock-top.clock-running, " +
+      ".player-top .clock-player-turn, .player-top .clock-running"
+    );
+    if (bottomActive === topActive) return null;
+    return bottomActive ? bottomColor : topColor;
+  }
+
+  function detectDeclaredBoardTurn(boardEl) {
+    for (const node of [boardEl, ...getChessComBoardRoots(boardEl).map(root => root.host).filter(Boolean)]) {
+      const raw = String(
+        node?.getAttribute?.("turn") ||
+        node?.getAttribute?.("data-turn") ||
+        node?.getAttribute?.("side-to-move") ||
+        ""
+      ).toLowerCase();
+      if (raw === "w" || raw === "white") return "w";
+      if (raw === "b" || raw === "black") return "b";
+    }
+    return null;
+  }
+
+  function detectTurnFromLastMoveHighlights(boardEl, grid) {
+    const highlightedSquares = new Map();
+    for (const highlight of queryChessComBoard(boardEl, ".highlight")) {
+      if (!isElementVisibleInViewport(highlight)) continue;
+      const squareMatch = (highlight.getAttribute("class") || "").match(/\bsquare-(\d)(\d)\b/);
+      if (!squareMatch) continue;
+      const col = parseInt(squareMatch[1], 10) - 1;
+      const row = 8 - parseInt(squareMatch[2], 10);
+      highlightedSquares.set(`${col}:${row}`, { col, row });
+    }
+    if (highlightedSquares.size !== 2) return null;
+    const occupied = [...highlightedSquares.values()].filter(({ row, col }) => Boolean(grid[row]?.[col]));
+    if (occupied.length !== 1) return null;
+    const piece = grid[occupied[0].row][occupied[0].col];
+    const movedColor = piece === piece.toUpperCase() ? "w" : "b";
+    return movedColor === "w" ? "b" : "w";
   }
 
   /**
@@ -3209,7 +4331,7 @@
     const boardRect = boardEl.getBoundingClientRect();
     if (boardRect.width < 50 || boardRect.height < 50) return null;
 
-    if (!allowCachedDuringAnim && !isExecutingMove && boardEl.querySelector(".piece.dragging")) {
+    if (!allowCachedDuringAnim && !isExecutingMove && queryChessComBoard(boardEl, ".piece.dragging").length) {
       if (!animRetryTimer) {
         animRetryTimer = setTimeout(() => {
           animRetryTimer = null;
@@ -3219,18 +4341,25 @@
       return { animating: true };
     }
 
-    const isBlackOrientation = forcedMyColor === "b"
-      ? true
-      : (forcedMyColor === "w" ? false : boardEl.classList.contains("flipped"));
-    const myColor = isBlackOrientation ? "b" : "w";
-    const enemyColor = myColor === "w" ? "b" : "w";
+    let isBlackOrientation = false;
+    for (let node = boardEl; node; node = node.parentElement || node.getRootNode().host) {
+      if (node.classList.contains("flipped") || node.getAttribute("orientation") === "black") {
+        isBlackOrientation = true;
+        break;
+      }
+    }
+    const bottomColor = isBlackOrientation ? "b" : "w";
+    const myColor = forcedMyColor === "w" || forcedMyColor === "b" ? forcedMyColor : bottomColor;
+    const topColor = bottomColor === "w" ? "b" : "w";
+    const activeClockTurn = detectActiveClockTurn(bottomColor, topColor);
+    const declaredBoardTurn = detectDeclaredBoardTurn(boardEl);
 
     const grid = Array.from({ length: 8 }, () => Array(8).fill(null));
     let pieceCount = 0;
 
-    const pieces = boardEl.querySelectorAll(".piece");
+    const pieces = queryChessComBoard(boardEl, ".piece");
     pieces.forEach((p) => {
-      const cls = p.className || "";
+      const cls = p.getAttribute("class") || "";
       const typeMatch = cls.match(/\b([wb])([pnbrqk])\b/i);
       const sqMatch = cls.match(/\bsquare-(\d)(\d)\b/);
       if (!typeMatch || !sqMatch) return;
@@ -3246,7 +4375,7 @@
       }
     });
 
-    if (pieceCount === 0) return null;
+    if (pieceCount === 0 || !grid.some(row => row.includes("K")) || !grid.some(row => row.includes("k"))) return null;
 
     const fenRows = grid.map((r) => {
       let s = "", empty = 0;
@@ -3262,56 +4391,61 @@
     });
 
     const boardPart = fenRows.join("/");
-    updateCastlingEpAndRealHistory(grid, boardPart, myColor);
-
-    // Определение очередности хода на Chess.com
-    let actualTurn = "w";
-    if (boardPart === "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR") {
-      actualTurn = "w";
-    } else {
-      let detectedByHighlight = null;
-      const highlights = boardEl.querySelectorAll(".highlight");
-      for (const hl of highlights) {
-        const sqM = (hl.className || "").match(/\bsquare-(\d)(\d)\b/);
-        if (!sqM) continue;
-        const c = parseInt(sqM[1], 10) - 1;
-        const r = 8 - parseInt(sqM[2], 10);
-        const pieceHere = grid[r]?.[c];
-        if (pieceHere) {
-          const movedColor = pieceHere === pieceHere.toUpperCase() ? "w" : "b";
-          detectedByHighlight = movedColor === "w" ? "b" : "w";
-          break;
+    if (!allowCachedDuringAnim) {
+      const historyStable = updateCastlingEpAndRealHistory(grid, boardPart, myColor, boardEl, activeClockTurn || declaredBoardTurn);
+      if (historyStable === false) {
+        if (!animRetryTimer) {
+          animRetryTimer = setTimeout(() => {
+            animRetryTimer = null;
+            runCycle(false);
+          }, 30);
         }
-      }
-
-      if (detectedByHighlight) {
-        actualTurn = detectedByHighlight;
-      } else if (document.querySelector(".board-layout-bottom .clock-player-turn, .clock-bottom.clock-player-turn")) {
-        actualTurn = myColor;
-      } else if (document.querySelector(".board-layout-top .clock-player-turn, .clock-top.clock-player-turn")) {
-        actualTurn = enemyColor;
-      } else if (uciHistoryList.length > 0) {
-        actualTurn = uciHistoryList.length % 2 === 0 ? "w" : "b";
+        return { animating: true };
       }
     }
+
+    // Определение очередности хода на Chess.com
+    const startFenBoard = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+    const trustedHistoryTurn = gameStartedFromInitial ? (uciHistoryList.length % 2 === 0 ? "w" : "b") : null;
+    const highlightedTurn = detectTurnFromLastMoveHighlights(boardEl, grid);
+    const actualTurn = boardPart === startFenBoard
+      ? "w"
+      : (activeClockTurn || declaredBoardTurn || trustedHistoryTurn || lastObservedActualTurn || highlightedTurn || "w");
 
     let sideToAnalyze = actualTurn;
     if (turnMode === "w") sideToAnalyze = "w";
     else if (turnMode === "b") sideToAnalyze = "b";
 
     const castlingStr = getCastlingString();
-    return {
+    const state = {
       animating: false,
       grid,
       pieceCount,
-      fen: `${boardPart} ${sideToAnalyze} ${castlingStr} ${currentEpSquare} 0 1`,
-      boardKey: `${boardPart} ${sideToAnalyze}`,
+      fen: `${boardPart} ${sideToAnalyze} ${castlingStr} ${currentEpSquare} ${halfmoveClock} ${fullmoveNumber}`,
+      actualFen: `${boardPart} ${actualTurn} ${castlingStr} ${currentEpSquare} ${halfmoveClock} ${fullmoveNumber}`,
+      boardKey: `${boardPart} ${sideToAnalyze} ${castlingStr} ${currentEpSquare}`,
+      positionKey: `${boardPart} ${actualTurn} ${castlingStr} ${currentEpSquare}`,
+      sessionId: analysisSessionId,
+      positionId,
+      boardElement: boardEl,
       boardRect,
       isBlackOrientation,
       myColor,
       actualTurn,
       sideToAnalyze
     };
+    window.__CHESSCOACH_BOARD_STATE__ = {
+      grid: grid.map(row => row.slice()),
+      fen: state.actualFen,
+      positionKey: state.positionKey,
+      positionId,
+      actualTurn,
+      myColor,
+      isBlackOrientation,
+      boardElement: boardEl,
+      timestamp: Date.now()
+    };
+    return state;
   }
 
   function renderEvalBar(state, whiteEvalPawns) {
@@ -3326,12 +4460,12 @@
       getShadow().appendChild(bar);
     }
 
-    if (!showEvalBar || !state || !state.boardRect) {
+    if (!showEvalBar || !state || !state.boardRect || (state.boardElement && !state.boardElement.isConnected)) {
       bar.style.display = "none";
       return;
     }
 
-    const r = state.boardRect;
+    const r = state.boardElement ? state.boardElement.getBoundingClientRect() : state.boardRect;
     bar.style.display = "block";
     bar.style.left = `${Math.max(4, r.left - 20)}px`;
     bar.style.top = `${r.top}px`;
@@ -3343,7 +4477,11 @@
     const fill = $("chesscoach-eval-fill");
     const txt = $("chesscoach-eval-text");
 
-    if (fill) fill.style.height = `${whitePercent}%`;
+    if (fill) {
+      fill.style.height = `${whitePercent}%`;
+      fill.style.top = state.isBlackOrientation ? "0" : "auto";
+      fill.style.bottom = state.isBlackOrientation ? "auto" : "0";
+    }
     if (txt) txt.textContent = `${evalNum > 0 ? "+" : ""}${evalNum.toFixed(1)}`;
   }
 
@@ -3391,28 +4529,54 @@
   }
 
   function renderArrowsOverlay(state, res) {
+    const tokenMismatch = currentPositionKey && (boardDirty || (res.positionId !== undefined && res.positionId !== positionId) || state?.positionKey !== currentPositionKey);
+    if (!state || !res || tokenMismatch) {
+      hideArrows();
+      return;
+    }
+    if (!state || state.animating || !state.boardRect || (state.boardElement && !state.boardElement.isConnected)) {
+      hideArrows();
+      return;
+    }
     let svg = $("chesscoach-screen-svg");
     if (!svg) {
       svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.id = "chesscoach-screen-svg";
       svg.setAttribute("viewBox", "0 0 800 800");
+      svg.setAttribute("preserveAspectRatio", "none");
       getShadow().appendChild(svg);
     }
 
     const showHeatmapNow = Boolean(isAltPressed || heatmapAlwaysOn);
+    const waitingForFinalNnue = Boolean(
+      engineMaxMode &&
+      useStockfishWasm &&
+      res?.best &&
+      !res.engineMeta &&
+      res.pass !== "deep" &&
+      !res.best.fromSyzygy &&
+      !res.best.isMateInOne
+    );
+    const canRenderMoveArrows = showArrows && !waitingForFinalNnue;
+    const analysisMatches = !res?.boardKey || res.boardKey === state.boardKey;
+    const heatmapMatches = analysisMatches || res?.heatmapBoardKey === state.boardKey;
 
     if (turnMode === "my" && state && state.actualTurn !== state.myColor && !showHeatmapNow) {
       hideArrows();
       return;
     }
 
-    if (!showHeatmapNow && (!showArrows || !state || !state.boardRect || !res || !res.best)) {
+    if (!showHeatmapNow && (!canRenderMoveArrows || !analysisMatches || !res || !res.best)) {
       svg.innerHTML = "";
       svg.style.display = "none";
       return;
     }
 
-    const r = state.boardRect;
+    const r = state.boardElement ? state.boardElement.getBoundingClientRect() : state.boardRect;
+    if (r.width <= 0 || r.height <= 0) {
+      hideArrows();
+      return;
+    }
     svg.style.display = "block";
     svg.style.position = "fixed";
     svg.style.left = `${r.left}px`;
@@ -3420,8 +4584,11 @@
     svg.style.width = `${r.width}px`;
     svg.style.height = `${r.height}px`;
     svg.style.pointerEvents = "none";
+    svg.style.overflow = "visible";
     svg.style.zIndex = "2147483645";
     svg.style.animation = arrowStyle === "chroma_rgb" ? "cc-chroma-shift 2.5s linear infinite" : "none";
+    svg.setAttribute("data-cc-orientation", state.isBlackOrientation ? "black" : "white");
+    svg.setAttribute("data-cc-board-key", state.boardKey);
 
     const isBlack = state.isBlackOrientation;
     const sqToXY = (sq) => {
@@ -3432,8 +4599,8 @@
       return { x: col * 100 + 50, y: row * 100 + 50 };
     };
 
-    const heatmapSVG = showHeatmapNow ? buildHeatmapCellsSVG(res?.heatmap || cachedMoves.heatmap, sqToXY) : "";
-    if (!res || !res.best || !showArrows || (turnMode === "my" && state.actualTurn !== state.myColor)) {
+    const heatmapSVG = showHeatmapNow && heatmapMatches ? buildHeatmapCellsSVG(res?.heatmap || cachedMoves.heatmap, sqToXY) : "";
+    if (!analysisMatches || !res || !res.best || !canRenderMoveArrows || (turnMode === "my" && state.actualTurn !== state.myColor)) {
       svg.innerHTML = heatmapSVG;
       return;
     }
@@ -3843,33 +5010,57 @@
     }
   }
 
+  function normalizeEngineWdl(line, state) {
+    const raw = line?.wdl;
+    const win = Number(Array.isArray(raw) ? raw[0] : raw?.win);
+    const draw = Number(Array.isArray(raw) ? raw[1] : raw?.draw);
+    const loss = Number(Array.isArray(raw) ? raw[2] : raw?.loss);
+    if (![win, draw, loss].every(Number.isFinite)) return null;
+    const total = win + draw + loss;
+    if (total <= 0) return null;
+    const sideIsMine = state?.sideToAnalyze === state?.myColor;
+    const myRaw = sideIsMine ? win : loss;
+    const enemyRaw = sideIsMine ? loss : win;
+    return {
+      myWin: Math.round((myRaw / total) * 100),
+      draw: Math.round((draw / total) * 100),
+      enemyWin: Math.round((enemyRaw / total) * 100)
+    };
+  }
+
   function mergeWasmAnalysisIntoResult(baseRes, wasmOut, state) {
     if (!baseRes || !baseRes.best || !wasmOut || !wasmOut.lines || !wasmOut.lines[1]) {
       return baseRes;
     }
+    const strictBestPolicy = usesStrictBestMovePolicy();
     if (
       baseRes.syzygyActive ||
       baseRes.best.fromSyzygy ||
-      baseRes.best.isMateInOne ||
-      baseRes.best.isForcedMateInTwo
+      (!strictBestPolicy && (baseRes.best.isMateInOne || baseRes.best.isForcedMateInTwo))
     ) {
       return baseRes;
     }
 
-    const safeSet = Array.isArray(baseRes.safeNonRepeatingUcis) && baseRes.safeNonRepeatingUcis.length > 0
+    const safeSet = !strictBestPolicy && Array.isArray(baseRes.safeNonRepeatingUcis) && baseRes.safeNonRepeatingUcis.length > 0
       ? new Set(baseRes.safeNonRepeatingUcis)
       : null;
+    const legalSet = Array.isArray(baseRes.legalUcis) && baseRes.legalUcis.length > 0 ? new Set(baseRes.legalUcis) : null;
+    const hardRejectedSet = !strictBestPolicy && Array.isArray(baseRes.hardRejectedUcis) ? new Set(baseRes.hardRejectedUcis) : null;
 
     let chosenLine = null;
-    for (const idx of [1, 2, 3]) {
-      const candidate = wasmOut.lines[idx];
+    const engineCandidates = [wasmOut.primaryLine, wasmOut.lines[1], wasmOut.lines[2], wasmOut.lines[3]]
+      .filter((candidate, index, all) => candidate && all.findIndex(item => item?.uci === candidate.uci) === index);
+    for (const candidate of engineCandidates) {
       if (!candidate || !candidate.uci) continue;
+      if (legalSet && !legalSet.has(candidate.uci)) continue;
+      if (hardRejectedSet?.has(candidate.uci)) continue;
       if (candidate.isMate && candidate.mateIn > 0) {
         chosenLine = candidate;
         break;
       }
-      if (!safeSet || safeSet.has(candidate.uci)) {
-        if (idx === 1 || candidate.scoreCp >= -40 || candidate.scoreCp >= (wasmOut.lines[1].scoreCp - 110)) {
+      const isPrimary = candidate === engineCandidates[0];
+      if (strictBestPolicy || isPrimary || !safeSet || safeSet.has(candidate.uci)) {
+        if (candidate === engineCandidates[0] || candidate.scoreCp >= -40 || candidate.scoreCp >= (wasmOut.lines[1].scoreCp - 110)) {
           chosenLine = candidate;
           break;
         }
@@ -3881,11 +5072,30 @@
     }
 
     if (
+      !strictBestPolicy &&
+      baseRes.best.fromCloud &&
+      baseRes.best.uci !== chosenLine.uci &&
+      Number(baseRes.best.cloudDepth) >= Number(chosenLine.depth || 0)
+    ) {
+      return baseRes;
+    }
+
+    const primarySfLine = engineCandidates[0] || null;
+    const trapSfLine = engineCandidates.find(line => line.uci === baseRes.best.uci) || null;
+    const primarySfScore = structuredScoreValue(getStructuredMoveScore(primarySfLine));
+    const trapSfScore = structuredScoreValue(getStructuredMoveScore(trapSfLine));
+    const objectiveTrapDelta = Number.isFinite(primarySfScore) && Number.isFinite(trapSfScore)
+      ? primarySfScore - trapSfScore
+      : null;
+    if (
+      !strictBestPolicy &&
       trapRadarEnabled &&
       baseRes.best.isTrap &&
+      baseRes.best.uci !== chosenLine.uci &&
       baseRes.best.trapChance >= 84 &&
       (currentStyle === "tal" || currentStyle === "mogging" || currentStyle === "hikaru") &&
-      baseRes.best.pureSearchScore >= -45 &&
+      Number.isFinite(objectiveTrapDelta) &&
+      objectiveTrapDelta <= 35 &&
       !chosenLine.isMate
     ) {
       return baseRes;
@@ -3899,16 +5109,19 @@
       return p ? p.toLowerCase() : "p";
     };
 
-    const capturedAtSq = (sq) => {
+    const capturedAtSq = (sq, fromSq = null) => {
       if (!state || !state.grid || !sq || sq.length < 2) return null;
       const c = FILES.indexOf(sq[0]);
       const r = 8 - parseInt(sq[1], 10);
       const p = state.grid[r]?.[c];
-      return p ? p.toLowerCase() : null;
+      if (p) return p.toLowerCase();
+      if (fromSq && pieceAtSq(fromSq) === "p" && fromSq[0] !== sq[0]) return "p";
+      return null;
     };
 
     const isMateIn1 = Boolean(chosenLine.isMate && chosenLine.mateIn === 1);
     const isMateIn2 = Boolean(chosenLine.isMate && chosenLine.mateIn === 2);
+    const sameAsBase = chosenLine.uci === baseRes.best.uci;
     const evalPawnsStr = chosenLine.isMate
       ? (chosenLine.mateIn > 0 ? `МАТ #${chosenLine.mateIn}` : `-МАТ #${Math.abs(chosenLine.mateIn)}`)
       : (chosenLine.scoreCp / 100).toFixed(2);
@@ -3923,21 +5136,56 @@
       to: chosenLine.to,
       promo: chosenLine.promo || null,
       piece: pieceAtSq(chosenLine.from),
-      captured: capturedAtSq(chosenLine.to),
+      captured: capturedAtSq(chosenLine.to, chosenLine.from),
+      isEnPassant: pieceAtSq(chosenLine.from) === "p" && chosenLine.from[0] !== chosenLine.to[0] && !capturedAtSq(chosenLine.to),
       fromWasm: true,
+      fromCloud: sameAsBase ? baseRes.best.fromCloud : false,
+      fromExplorer: sameAsBase ? baseRes.best.fromExplorer : false,
+      cloudDepth: sameAsBase ? baseRes.best.cloudDepth : 0,
       isMateInOne: isMateIn1,
       isForcedMateInTwo: isMateIn2,
       isCheckmate: Boolean(chosenLine.isMate && chosenLine.mateIn > 0),
+      blundersMate: false,
+      causesStalemate: false,
+      isRepetitionDrawRisk: false,
+      underDirectAttack: sameAsBase ? baseRes.best.underDirectAttack : false,
+      ignoredHangingPiece: sameAsBase ? baseRes.best.ignoredHangingPiece : false,
+      ruinedCastling: sameAsBase ? baseRes.best.ruinedCastling : false,
+      bookName: sameAsBase ? baseRes.best.bookName : null,
+      savedHangingPiece: sameAsBase ? baseRes.best.savedHangingPiece : null,
+      isSacrifice: sameAsBase ? baseRes.best.isSacrifice : false,
+      isFork: sameAsBase ? baseRes.best.isFork : false,
+      isPin: sameAsBase ? baseRes.best.isPin : false,
+      trueScore: chosenLine.scoreCp,
+      scoreCp: chosenLine.scoreCp,
+      isMate: Boolean(chosenLine.isMate),
+      mateIn: chosenLine.isMate ? chosenLine.mateIn : null,
       pvLine: chosenLine.pvChain || baseRes.best.pvLine,
       pureSearchScore: chosenLine.scoreCp,
       evalPawns: evalPawnsStr,
       whitePerspectiveEval: whiteEval,
-      isTrap: chosenLine.uci === baseRes.best.uci ? baseRes.best.isTrap : false
+      isTrap: sameAsBase ? baseRes.best.isTrap : false,
+      engineHashMb: wasmOut.hashMb || 0,
+      engineWorkers: wasmOut.workers || 1,
+      engineDepth: chosenLine.depth || 0,
+      engineConsensus: wasmOut.consensus || "primary-only",
+      engineNps: chosenLine.nps || 0,
+      engineHashFull: chosenLine.hashFull || 0
     };
 
-    let updatedAvg = baseRes.average;
-    if (showAverageMove && wasmOut.lines[2] && wasmOut.lines[2].uci !== updatedBest.uci) {
-      const l2 = wasmOut.lines[2];
+    let updatedAvg = isNegativeMateMove(baseRes.average) ? null : baseRes.average;
+    const averageLine = [1, 2, 3]
+      .map(index => wasmOut.lines[index])
+      .find(line =>
+        line &&
+        line.uci !== updatedBest.uci &&
+        !isNegativeMateMove(line) &&
+        (!legalSet || legalSet.has(line.uci)) &&
+        !hardRejectedSet?.has(line.uci) &&
+        (!safeSet || safeSet.has(line.uci))
+      );
+    if (averageLine) {
+      const l2 = averageLine;
       if (!safeSet || safeSet.has(l2.uci)) {
         updatedAvg = {
           ...(baseRes.average || baseRes.best),
@@ -3946,48 +5194,99 @@
           to: l2.to,
           promo: l2.promo || null,
           piece: pieceAtSq(l2.from),
-          captured: capturedAtSq(l2.to),
+          captured: capturedAtSq(l2.to, l2.from),
           fromWasm: true,
           isMateInOne: false,
-          blundersMate: Boolean(l2.isMate && l2.mateIn < 0),
+          isForcedMateInTwo: false,
+          isCheckmate: Boolean(l2.isMate && l2.mateIn > 0),
+          blundersMate: false,
+          causesStalemate: false,
+          isRepetitionDrawRisk: false,
+          underDirectAttack: false,
+          ignoredHangingPiece: false,
+          ruinedCastling: false,
+          savedHangingPiece: null,
+          isSacrifice: false,
+          isFork: false,
+          isPin: false,
+          trueScore: l2.scoreCp,
+          scoreCp: l2.scoreCp,
+          isMate: Boolean(l2.isMate),
+          mateIn: l2.isMate ? l2.mateIn : null,
           pvLine: l2.pvChain,
           pureSearchScore: l2.scoreCp,
-          evalPawns: l2.isMate ? `МАТ #${l2.mateIn}` : (l2.scoreCp / 100).toFixed(2)
+          evalPawns: l2.isMate
+            ? (l2.mateIn > 0 ? `МАТ #${l2.mateIn}` : `-МАТ #${Math.abs(l2.mateIn)}`)
+            : (l2.scoreCp / 100).toFixed(2),
+          whitePerspectiveEval: l2.isMate
+            ? (state.sideToAnalyze === "w" ? (l2.mateIn > 0 ? 10 : -10) : (l2.mateIn > 0 ? -10 : 10))
+            : ((state.sideToAnalyze === "w" ? l2.scoreCp : -l2.scoreCp) / 100).toFixed(2)
         };
       }
     }
 
+    const workerCount = wasmOut.workers || 1;
+    const mergedWdl = normalizeEngineWdl(chosenLine, state);
+    const consensusLabel = workerCount > 1
+      ? (wasmOut.consensus === "strong" ? "CONSENSUS" : wasmOut.consensus === "weak" ? "VERIFY" : "SPLIT")
+      : "PRIMARY";
+    const engineLabel = wasmOut.resources?.fullNnue || wasmOut.backend?.includes("full") ? "SF FULL" : "SF LOCAL";
     const updatedTelemetry = baseRes.telemetry
       ? {
           ...baseRes.telemetry,
-          serverSource: `SF WASM d${chosenLine.depth || 12} • STEALTH`,
+          ...(mergedWdl || {}),
+          serverSource: `${engineLabel} ${workerCount}C • H${wasmOut.hashMb || "?"}M • D${chosenLine.depth || 12} • ${consensusLabel}`,
           nearestThreatText: isMateIn1
             ? `👑 МАТ В 1 ХОД: ${updatedBest.from}→${updatedBest.to}#`
             : (isMateIn2
                 ? `👑 ФОРС. МАТ В 2 ХОДА: ${updatedBest.from}→${updatedBest.to}+`
-                : `План SF WASM: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
+                : `План SF LOCAL: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
         }
       : null;
 
     return {
       ...baseRes,
+      ...(mergedWdl || {}),
       best: updatedBest,
       average: updatedAvg,
+      engineMeta: {
+        workers: workerCount,
+        hashMb: wasmOut.hashMb || 0,
+        depth: chosenLine.depth || 0,
+        selDepth: chosenLine.selDepth || chosenLine.depth || 0,
+        nps: chosenLine.nps || 0,
+        hashFull: chosenLine.hashFull || 0,
+        consensus: wasmOut.consensus || "primary-only",
+        backend: wasmOut.backend || "stockfish-19-lite-asm",
+        fullNnue: Boolean(wasmOut.resources?.fullNnue || wasmOut.backend?.includes("full"))
+      },
       telemetry: updatedTelemetry
     };
   }
 
   function applyAnalysisResult(state, res, isDeepPass = false, prevBestUci = "") {
     if (!res || res.error) return;
+    if (isNegativeMateMove(res.average)) res = { ...res, average: null };
+    const resultMeta = res.meta || null;
+    if (resultMeta && !isCurrentAnalysisMeta(resultMeta)) return;
+    if (usesStrictBestMovePolicy() && !res.engineMeta && !res.syzygyActive && !res.best?.fromSyzygy) {
+      setAutoStatusText(
+        engineMaxMode ? "♚ ENGINE MAX: ЖДЕМ PRIMARY STOCKFISH..." : "♚ ELO 2000+: ЖДЕМ FINAL STOCKFISH / SYZYGY...",
+        "#64cdb9"
+      );
+      return;
+    }
+    const qualityRank = res.best?.fromSyzygy ? 60 : res.engineMeta ? 50 : isDeepPass ? 30 : 10;
+    if (cachedMoves?.positionId === positionId && Number(cachedMoves.qualityRank || 0) > qualityRank) return;
     if (!isDeepPass && res.lastOpponentMove) {
       updateBehavioralCheatDetector(res);
     }
-    cachedMoves = res;
+    cachedMoves = { ...res, meta: resultMeta, sessionId: analysisSessionId, positionId, positionKey: currentPositionKey, qualityRank };
 
     // Запоминаем лучший и средний ход на наш ход, чтобы отслеживать T1% даже при ручной игре мышкой
     if (state.actualTurn === state.myColor) {
-      if (res.best && res.best.uci) legitStats.lastBestUciOnMyTurn = res.best.uci;
-      if (res.average && res.average.uci) legitStats.lastAvgUciOnMyTurn = res.average.uci;
+      legitStats.lastBestUciOnMyTurn = res.best?.uci || "";
+      legitStats.lastAvgUciOnMyTurn = res.average?.uci || "";
     }
 
     if (res.telemetry) {
@@ -3995,9 +5294,10 @@
     }
     updateLiveTelemetryUI();
     updateTimeSniperBanner(res);
+    updateEvalMoodAndEngineBadge(state, res);
 
     if (res.best) {
-      recordEvalPoint(state.boardKey, res.best.whitePerspectiveEval || res.best.evalPawns, res.opponentEvalDropPawns);
+      recordEvalPoint(state.boardKey, res.best.whitePerspectiveEval ?? res.best.evalPawns, res.opponentEvalDropPawns);
     }
 
     if (audioRadarEnabled && window.ChessFX && state.actualTurn === state.myColor) {
@@ -4012,9 +5312,15 @@
     }
 
     if (isDeepPass && currentTurnDecision.boardKey === state.boardKey && !currentTurnDecision.skip) {
-      const picked = chooseAutoMoveOnce(res);
-      if (picked && picked.move) {
-        currentTurnDecision.move = picked.move;
+      if (autoMoveTimer && currentTurnDecision.attempts === 0) {
+        clearTimeout(autoMoveTimer);
+        autoMoveTimer = null;
+      }
+      const finalPick = chooseAutoMoveOnce(res);
+      if (finalPick?.move) {
+        currentTurnDecision.move = finalPick.move;
+        currentTurnDecision.choiceKind = finalPick.choiceKind || "policy";
+        currentTurnDecision.typeLabel = `${finalPick.typeLabel} • ${(currentTurnDecision.totalDelay / 1000).toFixed(2)}с`;
       }
     }
 
@@ -4116,7 +5422,7 @@
         }
       }
 
-      renderEvalBar(state, res.best.whitePerspectiveEval || res.best.evalPawns);
+      renderEvalBar(state, res.best.whitePerspectiveEval ?? res.best.evalPawns);
 
       if (autoMoveEnabled && state.actualTurn === state.myColor) {
         const mySecs = getMyRemainingSeconds();
@@ -4153,7 +5459,32 @@
       $("cc-worst-card").style.display = "none";
     }
 
-    renderArrowsOverlay(state, res);
+    renderArrowsOverlay(state, cachedMoves);
+  }
+
+  function getStockfishMoveTimeMs(fastRes) {
+    const profile = window.__CC_ANDROID_RUNTIME__?.profile || window.__CC_DEVICE_PROFILE__;
+    const deviceScale = Math.max(0.5, Math.min(1.5, Number(profile?.recommendation?.movetimeScale) || 1));
+    if (!engineMaxMode) {
+      const base = currentElo >= 2800 ? 620 : (currentElo >= 2400 ? 420 : 300);
+      const budget = base + (fastRes.isDangerPosition || fastRes.hangingSquare ? 240 : 0);
+      return Math.max(70, Math.round(budget * deviceScale));
+    }
+    const seconds = getMyRemainingSeconds();
+    const danger = Boolean(fastRes.isDangerPosition || fastRes.hangingSquare);
+    let budget = !Number.isFinite(seconds) ? 2200
+      : seconds >= 300 ? 2600
+      : seconds >= 120 ? 1900
+      : seconds >= 45 ? 1200
+      : seconds >= 15 ? 550
+      : seconds >= 5 ? 220 : 80;
+    if (danger) budget = Math.round(budget * 1.3);
+    budget = Math.round(budget * deviceScale);
+    if (Number.isFinite(seconds)) {
+      const reserve = Math.max(1200, seconds * 50);
+      budget = Math.min(budget, Math.max(70, seconds * 1000 - reserve - 850));
+    }
+    return Math.max(70, Math.min(3600, Math.round(budget)));
   }
 
   function runCycle(forceByButton = false) {
@@ -4161,16 +5492,37 @@
       shutdownOrphanedScript();
       return;
     }
+    if (document.hidden) return;
+    if (forceByButton) clearAnalysisRetry();
 
     ensurePanel();
     updateLiveTelemetryUI();
 
-    if (!forceByButton && (isExecutingMove || Date.now() < moveCooldownUntil)) {
+    const state = captureBoardState(false);
+    if (!state) {
+      clearAnalysisRetry();
+      if (currentPositionKey) markBoardDirty("NO_BOARD");
+      if (activeEngineBoardKey) {
+        analysisRequestId++;
+        activeEngineBoardKey = "";
+        StockfishWasmEngine.cancel?.();
+      }
+      hideArrows();
+      renderEvalBar(null, 0);
+      updateEvalMoodAndEngineBadge(null, null);
       return;
     }
-
-    const state = captureBoardState(false);
-    if (!state || state.animating) return;
+    if (state.animating) return;
+    adoptPositionState(state);
+    if (pendingAnalysisRetry && (pendingAnalysisRetry.url !== location.href || pendingAnalysisRetry.positionKey !== state.positionKey)) clearAnalysisRetry();
+    if (!forceByButton && (isExecutingMove || Date.now() < moveCooldownUntil)) return;
+    if (!forceByButton && pendingAnalysisRetry &&
+        (Date.now() < pendingAnalysisRetry.notBefore || pendingAnalysisRetry.timer !== null)) return;
+    if (activeEngineBoardKey && activeEngineBoardKey !== state.boardKey) {
+      analysisRequestId++;
+      activeEngineBoardKey = "";
+      StockfishWasmEngine.cancel?.();
+    }
 
     checkGameEndAndLearn(state.myColor);
 
@@ -4198,8 +5550,14 @@
         if (isAltPressed || heatmapAlwaysOn) {
           safeSendMessage({ type: "GET_BOARD_HEATMAP", fen: state.fen, myColor: state.myColor }, (hmRes) => {
             if (hmRes && Array.isArray(hmRes.heatmap)) {
+              const fresh = captureBoardState(true);
+              if (!fresh || fresh.animating || fresh.boardElement !== state.boardElement || fresh.boardKey !== state.boardKey) return;
               cachedMoves.heatmap = hmRes.heatmap;
-              renderArrowsOverlay(state, cachedMoves);
+              cachedMoves.heatmapBoardKey = state.boardKey;
+              cachedMoves.boardKey = state.boardKey;
+              cachedMoves.positionId = positionId;
+              cachedMoves.positionKey = currentPositionKey;
+              renderArrowsOverlay(fresh, cachedMoves);
             }
           });
         }
@@ -4230,13 +5588,19 @@
     resetTurnDecision();
 
     const myReqId = ++analysisRequestId;
+    const cycleAnalysisId = ++positionAnalysisId;
+    const fastMeta = createAnalysisMeta(state, "fast", cycleAnalysisId);
+    const deepMeta = createAnalysisMeta(state, "deep", cycleAnalysisId);
+    activeEngineBoardKey = state.boardKey;
     const sideText = state.sideToAnalyze === "w" ? "ХОД БЕЛЫХ ⚪" : "ХОД ЧЕРНЫХ ⚫";
     if ($("cc-turn-indicator")) $("cc-turn-indicator").textContent = sideText;
 
     const mySecs = getMyRemainingSeconds();
     const enemySecs = getEnemyRemainingSeconds();
-    const needAvg = true;
-    const needWorst = Boolean(showWorstMove && workMode === "all");
+    const strictBestPolicy = usesStrictBestMovePolicy();
+    const needAvg = Boolean(!strictBestPolicy && (showAverageMove || useAverageMoveSometimes || autoT1LimiterEnabled));
+    const needWorst = Boolean(!strictBestPolicy && showWorstMove && workMode === "all");
+    const historyTrustedForState = Boolean(gameStartedFromInitial && state.sideToAnalyze === state.actualTurn);
 
     safeSendMessage(
       {
@@ -4254,31 +5618,50 @@
         enemySeconds: enemySecs,
         trapRadarEnabled,
         recentPositions: recentPositionHistory,
-        lastOurMove: lastOurExecutedMove
+        lastOurMove: lastOurExecutedMove,
+        uciHistory: uciHistoryList,
+        historyTrusted: historyTrustedForState,
+        meta: fastMeta
       },
       (fastRes) => {
-        if (myReqId !== analysisRequestId || !fastRes || !fastRes.best || fastRes.error) return;
-        const freshFast = captureBoardState(true);
-        const targetState = (freshFast && !freshFast.animating && freshFast.boardKey === state.boardKey) ? freshFast : state;
-        applyAnalysisResult(targetState, fastRes, false, "");
+        const responseMeta = fastRes?.meta || fastMeta;
+        if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
+        if (!fastRes || !fastRes.best || fastRes.error) {
+          activeEngineBoardKey = "";
+          clearPositionPresentation(fastRes?.error ? "ОШИБКА АНАЛИЗА • ПОВТОР..." : "МАТ / ПАТ • НЕТ ХОДОВ");
+          committedBoardKey = state.boardKey;
+          boardDirty = false;
+          if (fastRes?.error && analysisRetryCount < 5) {
+            const retryDelay = Math.min(3000, 180 * (2 ** analysisRetryCount++));
+            scheduleAnalysisRetry(state, retryDelay);
+          }
+          return;
+        }
+        fastRes.meta = responseMeta;
+        const fastIsSyzygy = Boolean(fastRes.syzygyActive || fastRes.best.fromSyzygy);
+        const fastCanFinalize = Boolean(fastIsSyzygy || (!fastRes.analysisIncomplete && !strictBestPolicy && (fastRes.best.isMateInOne || fastRes.best.isForcedMateInTwo)));
+        fastRes.analysisFinalized = fastCanFinalize;
+        analysisRetryCount = 0;
+        applyAnalysisResult(state, fastRes, false, "");
 
-        if (fastRes.best && (fastRes.best.isMateInOne || fastRes.best.isForcedMateInTwo || fastRes.best.fromSyzygy)) {
+        if (fastCanFinalize) {
           if (deepBadge) deepBadge.style.display = "none";
+          if (myReqId === analysisRequestId) activeEngineBoardKey = "";
           return;
         }
 
         if (deepBadge) {
           deepBadge.textContent = fastRes.isDangerPosition
             ? "🛡 ПОИСК ЗАЩИТЫ..."
-            : (useStockfishWasm ? "🧠 SF WASM + CLOUD..." : "⚡ ДОРАСЧЕТ...");
+            : (useStockfishWasm ? "🧠 SF LOCAL + CLOUD..." : "⚡ ДОРАСЧЕТ...");
           deepBadge.style.display = "inline-block";
         }
         const firstBestUci = fastRes.best ? fastRes.best.uci : "";
 
-        const shouldRunWasm = Boolean(useStockfishWasm && currentElo >= 1800 && state.pieceCount > 7);
-        const wasmMovetime = (fastRes.isDangerPosition || fastRes.hangingSquare) ? 290 : 210;
+        const shouldRunWasm = Boolean(useStockfishWasm);
+        const wasmMovetime = getStockfishMoveTimeMs(fastRes);
         const wasmPromise = shouldRunWasm
-          ? StockfishWasmEngine.analyze(state.fen, wasmMovetime, 3, uciHistoryList, gameStartedFromInitial)
+          ? StockfishWasmEngine.analyze(state.fen, wasmMovetime, needAvg ? 3 : 1, uciHistoryList, historyTrustedForState, { ...deepMeta, engineMaxMode, isDangerPosition: Boolean(fastRes.isDangerPosition || fastRes.hangingSquare), needAverage: needAvg })
           : Promise.resolve(null);
 
         safeSendMessage(
@@ -4297,32 +5680,68 @@
             enemySeconds: enemySecs,
             trapRadarEnabled,
             recentPositions: recentPositionHistory,
-            lastOurMove: lastOurExecutedMove
+            lastOurMove: lastOurExecutedMove,
+            uciHistory: uciHistoryList,
+            historyTrusted: historyTrustedForState,
+            meta: deepMeta
           },
           async (deepRes) => {
-            if (myReqId !== analysisRequestId) return;
-            if (!deepRes || deepRes.error) {
-              if (deepBadge) deepBadge.style.display = "none";
-              return;
-            }
-
-            let finalDeep = deepRes;
+            const responseMeta = deepRes?.meta || deepMeta;
+            if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
+            const backgroundDeepOk = Boolean(deepRes && !deepRes.error && deepRes.best);
+            let finalDeep = backgroundDeepOk ? deepRes : fastRes;
+            let wasmApplied = false;
             if (shouldRunWasm) {
               try {
                 const wasmOut = await wasmPromise;
-                if (myReqId !== analysisRequestId) return;
-                if (wasmOut && (!deepRes.best || !deepRes.best.fromCloud)) {
-                  finalDeep = mergeWasmAnalysisIntoResult(deepRes, wasmOut, state);
+                if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(deepMeta)) return;
+                if (wasmOut) {
+                  finalDeep = mergeWasmAnalysisIntoResult(finalDeep, wasmOut, state);
+                  wasmApplied = Boolean(finalDeep?.engineMeta);
                 }
               } catch (e) {}
             }
 
+            const requiresFinalEngine = usesStrictBestMovePolicy() || Boolean(finalDeep?.analysisIncomplete);
+            if (!backgroundDeepOk && !wasmApplied && !requiresFinalEngine) {
+              if (deepBadge) deepBadge.style.display = "none";
+              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              return;
+            }
+
+            const hasFinalEngine = Boolean(finalDeep?.engineMeta || finalDeep?.syzygyActive || finalDeep?.best?.fromSyzygy);
+            if (requiresFinalEngine && !hasFinalEngine) {
+              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              if (!useStockfishWasm) {
+                if (deepBadge) deepBadge.style.display = "none";
+                committedBoardKey = state.boardKey;
+                setAutoStatusText(usesStrictBestMovePolicy() ? "2000+ ELO требует включённый STOCKFISH LOCAL" : "Анализ не завершён: включите Stockfish или сходите вручную.", "#ffbe0b");
+                return;
+              }
+              if (finalEngineRetryCount < 3) {
+                const retryAttempt = ++finalEngineRetryCount;
+                const retryDelay = Math.min(20000, 5500 * (2 ** (retryAttempt - 1)));
+                if (deepBadge) {
+                  deepBadge.textContent = `🧠 STOCKFISH RETRY ${retryAttempt}/3...`;
+                  deepBadge.style.display = "inline-block";
+                }
+                scheduleAnalysisRetry(state, retryDelay);
+              } else {
+                if (deepBadge) deepBadge.style.display = "none";
+                committedBoardKey = state.boardKey;
+                setAutoStatusText("STOCKFISH недоступен • автоход заблокирован", "#ff2a85");
+              }
+              return;
+            }
+            finalEngineRetryCount = 0;
+
             if (deepBadge) deepBadge.style.display = "none";
 
-            const currentFresh = captureBoardState(true);
-            if (!currentFresh || currentFresh.animating || currentFresh.boardKey !== state.boardKey) return;
-
-            applyAnalysisResult(currentFresh, finalDeep, true, firstBestUci);
+            finalDeep.meta = deepMeta;
+            finalDeep.analysisFinalized = true;
+            finalDeep.analysisSource = finalDeep.best?.fromSyzygy ? "syzygy" : (wasmApplied ? "stockfish" : "deep");
+            applyAnalysisResult(state, finalDeep, true, firstBestUci);
+            if (myReqId === analysisRequestId) activeEngineBoardKey = "";
           }
         );
       }
@@ -4340,47 +5759,102 @@
   }
 
   let observedBoardNode = null;
-  const domObserver = new MutationObserver(triggerDebouncedCycle);
+  let observedBoardRoots = [];
+  const domObserver = new MutationObserver((mutations) => {
+    const boardStructureChanged = mutations.some(mutation =>
+      mutation.type === "childList" &&
+      [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some(node =>
+        node?.matches?.(CHESSCOM_BOARD_SELECTOR) || node?.querySelector?.(CHESSCOM_BOARD_SELECTOR)
+      )
+    );
+    if (mutations.some(mutation => mutation.type === "childList")) cachedChessComRoots = [];
+    if (boardStructureChanged) cachedChessComBoardElement = null;
+    const touchesPiece = mutations.some(mutation => {
+      const target = mutation.target;
+      if (target?.matches?.(".piece, piece")) return true;
+      return [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some(node =>
+        node?.matches?.(".piece, piece") || node?.querySelector?.(".piece, piece")
+      );
+    });
+    if (touchesPiece) markBoardDirty("MOVE");
+    syncVisualPosition();
+    triggerDebouncedCycle();
+  });
+  const boardResizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => syncVisualPosition()) : null;
 
   function ensureObserversAttached() {
     if (extensionInvalidated || !isContextValid()) return;
     const boardEl = findChessComBoardElement();
-    if (boardEl && boardEl !== observedBoardNode) {
+    const roots = boardEl ? getChessComBoardRoots(boardEl) : [];
+    if (boardEl !== observedBoardNode || roots.length !== observedBoardRoots.length || roots.some((root, i) => root !== observedBoardRoots[i])) {
+      domObserver.disconnect();
+      if (boardResizeObserver) boardResizeObserver.disconnect();
+      if (boardEl !== observedBoardNode) {
+        markBoardDirty("BOARD_REPLACED");
+      }
       observedBoardNode = boardEl;
-      domObserver.observe(boardEl, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class", "style"]
-      });
+      observedBoardRoots = roots;
+      domObserver.observe(document.documentElement, { childList: true, subtree: true });
+      for (const root of roots) {
+        domObserver.observe(root, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["class", "style", "orientation"]
+        });
+      }
+      if (boardEl && boardResizeObserver) boardResizeObserver.observe(boardEl);
+      syncVisualPosition();
       triggerDebouncedCycle();
     }
   }
 
   const syncVisualPosition = () => {
     if (extensionInvalidated || !isContextValid()) return;
+    ensureObserversAttached();
     const state = captureBoardState(true);
-    if (state && !state.animating && cachedMoves.best) {
-      renderEvalBar(state, cachedMoves.best.whitePerspectiveEval || cachedMoves.best.evalPawns);
-      if (turnMode === "my" && state.actualTurn !== state.myColor && !isAltPressed && !heatmapAlwaysOn) return;
+    if (!state || state.animating || !isCachedAnalysisCurrent(state) || (!cachedMoves.best && !isAltPressed && !heatmapAlwaysOn)) {
+      hideArrows();
+      renderEvalBar(null, 0);
+      if (!state) updateEvalMoodAndEngineBadge(null, null);
+      return;
+    }
+    renderEvalBar(state, cachedMoves.best?.whitePerspectiveEval ?? cachedMoves.best?.evalPawns ?? 0);
+    const svg = $("chesscoach-screen-svg");
+    const r = state.boardRect;
+    if (!svg || svg.style.display === "none" || svg.style.left !== `${r.left}px` || svg.style.top !== `${r.top}px` ||
+        svg.style.width !== `${r.width}px` || svg.style.height !== `${r.height}px` ||
+        svg.getAttribute("data-cc-orientation") !== (state.isBlackOrientation ? "black" : "white") ||
+        svg.getAttribute("data-cc-board-key") !== state.boardKey) {
       renderArrowsOverlay(state, cachedMoves);
     }
   };
 
+  try { chrome.storage?.onChanged?.addListener(handleStorageChanges); } catch (e) {}
   loadSettings();
   ensureObserversAttached();
 
+  let lastIdleBoardPollAt = 0;
   mainIntervalId = setInterval(() => {
     if (extensionInvalidated || !isContextValid()) {
       shutdownOrphanedScript();
       return;
     }
-    ensureObserversAttached();
+    if (document.hidden) return;
+    if (window.__CC_ANDROID_RUNTIME__ && !observedBoardNode) {
+      const now = performance.now();
+      if (now - lastIdleBoardPollAt < 1200) return;
+      lastIdleBoardPollAt = now;
+    }
+    syncVisualPosition();
     if (!isExecutingMove && Date.now() >= moveCooldownUntil) {
       runCycle(false);
     }
   }, 260);
 
-  window.addEventListener("scroll", syncVisualPosition, { passive: true });
+  window.addEventListener("scroll", syncVisualPosition, { passive: true, capture: true });
   window.addEventListener("resize", syncVisualPosition, { passive: true });
+  document.addEventListener?.("visibilitychange", handleEngineVisibilityChange);
+  window.addEventListener("pagehide", handleEngineVisibilityChange);
+  window.addEventListener("cc-mobile-lifecycle", handleMobileMoveLifecycle);
 })();

@@ -1,7 +1,7 @@
 /**
- * ЭТАЛОННЫЙ ДЕМО-СКРИПТ CHESSCOACH SDK v2.0 (scripts/sample.js)
- * При включении во вкладке «📜 СКРИПТЫ» открывает второе окно настроек на сайте
- * с тумблером «Ожидаемый результат», выбором цвета, биндом клавиши и 60 FPS подсветкой хода.
+ * ЭТАЛОННЫЙ ДЕМО-SCRIPT CHESSCOACH SDK v2.0 (scripts/sample.js)
+ * При enabledии во onадке «📜 SCRIPTS» opens second window settings на site
+ * s toggle «Expected score», choice color, биндом клавиши и 60 FPS подsветкой move.
  */
 (function () {
   if (!window.CC) return;
@@ -13,27 +13,27 @@
 
   window.CC.registerScript({
     id: "sample_expected_result",
-    name: "✨ Sample Script: Ожидаемый результат (SDK v2.0)",
+    name: "✨ Sample Script: Expected score (SDK v2.0)",
     version: "2.0.0",
     author: "ChessCoach Community",
-    description: "Открывает на сайте второе окно настроек с тумблером «Ожидаемый результат», выбором цвета и 60 FPS эффектом на доске.",
+    description: "Opens on site second window settings s toggle «Expected score», choice color и 60 FPS effect on board.",
 
     onEnable(api) {
-      // 1. Создаем независимое перетаскиваемое окно настроек скрипта
+      // 1. Создаем незавиsимое перетаsкиваемое window settings script
       const win = api.createWindow({
         id: "cc-sample-script-window",
-        title: "✨ SAMPLE.JS // МЕНЮ СКРИПТА",
+        title: "✨ SAMPLE.JS // MENU SCRIPT",
         x: 28,
         y: 90,
         width: 345
       });
 
-      // 2. Создаем вкладки внутри окна скрипта
-      const tabs = api.ui.createTabs(win.body, ["⚡ Главная", "🎨 Визуал 60 FPS"]);
+      // 2. Создаем tabs внутри окна script
+      const tabs = api.ui.createTabs(win.body, ["⚡ Main", "🎨 Visual 60 FPS"]);
 
-      // Вкладка 1: Тумблер «Ожидаемый результат» и горячая клавиша
-      api.ui.addNote(tabs["⚡ Главная"], {
-        text: "Перетащите это окно за шапку в любое удобное место. При выключении скрипта окно и эффекты удаляются автоматически."
+      // Вкладка 1: Toggle «Expected score» и горячая клавиша
+      api.ui.addNote(tabs["⚡ Main"], {
+        text: "Drag this window by the header to any convenient place. When the script is disabled the window and effects are removed automatically."
       });
 
       const updateBanner = () => {
@@ -41,8 +41,8 @@
           api.audio.playTone(987.77, 130, "triangle");
           api.osd.showBanner({
             id: "cc-sample-result-banner",
-            text: "✨ ОЖИДАЕМЫЙ РЕЗУЛЬТАТ ✨",
-            subtext: "Скрипт scripts/sample.js успешно отработал через ChessCoach SDK v2.0!",
+            text: "✨ EXPECTED RESULT ✨",
+            subtext: "Script scripts/sample.js successfully ran via ChessCoach SDK v2.0!",
             accentColor: accentColor,
             position: "top-center"
           });
@@ -51,8 +51,8 @@
         }
       };
 
-      const toggleEl = api.ui.addToggle(tabs["⚡ Главная"], {
-        label: "🔥 Вывести «Ожидаемый результат»",
+      const toggleEl = api.ui.addToggle(tabs["⚡ Main"], {
+        label: "🔥 Display «Expected score»",
         value: bannerEnabled,
         onChange(val) {
           bannerEnabled = val;
@@ -60,8 +60,8 @@
         }
       });
 
-      api.ui.addKeybind(tabs["⚡ Главная"], {
-        label: "⌨️ Бинд переключения баннера",
+      api.ui.addKeybind(tabs["⚡ Main"], {
+        label: "⌨️ Banner toggle bind",
         defaultKey: "KeyB",
         onTrigger() {
           bannerEnabled = !bannerEnabled;
@@ -70,9 +70,9 @@
         }
       });
 
-      // Вкладка 2: Настройки цвета и 60 FPS Canvas-эффекта на доске
-      api.ui.addColorPicker(tabs["🎨 Визуал 60 FPS"], {
-        label: "🎨 Неоновый цвет эффекта",
+      // Вкладка 2: Settings color и 60 FPS Canvas-effect на board
+      api.ui.addColorPicker(tabs["🎨 Visual 60 FPS"], {
+        label: "🎨 Neon color effect",
         value: accentColor,
         onChange(newColor) {
           accentColor = newColor;
@@ -80,8 +80,8 @@
         }
       });
 
-      api.ui.addToggle(tabs["🎨 Визуал 60 FPS"], {
-        label: "🌌 60 FPS Пульс последнего хода на доске",
+      api.ui.addToggle(tabs["🎨 Visual 60 FPS"], {
+        label: "🌌 60 FPS Pulse last move on board",
         value: pulseBoardEnabled,
         onChange(val) {
           pulseBoardEnabled = val;
@@ -89,7 +89,7 @@
       });
     },
 
-    // 3. Плавная 60 FPS отрисовка на встроенном Canvas доски (800x800)
+    // 3. Плавная 60 FPS отриsовка на вsтроенном Canvas board (800x800)
     onFrame(api, ctx, dt, state) {
       if (!pulseBoardEnabled || !state.lastMoveTo) return;
 
@@ -107,7 +107,7 @@
     },
 
     onDisable(api) {
-      // Все окна, баннеры, таймеры и 60 FPS слои очищаются ядром автоматически
+      // All окна, баннеры, таймеры и 60 FPS sлои очищаютsя ядром automatically
       bannerEnabled = false;
     }
   });

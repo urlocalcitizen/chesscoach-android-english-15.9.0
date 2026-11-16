@@ -33,7 +33,7 @@ function getLocalEcoBookMoves(uciHistory, historyTrusted) {
     promo: uci[4] || null,
     bonus: Math.min(110, 20 + Math.round(Math.log2(Math.max(1, support) + 1) * 8)),
     name: uciHistory.length < 4
-      ? `ECO LOCAL · ${Number(support) || 1} линий`
+      ? `ECO LOCAL · ${Number(support) || 1} lines`
       : `${eco} · ${localEcoBook.names?.[nameId] || "ECO"}`,
     support: Number(support) || 1,
     source: "eco-local"
@@ -765,8 +765,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           enemyWin: wdl.enemyWin,
           evalCp: staticMyEval,
           nearestThreatText: plan && plan.canPremove
-            ? `Готов премув ${plan.premove.from}→${plan.premove.to} (${plan.confidence}%)`
-            : "Ожидание хода соперника (контроль угроз)"
+            ? `Premove ready ${plan.premove.from}→${plan.premove.to} (${plan.confidence}%)`
+            : "Waiting for opponent's move (threat control)"
         }
       });
     } catch (err) {
@@ -860,7 +860,7 @@ async function fetchLichessCloud3000(fen, pieceCount) {
 
       if (res.ok) {
         lastServerPingMs = Date.now() - t0;
-        lastServerSourceTag = `CLOUD 3000 (200 OK • ${lastServerPingMs}мс)`;
+        lastServerSourceTag = `CLOUD 3000 (200 OK • ${lastServerPingMs}ms)`;
         const data = await res.json();
         if (data && Array.isArray(data.pvs) && data.pvs.length > 0) {
           const parsed = data.pvs.map((pv) => {
@@ -902,7 +902,7 @@ async function fetchLichessCloud3000(fen, pieceCount) {
 
       if (expRes.ok) {
         lastServerPingMs = Date.now() - t0;
-        lastServerSourceTag = `EXPLORER MASTERS (200 OK • ${lastServerPingMs}мс)`;
+        lastServerSourceTag = `EXPLORER MASTERS (200 OK • ${lastServerPingMs}ms)`;
         const expData = await expRes.json();
         if (expData && Array.isArray(expData.moves) && expData.moves.length > 0) {
           const isWhiteTurn = fen.split(" ")[1] !== "b";
@@ -925,7 +925,7 @@ async function fetchLichessCloud3000(fen, pieceCount) {
                 source: "explorer",
                 depth: 0,
                 cachedAt: Date.now(),
-                pvChain: `${uci.slice(0, 2)}→${uci.slice(2, 4)} (${mv.san || "База Мастеров"} • ${total} парт.)`
+                pvChain: `${uci.slice(0, 2)}→${uci.slice(2, 4)} (${mv.san || "Masters Database"} • ${total} games)`
               };
             });
             cloudNegativeCache.delete(fen);
@@ -964,7 +964,7 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
       return null;
     }
     lastServerPingMs = Date.now() - t0;
-    lastServerSourceTag = `SYZYGY БОГ (200 OK • ${lastServerPingMs}мс)`;
+    lastServerSourceTag = `SYZYGY GOD (200 OK • ${lastServerPingMs}ms)`;
     const data = await res.json();
     if (data && Array.isArray(data.moves) && data.moves.length > 0) {
       const parsedMoves = data.moves.map((mv, idx) => {
@@ -987,15 +987,15 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
         const dtzVal = mv.dtz !== null && mv.dtz !== undefined ? Math.abs(mv.dtz) : null;
         const dtmVal = mv.dtm !== null && mv.dtm !== undefined ? Math.abs(mv.dtm) : null;
 
-        let badgeLabel = "ТАБЛИЦА SYZYGY: НИЧЬЯ (0.00)";
+        let badgeLabel = "SYZYGY TABLEBASE: DRAW (0.00)";
         if (ourOutcome === "win") {
           badgeLabel = dtmVal !== null
-            ? `SYZYGY БОГ: ПОБЕДА (МАТ В ${Math.ceil(dtmVal / 2)} ХОДОВ • DTZ ${dtzVal ?? "-"})`
-            : `SYZYGY БОГ: 100% ПОБЕДА (DTZ ${dtzVal ?? "-"})`;
+            ? `SYZYGY GOD: WIN (MATE IN ${Math.ceil(dtmVal / 2)} MOVES • DTZ ${dtzVal ?? "-"})`
+            : `SYZYGY GOD: 100% WIN (DTZ ${dtzVal ?? "-"})`;
         } else if (ourOutcome === "cursed-win") {
-          badgeLabel = `SYZYGY: ПОБЕДА (DTZ ${dtzVal ?? "-"})`;
+          badgeLabel = `SYZYGY: WIN (DTZ ${dtzVal ?? "-"})`;
         } else if (ourOutcome === "loss") {
-          badgeLabel = `SYZYGY: УПОРНАЯ ОБОРОНА (DTZ ${dtzVal ?? "-"})`;
+          badgeLabel = `SYZYGY: STUBBORN DEFENSE (DTZ ${dtzVal ?? "-"})`;
         }
 
         return {
@@ -1034,52 +1034,52 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
 
 const OPENING_BOOK = {
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w": [
-    { from: "e2", to: "e4", name: "Королевский дебют (1. e4)", bonus: 45 },
-    { from: "d2", to: "d4", name: "Ферзевый дебют (1. d4)", bonus: 45 },
-    { from: "c2", to: "c4", name: "Английское начало (1. c4)", bonus: 38 }
+    { from: "e2", to: "e4", name: "King's opening (1. e4)", bonus: 45 },
+    { from: "d2", to: "d4", name: "Queen's opening (1. d4)", bonus: 45 },
+    { from: "c2", to: "c4", name: "English Opening (1. c4)", bonus: 38 }
   ],
   "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b": [
-    { from: "c7", to: "c5", name: "Сицилианская защита (1... c5)", bonus: 48 },
-    { from: "e7", to: "e5", name: "Открытый дебют (1... e5)", bonus: 46 },
-    { from: "c7", to: "c6", name: "Защита Каро-Канн (1... c6)", bonus: 42 },
-    { from: "e7", to: "e6", name: "Французская защита (1... e6)", bonus: 40 }
+    { from: "c7", to: "c5", name: "Sicilian Defense (1... c5)", bonus: 48 },
+    { from: "e7", to: "e5", name: "Open game (1... e5)", bonus: 46 },
+    { from: "c7", to: "c6", name: "Caro-Kann Defense (1... c6)", bonus: 42 },
+    { from: "e7", to: "e6", name: "French Defense (1... e6)", bonus: 40 }
   ],
   "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b": [
-    { from: "g8", to: "f6", name: "Индийская защита (1... Nf6)", bonus: 48 },
-    { from: "d7", to: "d5", name: "Классический ферзевый ответ (1... d5)", bonus: 46 }
+    { from: "g8", to: "f6", name: "Indian Defense (1... Nf6)", bonus: 48 },
+    { from: "d7", to: "d5", name: "Classical queen's reply (1... d5)", bonus: 46 }
   ],
   "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/2N5/PPP2PPP/R1BQKBNR b": [
-    { from: "d5", to: "e4", name: "Каро-Канн: Размен на e4 (3... dxe4)", bonus: 45 }
+    { from: "d5", to: "e4", name: "Caro-Kann: Exchange on e4 (3... dxe4)", bonus: 45 }
   ],
   "rnbqkbnr/pp2pppp/2p5/8/3PN3/8/PPP2PPP/R1BQKBNR b": [
-    { from: "c8", to: "f5", name: "Каро-Канн: Классический вариант (4... Bf5)", bonus: 48 },
-    { from: "g8", to: "f6", name: "Каро-Канн: Вариант Тартаковера (4... Nf6)", bonus: 44 }
+    { from: "c8", to: "f5", name: "Caro-Kann: Classical variation (4... Bf5)", bonus: 48 },
+    { from: "g8", to: "f6", name: "Caro-Kann: Tartakower variation (4... Nf6)", bonus: 44 }
   ],
   "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w": [
-    { from: "e4", to: "d5", name: "Скандинавская защита (2. exd5!)", bonus: 50 }
+    { from: "e4", to: "d5", name: "Scandinavian Defense (2. exd5!)", bonus: 50 }
   ],
   "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w": [
-    { from: "g1", to: "f3", name: "Атака пешки e5 (2. Nf3)", bonus: 48 }
+    { from: "g1", to: "f3", name: "Attack on e5 pawn (2. Nf3)", bonus: 48 }
   ],
   "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b": [
-    { from: "b8", to: "c6", name: "Классическая защита (2... Nc6)", bonus: 48 },
-    { from: "g8", to: "f6", name: "Русская партия (2... Nf6)", bonus: 45 }
+    { from: "b8", to: "c6", name: "Classical defense (2... Nc6)", bonus: 48 },
+    { from: "g8", to: "f6", name: "Russian Game (2... Nf6)", bonus: 45 }
   ],
   "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w": [
-    { from: "f1", to: "c4", name: "Итальянская партия (3. Bc4)", bonus: 48 },
-    { from: "f1", to: "b5", name: "Испанская партия (3. Bb5)", bonus: 48 },
-    { from: "d2", to: "d4", name: "Шотландская партия (3. d4)", bonus: 45 }
+    { from: "f1", to: "c4", name: "Italian Game (3. Bc4)", bonus: 48 },
+    { from: "f1", to: "b5", name: "Spanish Game (3. Bb5)", bonus: 48 },
+    { from: "d2", to: "d4", name: "Scotch Game (3. d4)", bonus: 45 }
   ],
   "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w": [
-    { from: "c2", to: "c3", name: "Итальянский центр (4. c3)", bonus: 46 },
-    { from: "b2", to: "b4", name: "Гамбит Эванса (4. b4)", bonus: 42 }
+    { from: "c2", to: "c3", name: "Italian center (4. c3)", bonus: 46 },
+    { from: "b2", to: "b4", name: "Evans Gambit (4. b4)", bonus: 42 }
   ],
   "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w": [
-    { from: "d2", to: "d3", name: "Тихая Итальянка (4. d3)", bonus: 46 },
-    { from: "f3", to: "g5", name: "Атака Фегателло / Нападение на f7 (4. Ng5)", bonus: 44 }
+    { from: "d2", to: "d3", name: "Quiet Italian (4. d3)", bonus: 46 },
+    { from: "f3", to: "g5", name: "Fried Liver Attack / Attack on f7 (4. Ng5)", bonus: 44 }
   ],
   "r1bqkb1r/pppp1ppp/2n2n2/4p1N1/2B1P3/8/PPPP1PPP/RNBQK2R b": [
-    { from: "d7", to: "d5", name: "Точный перехват инициативы по теории (4... d5!)", bonus: 95 }
+    { from: "d7", to: "d5", name: "Precise initiative grab by theory (4... d5!)", bonus: 95 }
   ]
 };
 
@@ -2200,14 +2200,14 @@ function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, cas
 }
 
 function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threatBefore, castling = "-", epSquare = null, budget = null) {
-  if (inCheckBefore) return { isDanger: true, reason: "ШАХ НАШЕМУ КОРОЛЮ" };
+  if (inCheckBefore) return { isDanger: true, reason: "CHECK TO OUR KING" };
 
   if (allowsEnemyMateInOne(board, ourColor, enemyColor, castling, epSquare, budget)) {
-    return { isDanger: true, reason: "ПРЯМАЯ УГРОЗА МАТА В 1 ХОД ОТ СОПЕРНИКА" };
+    return { isDanger: true, reason: "DIRECT MATE-IN-1 THREAT FROM OPPONENT" };
   }
 
   if (allowsEnemyForcedMateInTwo(board, ourColor, enemyColor, castling, epSquare, budget)) {
-    return { isDanger: true, reason: "УГРОЗА ФОРСИРОВАННОГО МАТА В 2 ХОДА" };
+    return { isDanger: true, reason: "THREAT OF FORCED MATE IN 2 MOVES" };
   }
 
   const ourKing = findKing(board, ourColor);
@@ -2224,10 +2224,10 @@ function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threa
   }
 
   if (attackedKingSquares >= 2) {
-    return { isDanger: true, reason: "ДАВЛЕНИЕ НА ЗОНУ НАШЕГО КОРОЛЯ" };
+    return { isDanger: true, reason: "PRESSURE ON OUR KING ZONE" };
   }
   if (threatBefore >= 320 && attackedKingSquares >= 1) {
-    return { isDanger: true, reason: "ТАКТИЧЕСКИЙ УДАР ПО ФИГУРЕ И КОРОЛЮ" };
+    return { isDanger: true, reason: "TACTICAL HIT ON PIECE AND KING" };
   }
 
   return { isDanger: false, reason: "" };
@@ -2372,11 +2372,11 @@ function computeTrapMetrics(boardAfterOurMove, ourMove, ourColor, enemyColor, ca
   if (isTrap) {
     const saveMoveUci = savingMoves[0]
       ? `${FILES[savingMoves[0].fromC]}${8 - savingMoves[0].fromR}→${FILES[savingMoves[0].toC]}${8 - savingMoves[0].toR}`
-      : "неочевиден";
+      : "non-obvious";
     const punishDesc = matePunishments > 0
-      ? "скрытому мату"
-      : (queenRookPunishments > 0 ? "потере ферзя/ладьи" : "разгрому позиции");
-    trapSubtitle = `Из ${totalReplies} ответов врага ${losingReplies} ведут к ${punishDesc}! Единственное спасение (${saveMoveUci}) крайне трудно найти.`;
+      ? "a hidden mate"
+      : (queenRookPunishments > 0 ? "loss of queen/rook" : "collapse position");
+    trapSubtitle = `Out of ${totalReplies} enemy replies ${losingReplies} lead to ${punishDesc}! The only save (${saveMoveUci}) extremely hard to find.`;
   }
 
   return {
@@ -2626,32 +2626,32 @@ function computeSmartNextPremove(
 
   let confidence = 0;
   let predictionType = "pv_lookahead";
-  let reasonText = `🔮 ПРЕМУВ НА 1-Ю ЛИНИЮ ВРАГА (${enemyFrom}→${enemyTo})`;
+  let reasonText = `🔮 PREMOVE ON ENEMY 1ST LINE (${enemyFrom}→${enemyTo})`;
 
   if (bestReplyObj.isMateIn1 && safeAgainstTopBranches) {
     confidence = 99;
     predictionType = "mate_premove";
-    reasonText = `👑 МАТОВЫЙ ПРЕМУВ В 1 ХОД (${ourFrom}→${ourTo}#)`;
+    reasonText = `👑 MATING PREMOVE IN 1 MOVE (${ourFrom}→${ourTo}#)`;
   } else if (enemyMoves.length === 1 && safeAgainstTopBranches) {
     confidence = 99;
     predictionType = "forced_single";
-    reasonText = `⚡ 100% ФОРСАЖ: У врага 1 легальный ход (${enemyFrom}→${enemyTo})`;
+    reasonText = `⚡ 100% FORCE: Enemy has 1 legal move (${enemyFrom}→${enemyTo})`;
   } else if (bestReplyObj.isRealRecapture && topPredictionConfidence >= 72) {
     confidence = Math.min(96, topPredictionConfidence + 7);
     predictionType = "recapture";
-    reasonText = `⚔ ПЕРЕБОЙ НА ${ourTo.toUpperCase()} (ПРОГНОЗ ${topPredictionConfidence}%: ${enemyFrom}→${enemyTo})`;
+    reasonText = `⚔ INTERRUPT ON ${ourTo.toUpperCase()} (FORECAST ${topPredictionConfidence}%: ${enemyFrom}→${enemyTo})`;
   } else if (bestReplyObj.isRealRecapture) {
     confidence = 82;
     predictionType = "safe_universal";
-    reasonText = `🛡 ПЕРЕБОЙ БЕЗ РИСКА ПРОТИВ ${bestReplyObj.validatedBranches} ЛИНИЙ`;
+    reasonText = `🛡 RISK-FREE INTERRUPT AGAINST ${bestReplyObj.validatedBranches} LINES`;
   } else if (scoreGap >= 200 && topEnemy.seeScore >= 0 && safeAgainstTopBranches) {
     confidence = Math.max(82, Math.min(94, topPredictionConfidence + 5));
     predictionType = "forced_tactical";
-    reasonText = `⚡ ФОРСИРОВАННЫЙ ПРОГНОЗ ${topPredictionConfidence}% (${enemyFrom}→${enemyTo})`;
+    reasonText = `⚡ FORCED FORECAST ${topPredictionConfidence}% (${enemyFrom}→${enemyTo})`;
   } else if (safeAgainstTopBranches && bestReplyObj.ourSee >= 0 && bestReplyObj.worstLoss <= 50) {
     confidence = Math.min(91, 78 + bestReplyObj.validatedBranches * 2);
     predictionType = "safe_universal";
-    reasonText = `🛡 УНИВЕРСАЛЬНЫЙ ПРЕМУВ ПРОТИВ ${bestReplyObj.validatedBranches} ТОП-ЛИНИЙ`;
+    reasonText = `🛡 UNIVERSAL PREMOVE AGAINST ${bestReplyObj.validatedBranches} TOP LINES`;
   } else {
     return { canPremove: false };
   }
@@ -2790,7 +2790,7 @@ async function analyzeAdaptiveMaster(
   } else if (pass === "fast") {
     cloudLines = cloudCache.get(fen) || null;
     if (cloudLines) {
-      lastServerSourceTag = cloudLines[0]?.source === "explorer" ? "EXPLORER CACHE (0мс)" : "CLOUD CACHE (0мс)";
+      lastServerSourceTag = cloudLines[0]?.source === "explorer" ? "EXPLORER CACHE (0ms)" : "CLOUD CACHE (0ms)";
     }
   } else if (elo >= 1800) {
     cloudLines = await fetchLichessCloud3000(fen, pieceCount);
@@ -3246,11 +3246,11 @@ async function analyzeAdaptiveMaster(
     const moveLabel = m.promo ? `${fromSq}→${toSq}=${m.promo.toUpperCase()}` : `${fromSq}→${toSq}`;
     let fullPV = "";
     if (isMateInOne) {
-      fullPV = `${moveLabel}# (МАТ В 1 ХОД!)`;
+      fullPV = `${moveLabel}# (MATE IN 1 MOVE!)`;
     } else if (isForcedMateInTwo) {
-      fullPV = `${moveLabel}+ (ФОРСИРОВАННЫЙ МАТ В 2 ХОДА!)`;
+      fullPV = `${moveLabel}+ (FORCED MATE IN 2 MOVES!)`;
     } else if (isStalemate) {
-      fullPV = `${moveLabel} (ОСТОРОЖНО: ПАТ / НИЧЬЯ!)`;
+      fullPV = `${moveLabel} (CAUTION: STALEMATE / DRAW!)`;
     } else if (syzygyEntry) {
       fullPV = `${moveLabel} • ${syzygyEntry.badgeLabel}`;
     } else {
@@ -3259,19 +3259,19 @@ async function analyzeAdaptiveMaster(
 
     let evalPawnsStr = (searchScore / 100).toFixed(2);
     if (isMateInOne) {
-      evalPawnsStr = "МАТ #1";
+      evalPawnsStr = "MATE #1";
     } else if (isForcedMateInTwo) {
-      evalPawnsStr = "МАТ #2";
+      evalPawnsStr = "MATE #2";
     } else if (isStalemate) {
-      evalPawnsStr = "ПАТ 0.00";
+      evalPawnsStr = "STALEMATE 0.00";
     } else if (syzygyEntry && syzygyEntry.ourOutcome === "win") {
       evalPawnsStr = syzygyEntry.dtm
-        ? `МАТ #${Math.ceil(syzygyEntry.dtm / 2)}`
+        ? `MATE #${Math.ceil(syzygyEntry.dtm / 2)}`
         : `DTZ ${syzygyEntry.dtz ?? "WIN"}`;
     } else if (blundersMateInOne) {
-      evalPawnsStr = "-МАТ #1";
+      evalPawnsStr = "-MATE #1";
     } else if (blundersMateInTwo) {
-      evalPawnsStr = "-МАТ #2";
+      evalPawnsStr = "-MATE #2";
     }
 
     let whiteEvalStr = ((turn === "w" ? searchScore : -searchScore) / 100).toFixed(2);
@@ -3340,7 +3340,7 @@ async function analyzeAdaptiveMaster(
 
   if (mateThreatCount >= 2 && !isDangerPosition) {
     isDangerPosition = true;
-    dangerReason = "ОПАСНОСТЬ МАТОВОЙ ЛОВУШКИ";
+    dangerReason = "DANGER OF MATING TRAP";
   }
 
   scored.sort((a, b) => b.trueScore - a.trueScore);
@@ -3483,20 +3483,20 @@ async function analyzeAdaptiveMaster(
   if (enemySeconds > 0 && enemySeconds < 10) {
     timeAdvice = {
       mode: "zeitnot_attack",
-      badge: `⏱️ ЦЕЙТНОТ ВРАГА: ${enemySeconds.toFixed(1)}с`,
-      text: `У соперника меньше 10 секунд! Движок выбирает самые разветвленные сильные продолжения (${bestMove.complexityBranches || legal.length} ответов) без риска ничьей.`
+      badge: `⏱️ ENEMY TIME TROUBLE: ${enemySeconds.toFixed(1)}s`,
+      text: `Opponent under 10 seconds! Engine picks the most branching strong lines (${bestMove.complexityBranches || legal.length} replies) without draw risk.`
     };
   } else if (mySeconds > 0 && mySeconds < 12) {
     timeAdvice = {
       mode: "my_panic",
-      badge: `⚡ НАШ ЦЕЙТНОТ: ${mySeconds.toFixed(1)}с`,
-      text: `Мало времени на часах! Включен ускоренный турбо-расчет и безопасные SEE-премувы.`
+      badge: `⚡ OUR TIME TROUBLE: ${mySeconds.toFixed(1)}s`,
+      text: `Low time on the clock! Accelerated turbo calc and safe SEE-premoves enabled.`
     };
   } else if (enemySeconds < 30 && mySeconds > enemySeconds + 15) {
     timeAdvice = {
       mode: "tempo_advantage",
-      badge: `🎯 ПЕРЕВЕС ПО ВРЕМЕНИ (+${Math.round(mySeconds - enemySeconds)}с)`,
-      text: `Давите темпом: избегайте простых разменов, сохраняйте напряжение на доске.`
+      badge: `🎯 TIME ADVANTAGE (+${Math.round(mySeconds - enemySeconds)}s)`,
+      text: `Press with tempo: avoid simple exchanges, keep tension on the board.`
     };
   }
 
@@ -3504,7 +3504,7 @@ async function analyzeAdaptiveMaster(
   const legalUcis = legal.map(m => `${FILES[m.fromC]}${8 - m.fromR}${FILES[m.toC]}${8 - m.toR}${m.promo || ""}`);
   const hardRejectedUcis = scored.filter(m => m.blundersMate || m.causesStalemate).map(m => m.uci);
 
-  // Сборка Живой телеметрии 24/7 (Шансы на победу, статус сервера, ближайшие ловушки/маты)
+  // Сборка Живой телеметрии 24/7 (Chanceы на победу, sтатуs sервера, ближайшие traps/mateы)
   const totalElapsedMs = Date.now() - requestStartTime;
   const ourPerspectiveScore = turn === myColor ? bestMove.pureSearchScore : -bestMove.pureSearchScore;
   const wdl = computeWinDrawLossChances(
@@ -3513,17 +3513,17 @@ async function analyzeAdaptiveMaster(
     turn !== myColor && (bestMove.isMateInOne || bestMove.isForcedMateInTwo)
   );
 
-  let nearestThreatText = `Лучший план: ${bestMove.from}→${bestMove.to} (${bestMove.evalPawns})`;
+  let nearestThreatText = `Best plan: ${bestMove.from}→${bestMove.to} (${bestMove.evalPawns})`;
   if (bestMove.isMateInOne) {
-    nearestThreatText = `👑 МАТ В 1 ХОД: ${bestMove.from}→${bestMove.to}#`;
+    nearestThreatText = `👑 MATE IN 1 MOVE: ${bestMove.from}→${bestMove.to}#`;
   } else if (bestMove.isForcedMateInTwo) {
-    nearestThreatText = `👑 ФОРС. МАТ В 2 ХОДА: ${bestMove.from}→${bestMove.to}+`;
+    nearestThreatText = `👑 FORCED MATE IN 2 MOVES: ${bestMove.from}→${bestMove.to}+`;
   } else if (bestMove.isTrap && bestMove.trapChance >= 75) {
-    nearestThreatText = `🪤 ЛОВУШКА ${bestMove.from}→${bestMove.to} (Ошибка врага: ${bestMove.trapChance}%)`;
+    nearestThreatText = `🪤 TRAP ${bestMove.from}→${bestMove.to} (Enemy error: ${bestMove.trapChance}%)`;
   } else if (isDangerPosition) {
-    nearestThreatText = `🛡 УГРОЗА: ${dangerReason} (Защита: ${bestMove.from}→${bestMove.to})`;
+    nearestThreatText = `🛡 THREAT: ${dangerReason} (Defense: ${bestMove.from}→${bestMove.to})`;
   } else if (hangingSquare && threatBefore >= 75) {
-    nearestThreatText = `⚠️ Поле ${hangingSquare.toUpperCase()} под боем! Спасение: ${bestMove.from}→${bestMove.to}`;
+    nearestThreatText = `⚠️ Square ${hangingSquare.toUpperCase()} under attack! Escape: ${bestMove.from}→${bestMove.to}`;
   } else if (bestMove.fromSyzygy) {
     nearestThreatText = `🔮 ${bestMove.syzygyBadge}`;
   }

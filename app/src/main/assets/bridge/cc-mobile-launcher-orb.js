@@ -512,9 +512,9 @@
     hudShadow = hudHost.attachShadow({ mode: "open" });
     hudShadow.innerHTML = `
       <style>${floatingHudCss}</style>
-      <div id="cc-daily-welcome-splash" class="cc-overlay" role="dialog" aria-modal="true" aria-label="Приветствие" aria-hidden="true" tabindex="-1">
+      <div id="cc-daily-welcome-splash" class="cc-overlay" role="dialog" aria-modal="true" aria-label="Welcome" aria-hidden="true" tabindex="-1">
         <div class="cc-welcome-emblem" aria-hidden="true">♟</div>
-        <div class="cc-welcome-title">ChessCoach готов</div>
+        <div class="cc-welcome-title">ChessCoach ready</div>
         <div class="cc-welcome-sub" id="cc-daily-welcome-sub"></div>
         <div class="cc-welcome-progress" aria-hidden="true"></div>
       </div>
@@ -528,41 +528,41 @@
       </div>
       <div id="cc-auto-confirm-modal" class="cc-overlay" role="dialog" aria-modal="true" aria-labelledby="cc-auto-confirm-title" aria-hidden="true">
         <div class="cc-modal-box" role="document">
-          <span class="cc-step">ОТДЕЛЬНОЕ ПОДТВЕРЖДЕНИЕ</span>
-          <div class="cc-question" id="cc-auto-confirm-title">Включить автоматические ходы?</div>
+          <span class="cc-step">SEPARATE CONFIRMATION</span>
+          <div class="cc-question" id="cc-auto-confirm-title">Enable automatic moves?</div>
           <div class="cc-hint" id="cc-auto-confirm-text">
-            Профиль уже применён, но автоход оставлен выключенным. Автоматизация может противоречить правилам игровой платформы.
+            Profile already applied, but automove left disabled. Automation may violate the game platform rules.
           </div>
           <div class="cc-confirm-actions">
-            <button type="button" id="cc-auto-stay-off">Оставить выкл.</button>
-            <button type="button" id="cc-auto-enable">Включить явно</button>
+            <button type="button" id="cc-auto-stay-off">Leave off.</button>
+            <button type="button" id="cc-auto-enable">Enable explicitly</button>
           </div>
         </div>
       </div>
-      <section id="cc-mini-hud-card" role="region" aria-label="Краткий анализ ChessCoach" aria-hidden="true">
+      <section id="cc-mini-hud-card" role="region" aria-label="Brief ChessCoach analysis" aria-hidden="true">
         <div class="cc-mini-header" id="cc-mini-drag-handle">
           <div class="cc-mini-status" aria-live="polite">
             <span class="cc-mini-dot" id="cc-mini-dot" aria-hidden="true"></span>
-            <span id="cc-mini-turn-txt">АНАЛИЗ ДОСКИ</span>
+            <span id="cc-mini-turn-txt">BOARD ANALYSIS</span>
           </div>
           <div class="cc-mini-actions">
-            <button type="button" class="cc-mini-btn" id="cc-mini-play-btn" aria-label="Сделать рекомендованный ход">ХОД</button>
-            <button type="button" class="cc-mini-btn" id="cc-mini-settings-btn" aria-label="Открыть настройки">МЕНЮ</button>
-            <button type="button" class="cc-mini-btn" id="cc-mini-close-btn" aria-label="Свернуть в кнопку">×</button>
+            <button type="button" class="cc-mini-btn" id="cc-mini-play-btn" aria-label="Play recommended move">MOVE</button>
+            <button type="button" class="cc-mini-btn" id="cc-mini-settings-btn" aria-label="Open settings">MENU</button>
+            <button type="button" class="cc-mini-btn" id="cc-mini-close-btn" aria-label="Collapse to button">×</button>
           </div>
         </div>
         <div class="cc-mini-body">
           <div class="cc-mini-move-row">
-            <span id="cc-mini-move-main">Ожидание...</span>
+            <span id="cc-mini-move-main">Waiting...</span>
             <span class="cc-mini-badges"><span class="cc-mini-badge" id="cc-mini-wdl-pill">W 50%</span><span class="cc-mini-badge" id="cc-mini-eval-badge">0.00</span></span>
           </div>
-          <div id="cc-mini-tech-reason">Откройте партию или сделайте ход для расчёта.</div>
+          <div id="cc-mini-tech-reason">Open a game or make a move for calculation.</div>
           <div id="cc-mini-pv-line"></div>
         </div>
       </section>
       <div id="cc-corner-pill" role="group" aria-label="ChessCoach" aria-hidden="true">
-        <button type="button" class="cc-corner-btn" id="cc-corner-restore-hud-btn" aria-label="Развернуть мини-анализ"><span id="cc-corner-move-short">АНАЛИЗ</span></button>
-        <button type="button" class="cc-corner-btn" id="cc-corner-open-settings-btn" aria-label="Открыть настройки">МЕНЮ</button>
+        <button type="button" class="cc-corner-btn" id="cc-corner-restore-hud-btn" aria-label="Expand mini-analysis"><span id="cc-corner-move-short">ANALYSIS</span></button>
+        <button type="button" class="cc-corner-btn" id="cc-corner-open-settings-btn" aria-label="Open settings">MENU</button>
       </div>
     `;
 
@@ -861,7 +861,7 @@
     const chip = mainHudShadow?.getElementById("cc-mobile-device-chip");
     if (chip) chip.textContent = `${deviceRecommendation.tier} · ${deviceRecommendation.model}`;
     const recommendation = mainHudShadow?.getElementById("cc-mobile-recommendation-text");
-    if (recommendation) recommendation.textContent = `${deviceRecommendation.model}. Один поток Stockfish, без постоянных анимаций. Рекомендуемый предел: ${deviceRecommendation.maxElo} ELO.`;
+    if (recommendation) recommendation.textContent = `${deviceRecommendation.model}. One thread Stockfish, without constant animations. Recommended limit: ${deviceRecommendation.maxElo} ELO.`;
   }
 
   function setupMobileSettingsHub(root, panel) {
@@ -872,14 +872,14 @@
     launcherBar.innerHTML = `
       <div class="cc-launcher-topline">
         <span class="cc-device-chip" id="cc-mobile-device-chip">${deviceRecommendation.tier} · ${escapeHtml(deviceRecommendation.model)}</span>
-        <span class="cc-launcher-note">Лёгкий интерфейс</span>
+        <span class="cc-launcher-note">Light interface</span>
       </div>
-      <div class="cc-launcher-cards-row" role="navigation" aria-label="Шахматная платформа">
+      <div class="cc-launcher-cards-row" role="navigation" aria-label="Chess platform">
         <button type="button" class="cc-platform-card" id="cc-select-lichess-btn" ${isChessCom ? "" : "aria-current=\"page\""}>
-          <span class="cc-platform-card-title">Lichess</span><span class="cc-platform-card-sub">${isChessCom ? "Перейти" : "Открыт"}</span>
+          <span class="cc-platform-card-title">Lichess</span><span class="cc-platform-card-sub">${isChessCom ? "Go" : "Open"}</span>
         </button>
         <button type="button" class="cc-platform-card" id="cc-select-chesscom-btn" ${isChessCom ? "aria-current=\"page\"" : ""}>
-          <span class="cc-platform-card-title">Chess.com</span><span class="cc-platform-card-sub">${isChessCom ? "Открыт" : "Перейти"}</span>
+          <span class="cc-platform-card-title">Chess.com</span><span class="cc-platform-card-sub">${isChessCom ? "Open" : "Go"}</span>
         </button>
       </div>
     `;
@@ -904,8 +904,8 @@
     const brand = root.querySelector(".cc-brand > span:nth-child(2)");
     if (brand) brand.textContent = "ChessCoach";
     if (headerClose) {
-      headerClose.textContent = "К доске";
-      headerClose.setAttribute("aria-label", "Вернуться к доске");
+      headerClose.textContent = "К board";
+      headerClose.setAttribute("aria-label", "Return to board");
       listen(headerClose, "click", (event) => {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -946,7 +946,7 @@
     tab.dataset.tab = "presets";
     tab.setAttribute("role", "tab");
     tab.setAttribute("aria-controls", "cc-pane-presets");
-    tab.textContent = "ПРЕСЕТЫ";
+    tab.textContent = "PRESETS";
     nav.prepend(tab);
 
     const pane = document.createElement("div");
@@ -955,37 +955,37 @@
     pane.setAttribute("role", "tabpanel");
     pane.innerHTML = `
       <div class="cc-preset-hero">
-        <h2>Настройте под себя</h2>
-        <p class="cc-preset-lead">Готовый профиль в одно касание или точная настройка в разделах ниже.</p>
+        <h2>Customize for yourself</h2>
+        <p class="cc-preset-lead">Ready profile in one tap or precise setup in sections below.</p>
       </div>
       <div class="cc-glass-card">
-        <label class="cc-preset-desc" for="cc-mobile-settings-search">Поиск по настройкам</label>
-        <input type="search" class="cc-text-input" id="cc-mobile-settings-search" placeholder="Например: задержка, стрелки, цвет" autocomplete="off" style="margin-top:7px;">
+        <label class="cc-preset-desc" for="cc-mobile-settings-search">Search settings</label>
+        <input type="search" class="cc-text-input" id="cc-mobile-settings-search" placeholder="For example: delay, arrows, color" autocomplete="off" style="margin-top:7px;">
         <div id="cc-mobile-search-results" aria-live="polite"></div>
       </div>
       <div class="cc-glass-card">
-        <div class="cc-section-title"><span>Подобрано для телефона</span><span>${deviceRecommendation.tier}</span></div>
-        <div class="cc-preset-desc" id="cc-mobile-recommendation-text">${escapeHtml(deviceRecommendation.model)}. Один поток Stockfish, без постоянных анимаций. Рекомендуемый предел: ${deviceRecommendation.maxElo} ELO.</div>
-        <button type="button" class="cc-btn cc-btn-primary" id="cc-run-survey-again-btn" style="width:100%;margin-top:12px;">Подобрать профиль</button>
+        <div class="cc-section-title"><span>Picked for phone</span><span>${deviceRecommendation.tier}</span></div>
+        <div class="cc-preset-desc" id="cc-mobile-recommendation-text">${escapeHtml(deviceRecommendation.model)}. One thread Stockfish, without constant animations. Recommended limit: ${deviceRecommendation.maxElo} ELO.</div>
+        <button type="button" class="cc-btn cc-btn-primary" id="cc-run-survey-again-btn" style="width:100%;margin-top:12px;">Pick profile</button>
       </div>
       <div class="cc-preset-grid">
         <button type="button" class="cc-preset-card" id="cc-quick-preset-legit">
-          <span class="cc-preset-title">Спокойный</span>
-          <span class="cc-preset-desc">Без лишних эффектов, с увеличенной паузой перед ходом.</span>
-          <span class="cc-preset-meta">Для вдумчивой игры</span>
+          <span class="cc-preset-title">Calm</span>
+          <span class="cc-preset-desc">No extra effects, with increased pause before move.</span>
+          <span class="cc-preset-meta">For thoughtful play</span>
         </button>
         <button type="button" class="cc-preset-card" id="cc-quick-preset-hvh">
-          <span class="cc-preset-title">Быстрый</span>
-          <span class="cc-preset-desc">Короткая задержка, простые отметки клеток, без тяжёлых эффектов.</span>
-          <span class="cc-preset-meta">Для коротких партий</span>
+          <span class="cc-preset-title">Fast</span>
+          <span class="cc-preset-desc">Short delay, square marks, without heavy effects.</span>
+          <span class="cc-preset-meta">For short games</span>
         </button>
         <button type="button" class="cc-preset-card" id="cc-quick-preset-balance">
-          <span class="cc-preset-title">Сбалансированный</span>
-          <span class="cc-preset-desc">Умеренный темп, понятные подсказки и защита критических ходов.</span>
-          <span class="cc-preset-meta">Для повседневной игры</span>
+          <span class="cc-preset-title">Balanced</span>
+          <span class="cc-preset-desc">Moderate tempo, clear hints and defense of critical moves.</span>
+          <span class="cc-preset-meta">For daily play</span>
         </button>
       </div>
-      <div id="cc-mobile-preset-status" role="status" aria-live="polite">Автоход по умолчанию выключен.</div>
+      <div id="cc-mobile-preset-status" role="status" aria-live="polite">Automove by default disabled.</div>
     `;
     mainView.prepend(pane);
     presetStatus = pane.querySelector("#cc-mobile-preset-status");
@@ -1042,13 +1042,13 @@
     const mainView = root.querySelector(".cc-main-view");
     if (!nav || !mainView) return;
     nav.setAttribute("role", "tablist");
-    nav.setAttribute("aria-label", "Разделы настроек");
+    nav.setAttribute("aria-label", "Sections settings");
     const more = document.createElement("button");
     more.type = "button";
     more.className = "cc-tab-btn";
     more.dataset.tab = "more";
     nav.appendChild(more);
-    const labels = { presets: "Настройки", analyzer: "Анализ", automove: "Автоход", rage: "Движок", more: "Ещё" };
+    const labels = { presets: "Settings", analyzer: "Analysis", automove: "Automove", rage: "Engine", more: "More" };
     const icons = {
       presets: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
       analyzer: '<path d="M4 19V5m0 14h16M7 14l4-5 4 3 5-7"/>',
@@ -1060,10 +1060,10 @@
     extraPane.id = "cc-pane-more";
     extraPane.className = "cc-tab-pane";
     extraPane.setAttribute("role", "tabpanel");
-    extraPane.innerHTML = '<div class="cc-preset-hero"><h2>Дополнительные настройки</h2><p class="cc-preset-lead">Оформление, сохранённые позиции и расширенные параметры.</p></div><div class="cc-mobile-links"></div><div class="cc-glass-card" id="cc-mobile-modes-card"><div class="cc-section-title">Набор доступных функций</div><p class="cc-preset-desc">Переключатель меняет видимость расширенных настроек. Используйте автоматику только там, где это разрешено.</p></div>';
+    extraPane.innerHTML = '<div class="cc-preset-hero"><h2>Additional settings</h2><p class="cc-preset-lead">Appearance, saved positions and advanced parameters.</p></div><div class="cc-mobile-links"></div><div class="cc-glass-card" id="cc-mobile-modes-card"><div class="cc-section-title">Set of available features</div><p class="cc-preset-desc">Toggle changes visibility advanced settings. Use automation only there, where this is allowed.</p></div>';
     mainView.appendChild(extraPane);
     if (modeBar) extraPane.querySelector("#cc-mobile-modes-card").appendChild(modeBar);
-    const extras = { visuals: ["Оформление", "Стрелки, цвета и вид доски"], privacy: ["Запись и внешний вид", "Параметры отображения игроков"], misc: ["База и опыт", "Сохранённые позиции и настройки"] };
+    const extras = { visuals: ["Appearance", "Arrows, color and board look"], privacy: ["Recording and appearance", "Player display parameters"], misc: ["Database & experience", "Saved positions and settings"] };
     nav.querySelectorAll(".cc-tab-btn").forEach((button) => {
       const id = button.dataset.tab;
       if (labels[id]) {
@@ -1072,7 +1072,7 @@
         button.setAttribute("aria-controls", `cc-pane-${id}`);
       } else {
         button.classList.add("cc-mobile-extra-tab");
-        const [label, description] = extras[id] || [compactText(button.textContent, 50), "Расширенные параметры"];
+        const [label, description] = extras[id] || [compactText(button.textContent, 50), "Advanced parameters"];
         const link = document.createElement("button");
         link.type = "button";
         link.className = "cc-mobile-link";
@@ -1108,7 +1108,7 @@
       const query = search.value.trim().toLocaleLowerCase("ru");
       if (query.length < 2) return;
       const seen = new Set();
-      const labels = { analyzer: "Анализ", automove: "Автоход", rage: "Движок", visuals: "Оформление", privacy: "Запись", misc: "База и опыт" };
+      const labels = { analyzer: "Analysis", automove: "Automove", rage: "Engine", visuals: "Appearance", privacy: "Recording", misc: "Database & experience" };
       for (const target of root.querySelectorAll(".cc-Switch-row,.cc-control-row,.cc-section-title")) {
         const targetPane = target.closest(".cc-tab-pane");
         const tabId = targetPane?.id.replace("cc-pane-", "");
@@ -1130,7 +1130,7 @@
         results.appendChild(button);
         if (seen.size === 8) break;
       }
-      if (!seen.size) results.textContent = "Настройки не найдены. Попробуйте другое слово.";
+      if (!seen.size) results.textContent = "Settings not found. Try another word.";
     });
   }
 
@@ -1139,13 +1139,13 @@
     vibrate(20);
     const subtitle = button?.querySelector(".cc-platform-card-sub");
     if (button) button.disabled = true;
-    if (subtitle) subtitle.textContent = "Загрузка...";
+    if (subtitle) subtitle.textContent = "Loading...";
     await saveGlobalPatch({ cc_mobile_platform: platform });
     try {
       await nativeRequest("platform.switch", { platform: platform === "lichess" ? "LICHESS" : "CHESS_COM" });
     } catch (e) {
       if (button) button.disabled = false;
-      if (subtitle) subtitle.textContent = "Недоступно";
+      if (subtitle) subtitle.textContent = "Unavailable";
     }
   }
 
@@ -1284,21 +1284,21 @@
     if (applyingPreset || destroyed) return false;
     applyingPreset = true;
     vibrate(22);
-    setPresetStatus("Применение профиля...", "#ffbe0b");
+    setPresetStatus("Applying profile...", "#ffbe0b");
     const config = buildPresetConfig(selection);
     try {
       const applied = applyConfigThroughUi(config);
       if (!applied) {
-        setPresetStatus("Профиль не сохранён: core UI ещё не готов.", "#ff7b9f");
+        setPresetStatus("Profile not saved: core UI not ready yet.", "#ff7b9f");
         return false;
       }
       const saved = await savePlatformPatch(persistablePresetConfig(config));
       if (!saved) {
-        setPresetStatus("Профиль применён только на текущую сессию: storage недоступен.", "#ffbe0b");
+        setPresetStatus("Profile applied only for current session: storage unavailable.", "#ffbe0b");
         return false;
       }
       await saveGlobalPatch({ [calibrationKey]: true });
-      setPresetStatus(`Профиль ${deviceRecommendation.tier} применён. Автоход выключен.`, "#70e000");
+      setPresetStatus(`Profile ${deviceRecommendation.tier} applied. Automove disabled.`, "#70e000");
       pendingAutomation = {
         autoMoveEnabled: true,
         premoveEnabled: Boolean(config.desiredPremove && deviceRecommendation.tier !== "LOW"),
@@ -1323,8 +1323,8 @@
     const text = hudShadow.getElementById("cc-auto-confirm-text");
     if (text) {
       text.textContent = pendingAutomation.premoveEnabled
-        ? "Профиль применён с выключенной автоматикой. Явное включение активирует автоход и премувы; это может противоречить правилам платформы."
-        : "Профиль применён с выключенной автоматикой. Явное включение активирует только автоход; это может противоречить правилам платформы.";
+        ? "Profile applied with disabled automation. Explicit enabling activates automove and premoves; this may violate platform rules."
+        : "Profile applied s disabled automation. Explicit enabling activates only automove; this may violate the rules platform.";
     }
     showOverlay(autoConfirmModal, hudShadow.getElementById("cc-auto-stay-off"));
   }
@@ -1347,12 +1347,12 @@
     ok = setCheckbox("cc-bullet-turbo-chk", requested.bulletTurboMode, false) && ok;
     const auto = mainHudShadow.getElementById("cc-auto-master-chk");
     if (!ok || !auto?.checked) {
-      setPresetStatus("Автоматика не включена: core UI отклонил изменение.", "#ff7b9f");
+      setPresetStatus("Automation not enabled: core UI rejected the change.", "#ff7b9f");
       return;
     }
     const saved = await savePlatformPatch(requested);
     setPresetStatus(
-      saved ? "Автоход включён после явного подтверждения." : "Автоход включён только для текущей сессии: storage недоступен.",
+      saved ? "Automove enabled after explicit confirmation." : "Automove enabled only for current session: storage unavailable.",
       "#ffbe0b"
     );
     vibrate(24);
@@ -1396,7 +1396,7 @@
       if (!control.disabled) control.dataset.ccLowDisabled = "1";
       control.disabled = true;
       control.setAttribute("aria-disabled", "true");
-      control.title = "Отключено профилем LOW для стабильной работы устройства";
+      control.title = "Disabled by profile LOW for stable device operation";
     }
     if (changed) {
       void savePlatformPatch({
@@ -1422,36 +1422,36 @@
 
   const SURVEY_STEPS = Object.freeze([
     Object.freeze({
-      tag: "ШАГ 1 ИЗ 3 · РЕЖИМ",
-      question: "Какой темп помощи вам нужен?",
-      hint: "Автоход останется выключенным до отдельного подтверждения.",
+      tag: "STEP 1 OF 3 · MODE",
+      question: "What help tempo do you need?",
+      hint: "Automove stays disabled until separate confirmation.",
       key: "mode",
       options: Object.freeze([
-        Object.freeze({ value: "legit", title: "Спокойный", text: "Плавный темп и увеличенная задержка." }),
-        Object.freeze({ value: "hvh", title: "Быстрый", text: "Минимальная задержка в пределах профиля устройства." }),
-        Object.freeze({ value: "balance", title: "Сбалансированный", text: "Средний темп и защита критических ходов." })
+        Object.freeze({ value: "legit", title: "Calm", text: "Smooth tempo and increased delay." }),
+        Object.freeze({ value: "hvh", title: "Fast", text: "Minimal delay within device profile limits." }),
+        Object.freeze({ value: "balance", title: "Balanced", text: "Medium tempo and defense of critical moves." })
       ])
     }),
     Object.freeze({
-      tag: "ШАГ 2 ИЗ 3 · ВРЕМЯ",
-      question: "Какой контроль времени вы играете чаще?",
-      hint: "Задержка будет рассчитана от рекомендации устройства.",
+      tag: "STEP 2 OF 3 · TIME",
+      question: "Which time control do you play most often?",
+      hint: "Delay will be calculated from device recommendation.",
       key: "speed",
       options: Object.freeze([
-        Object.freeze({ value: "bullet", title: "Пуля", text: "Короткая рекомендуемая задержка." }),
-        Object.freeze({ value: "blitz", title: "Блиц", text: "Базовая задержка профиля устройства." }),
-        Object.freeze({ value: "rapid", title: "Рапид", text: "Увеличенная пауза перед действием." })
+        Object.freeze({ value: "bullet", title: "Bullet", text: "Short recommended delay." }),
+        Object.freeze({ value: "blitz", title: "Blitz", text: "Base delay of device profile." }),
+        Object.freeze({ value: "rapid", title: "Rapid", text: "Increased pause before action." })
       ])
     }),
     Object.freeze({
-      tag: "ШАГ 3 ИЗ 3 · ПОДСКАЗКИ",
-      question: "Как показывать подсказки?",
-      hint: "На LOW тяжёлые эффекты и премувы отключены.",
+      tag: "STEP 3 OF 3 · HINTS",
+      question: "How to show hints?",
+      hint: "On LOW heavy effects and premoves are disabled.",
       key: "arrows",
       options: Object.freeze([
-        Object.freeze({ value: "curved_neon", title: "Дуги", text: "Плавные стрелки, если устройство разрешает анимации." }),
-        Object.freeze({ value: "sq_cyber_frame", title: "Рамки", text: "Контрастные клетки без сложной траектории." }),
-        Object.freeze({ value: "sq_minimal_dots", title: "Точки", text: "Самый лёгкий визуальный режим." })
+        Object.freeze({ value: "curved_neon", title: "Arcs", text: "Smooth arrows, if the device allows animations." }),
+        Object.freeze({ value: "sq_cyber_frame", title: "Frames", text: "Contrasting squares without complex paths." }),
+        Object.freeze({ value: "sq_minimal_dots", title: "Dots", text: "Lightest visual mode." })
       ])
     })
   ]);
@@ -1504,7 +1504,7 @@
     if (!storageReady || !rootSetupComplete || !hudShadow || welcomeSequenceStarted || document.visibilityState !== "visible") return;
     welcomeSequenceStarted = true;
     if (!initialStorage[calibrationKey]) {
-      setPresetStatus("Выберите готовый профиль или откройте нужный раздел. Автоход включается отдельно.");
+      setPresetStatus("Pick a ready profile or open the section you need. Automove is enabled separately.");
     }
   }
 
@@ -1551,12 +1551,12 @@
     const pv = hudShadow.getElementById("cc-mini-pv-line");
     const corner = hudShadow.getElementById("cc-corner-move-short");
 
-    turn.textContent = enemyTurn ? "ХОД СОПЕРНИКА" : autoOn ? "НАШ ХОД · АВТО" : "НАШ ХОД";
+    turn.textContent = enemyTurn ? "OPPONENT'S TURN" : autoOn ? "OUR TURN · AUTO" : "OUR TURN";
     const dotColor = enemyTurn ? "#ffbe0b" : autoOn ? "#70e000" : "#00f5d4";
     dot.style.background = dotColor;
     dot.style.boxShadow = `0 0 8px ${dotColor}`;
 
-    const wdlMatch = wdl.match(/Поб:\s*(\d+%)/i);
+    const wdlMatch = wdl.match(/Win:\s*(\d+%)/i);
     if (wdlMatch) wdlPill.textContent = `W ${wdlMatch[1]}`;
     if (bestEval && bestEval !== "--") {
       evaluation.textContent = bestEval;
@@ -1567,7 +1567,7 @@
       move.textContent = `${moveMatch[1]} → ${moveMatch[2]}`;
       corner.textContent = `${moveMatch[1]}→${moveMatch[2]}`;
     }
-    if (enemyTurn) reason.textContent = threats || "Ожидание ответа соперника.";
+    if (enemyTurn) reason.textContent = threats || "Waiting for opponent reply.";
     else if (bestDesc) reason.textContent = bestDesc.includes("—") ? bestDesc.slice(bestDesc.indexOf("—") + 1).trim() : bestDesc;
     pv.textContent = bestPv || `${deviceRecommendation.tier} · ${deviceRecommendation.maxElo} ELO`;
   }
@@ -1605,7 +1605,7 @@
         if (!button) continue;
         button.disabled = true;
         button.setAttribute("aria-disabled", "true");
-        button.title = "Недоступно в защищённой Android-сборке";
+        button.title = "Unavailable in protected Android build";
         button.style.opacity = "0.55";
         if (button.dataset.ccAndroidDisabled !== "1") {
           button.dataset.ccAndroidDisabled = "1";
@@ -1616,7 +1616,7 @@
         }
       }
       if (status) {
-        status.textContent = "ОТКЛЮЧЕНО НА ANDROID";
+        status.textContent = "DISABLED ON ANDROID";
         status.style.color = "#ffbe0b";
       }
       return true;

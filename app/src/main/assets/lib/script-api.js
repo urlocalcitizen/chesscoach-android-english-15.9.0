@@ -12,7 +12,7 @@
   let runtimeIntervalId = null;
   let destroyed = false;
 
-  // HUD регистрирует свой закрытый ShadowRoot явно, не затрагивая компоненты сайта.
+  // HUD региsтрирует sвой закрытый ShadowRoot явно, не затрагивая компоненты sайта.
   const registerHudShadow = (root) => {
     if (root instanceof ShadowRoot) hudShadow = root;
   };
@@ -174,7 +174,7 @@
     }
   }
 
-  // ДИНАМИЧЕСКИЙ ЗАГРУЗЧИК СКРИПТОВ ИЗ ПАПКИ scripts/ БЕЗ ПРАВКИ MANIFEST.JSON
+  // ДИНАМИЧЕСКИЙ ЗАГРУЗЧИК SCRIPTОВ ИЗ FOLDER scripts/ NO ПРАВКИ MANIFEST.JSON
   async function loadScriptFileFromFolder(fileName, saveToList = true) {
     if (destroyed || !isExtensionContextValid()) return false;
     const cleanName = String(fileName || "").trim().replace(/^.*[\\/]/, "");
@@ -197,7 +197,7 @@
       }
       return true;
     } catch (err) {
-      console.warn("[ChessCoach SDK] Не удалось загрузить scripts/" + cleanName + ". Убедитесь, что файл лежит в папке scripts/ и вы нажали Обновить в chrome://extensions/.", err);
+      console.warn("[ChessCoach SDK] Could not load scripts/" + cleanName + ". Make sure the file is in the scripts/ folder and you pressed Refresh в chrome://extensions/.", err);
       return false;
     }
   }
@@ -529,7 +529,7 @@
         row.style.cursor = "pointer";
 
         const span = document.createElement("span");
-        span.textContent = opts.label || "Тумблер";
+        span.textContent = opts.label || "Toggle";
 
         const chk = document.createElement("input");
         chk.type = "checkbox";
@@ -557,7 +557,7 @@
         const top = document.createElement("div");
         top.style.cssText = "display:flex; justify-content:space-between; font-weight:700;";
         const lbl = document.createElement("span");
-        lbl.textContent = opts.label || "Ползунок";
+        lbl.textContent = opts.label || "Slider";
         const valSpan = document.createElement("strong");
         valSpan.style.color = "#00f5d4";
         valSpan.textContent = (opts.value ?? opts.min ?? 0) + (opts.unit || "");
@@ -594,7 +594,7 @@
         row.className = "cc-ctrl-row";
 
         const span = document.createElement("span");
-        span.textContent = opts.label || "Цвет";
+        span.textContent = opts.label || "Color";
 
         const inp = document.createElement("input");
         inp.type = "color";
@@ -621,13 +621,13 @@
         wrap.className = "cc-ctrl-row";
 
         const span = document.createElement("span");
-        span.textContent = opts.label || "Файл / Текстура";
+        span.textContent = opts.label || "File / Texture";
 
         const btn = document.createElement("button");
         btn.className = "cc-btn";
         btn.style.padding = "5px 10px";
         btn.style.fontSize = "10.5px";
-        btn.textContent = "📂 Выбрать...";
+        btn.textContent = "📂 Choose...";
 
         const fileInp = document.createElement("input");
         fileInp.type = "file";
@@ -665,7 +665,7 @@
         row.className = "cc-ctrl-row";
 
         const span = document.createElement("span");
-        span.textContent = opts.label || "Горячая клавиша";
+        span.textContent = opts.label || "Hotkey";
 
         const bindBtn = document.createElement("button");
         bindBtn.style.cssText =
@@ -674,7 +674,7 @@
 
         bindBtn.addEventListener("click", () => {
           listening = true;
-          bindBtn.textContent = "[Нажми клавишу...]";
+          bindBtn.textContent = "[Press the key...]";
           bindBtn.style.borderColor = "#ffbe0b";
           bindBtn.style.color = "#ffbe0b";
         });
@@ -720,7 +720,7 @@
 
         const lbl = document.createElement("span");
         lbl.style.fontWeight = "700";
-        lbl.textContent = opts.label || "Выбор";
+        lbl.textContent = opts.label || "Choice";
 
         const sel = document.createElement("select");
         sel.style.cssText =
@@ -759,7 +759,7 @@
 
         const lbl = document.createElement("span");
         lbl.style.fontWeight = "700";
-        lbl.textContent = opts.label || "Текст";
+        lbl.textContent = opts.label || "Text";
 
         const inp = document.createElement("input");
         inp.type = "text";
@@ -785,7 +785,7 @@
 
         const btn = document.createElement("button");
         btn.className = "cc-btn";
-        btn.textContent = opts.label || "Кнопка";
+        btn.textContent = opts.label || "Button";
         btn.addEventListener("click", () => {
           if (typeof opts.onClick === "function") opts.onClick();
         });
@@ -877,7 +877,7 @@
     header.className = "cc-script-win-header";
     header.innerHTML =
       '<div style="display:flex; align-items:center; gap:7px;"><span style="width:8px; height:8px; border-radius:50%; background:#00f5d4; box-shadow:0 0 10px #00f5d4;"></span><span>' +
-      (opts.title || "📜 МЕНЮ СКРИПТА") +
+      (opts.title || "📜 MENU SCRIPT") +
       "</span></div>";
 
     const minBtn = document.createElement("button");
@@ -1396,7 +1396,7 @@
 
     if (chk) chk.checked = enabled;
     if (badge) {
-      badge.textContent = enabled ? "АКТИВЕН" : "ВЫКЛ";
+      badge.textContent = enabled ? "ACTIVE" : "OFF";
       badge.style.color = enabled ? "#00f5d4" : "#94a3b8";
     }
 
@@ -1448,14 +1448,14 @@
       "' style='font-size:9.5px; color:" +
       (scriptObj.enabled ? "#00f5d4" : "#94a3b8") +
       ";'>" +
-      (scriptObj.enabled ? "АКТИВЕН" : "ВЫКЛ") +
+      (scriptObj.enabled ? "ACTIVE" : "OFF") +
       "</span>" +
       "</div>" +
       "<div style='font-size:10.5px; color:#cbd5e1; margin-bottom:6px; line-height:1.35;'>" +
-      (scriptObj.description || "Пользовательский скрипт из папки scripts/") +
+      (scriptObj.description || "Custom script from the scripts/ folder") +
       "</div>" +
       '<div class="cc-Switch-row" style="padding:2px 0 0 0; border:none;">' +
-      "<span style='font-weight:800; color:#fff;'>⚡ Активировать и открыть окно скрипта</span>" +
+      "<span style='font-weight:800; color:#fff;'>⚡ Activate и open window script</span>" +
       "<input type='checkbox' id='cc-script-chk-" +
       scriptObj.id +
       "' " +
@@ -1484,7 +1484,7 @@
     const tabBtn = document.createElement("button");
     tabBtn.className = "cc-tab-btn";
     tabBtn.dataset.tab = "scripts";
-    tabBtn.innerHTML = '<span class="cc-tab-icon">📜</span> СКРИПТЫ';
+    tabBtn.innerHTML = '<span class="cc-tab-icon">📜</span> SCRIPTS';
     navList.appendChild(tabBtn);
 
     const pane = document.createElement("div");
@@ -1497,11 +1497,11 @@
       "<span id='cc-script-loader-status' style='color:#00f5d4;'>SDK v2.0 (60 FPS)</span>" +
       "</div>" +
       "<div style='font-size:10.5px; color:#cbd5e1; line-height:1.38; margin-bottom:8px;'>" +
-      "Положите любой скрипт (например, <code>snake.js</code>) в папку <strong>scripts/</strong>, обновите расширение в браузере и нажмите кнопку ниже, чтобы подключить его без замены <code>sample.js</code>:" +
+      "Put any script (example, <code>snake.js</code>) в folder <strong>scripts/</strong>, refresh extension в browser и press the button below, to connect it without replacement <code>sample.js</code>:" +
       "</div>" +
       '<div class="cc-actions-bar">' +
-      '<button class="cc-btn cc-btn-primary" id="cc-add-script-file-btn">📂 ПОДКЛЮЧИТЬ .JS ИЗ ПАПКИ SCRIPTS/</button>' +
-      '<button class="cc-btn cc-btn-danger" id="cc-reset-script-files-btn">🗑 СБРОСИТЬ СПИСОК</button>' +
+      '<button class="cc-btn cc-btn-primary" id="cc-add-script-file-btn">📂 CONNECT .JS FROM SCRIPTS/ FOLDER</button>' +
+      '<button class="cc-btn cc-btn-danger" id="cc-reset-script-files-btn">🗑 RESET LIST</button>' +
       "</div>" +
       '<input type="file" id="cc-script-file-picker" accept=".js" multiple style="display:none;" />' +
       "</div>" +
@@ -1529,8 +1529,8 @@
         }
         if (statusEl) {
           statusEl.textContent = loadedCount > 0
-            ? "✅ ПОДКЛЮЧЕНО: " + loadedCount + " СКРИПТ(ОВ)"
-            : "⚠️ СНАЧАЛА ОБНОВИТЕ РАСШИРЕНИЕ В CHROME://EXTENSIONS";
+            ? "✅ DISABLED: " + loadedCount + " SCRIPT(S)"
+            : "⚠️ FIRST UPDATE THE EXTENSION В CHROME://EXTENSIONS";
           statusEl.style.color = loadedCount > 0 ? "#38b000" : "#ffbe0b";
         }
       });
@@ -1541,7 +1541,7 @@
         try {
           chrome.storage?.local?.set({ cc_custom_script_files: [] }, () => {
             if (statusEl) {
-              statusEl.textContent = "🔄 СПИСОК ОЧИЩЕН (ОБНОВИТЕ СТРАНИЦУ)";
+              statusEl.textContent = "🔄 LIST CLEARED (REFRESH THE PAGE)";
               statusEl.style.color = "#ff4d94";
             }
           });

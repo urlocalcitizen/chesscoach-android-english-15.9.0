@@ -1,20 +1,20 @@
 window.ChessExplainer = (function () {
   const PIECE_NAMES = {
-    p: "Пешка",
-    n: "Конь",
-    b: "Слон",
-    r: "Ладья",
-    q: "Ферзь",
-    k: "Король"
+    p: "Pawn",
+    n: "Knight",
+    b: "Bishop",
+    r: "Rook",
+    q: "Queen",
+    k: "King"
   };
 
   const PIECE_GENITIVE = {
-    p: "пешку",
-    n: "коня",
-    b: "слона",
-    r: "ладью",
-    q: "ферзя",
-    k: "короля"
+    p: "pawn",
+    n: "knight",
+    b: "bishop",
+    r: "rook",
+    q: "queen",
+    k: "king"
   };
 
   const FILES = "abcdefgh";
@@ -169,16 +169,16 @@ window.ChessExplainer = (function () {
   }
 
   function explainMove(m, category, fen = "", style = "tal", roflMode = false) {
-    if (!m) return "Ожидание вашего хода...";
+    if (!m) return "Waiting your move...";
 
-    const pName = PIECE_NAMES[m.piece] || "Фигура";
-    const capAcc = m.captured ? PIECE_GENITIVE[m.captured] || "фигуру" : "";
+    const pName = PIECE_NAMES[m.piece] || "Piece";
+    const capAcc = m.captured ? PIECE_GENITIVE[m.captured] || "piece" : "";
     const promoText = m.promo ? `=${m.promo.toUpperCase()}` : "";
-    const syzygyTag = m.fromSyzygy ? " 🔮[SYZYGY БОГ]" : "";
+    const syzygyTag = m.fromSyzygy ? " 🔮[SYZYGY GOD]" : "";
     const sfWasmTag = m.fromWasm ? " 🧠[SF LOCAL]" : "";
     const cloudTag = (!m.fromSyzygy && !m.fromWasm && m.fromCloud) ? " ⚡[SF 3000]" : "";
     const memTag = m.memoryBonus > 20 ? " ◈[MEM]" : "";
-    const zeitnotTag = m.isZeitnotBranched ? " ⏱️[ФЛАГ-ШТУРМ]" : "";
+    const zeitnotTag = m.isZeitnotBranched ? " ⏱️[FLAG STORM]" : "";
     const tags = `${syzygyTag}${sfWasmTag}${cloudTag}${memTag}${zeitnotTag}`;
     const header = `${pName} ${m.from} → ${m.to}${promoText}${tags}`;
 
@@ -186,51 +186,51 @@ window.ChessExplainer = (function () {
 
     if (category === "best") {
       if (m.isMateInOne) {
-        return `👑💀 ${header}# — АХАХАХ, МАТ В 1 ХОД! Соперник зевнул прямое фаталити. Добивай его!`;
+        return `👑💀 ${header}# — HAHAHA, MATE IN 1 MOVE! Opponent blundered a direct fatality. Finish him!`;
       }
       if (m.isForcedMateInTwo) {
-        return `👑⚡ ${header}+ — ФОРСИРОВАННЫЙ МАТ В 2 ХОДА! При любом ответе соперник получает мат следующим ходом.`;
+        return `👑⚡ ${header}+ — FORCED MATE IN 2 MOVES! Any opponent reply gets mate next move.`;
       }
       if (m.fromSyzygy && m.syzygyBadge) {
         if (m.syzygyOutcome === "win") {
-          return `🔮👑 ${header} — ${m.syzygyBadge}. Безупречная математическая реализация окончания!`;
+          return `🔮👑 ${header} — ${m.syzygyBadge}. Flawless mathematical endgame conversion!`;
         }
         if (m.syzygyOutcome === "draw") {
-          return `🔮🛡 ${header} — ${m.syzygyBadge}. Точное удержание табличной крепости.`;
+          return `🔮🛡 ${header} — ${m.syzygyBadge}. Precise holding of the tablebase fortress.`;
         }
-        return `🔮 ${header} — ${m.syzygyBadge}. Упорнейшее сопротивление по базе эндшпилей.`;
+        return `🔮 ${header} — ${m.syzygyBadge}. Stubborn resistance by endgame tablebase.`;
       }
       if (m.isCheckmate || m.trueScore > 15000) {
-        return `👑 ${header} — Неизбежный форсированный мат в несколько ходов!`;
+        return `👑 ${header} — Inevitable forced mate in a few moves!`;
       }
       if (m.isTrap && m.trapChance >= 75) {
-        return `🪤 ${header} — ЛОВУШКА (Шанс ошибки врага: ${m.trapChance}%)! ${m.trapSubtitle}`;
+        return `🪤 ${header} — TRAP (Chance of enemy error: ${m.trapChance}%)! ${m.trapSubtitle}`;
       }
       if (m.promo === "n") {
-        return `⚔ ${header} — Тактическое превращение в Коня! Вместо ферзя ставим коня с вилкой или матовой угрозой.`;
+        return `⚔ ${header} — Tactical promotion to Knight! Instead of queen we put knight with a fork or mating threat.`;
       }
       if (m.promo === "q") {
-        return `👑 ${header} — Проводим пешку в нового Ферзя и получаем решающий материальный перевес!`;
+        return `👑 ${header} — We promote the pawn to a new Queen and get a decisive material advantage!`;
       }
       if (m.isEnPassant) {
-        return `⚡ ${header} — Взятие на проходе (En Passant)! Снимаем с доски проскочившую пешку соперника.`;
+        return `⚡ ${header} — Capture on passant (En Passant)! We remove s board passed-over pawn opponent.`;
       }
 
       if (style === "mogging" || roflMode) {
         if (m.isTalSacrifice || m.isSacrifice) {
-          return `⚡ ${header} — Корректная тактическая жертва! Вскрываем прикрытие короля с объективным перевесом.`;
+          return `⚡ ${header} — Sound tactical sacrifice! Open king's cover s objective advantage.`;
         }
         if (m.isFork) {
-          return `⚔ ${header} — Жесткая вилка на две фигуры! Одной придется попрощаться.`;
+          return `⚔ ${header} — Brutal fork on two pieces! One will have to say goodbye.`;
         }
         if (m.isPin) {
-          return `◈ ${header} — Прибили связкой намертво. Фигура соперника парализована.`;
+          return `◈ ${header} — Device pin completely. Piece opponent paralyzed.`;
         }
         if (m.captured) {
-          return `✦ ${header} — Забираем ${capAcc} на ${m.to} и давим дальше.`;
+          return `✦ ${header} — Taking ${capAcc} on ${m.to} and pressing further.`;
         }
         if (m.kicksEnemyPiece) {
-          return `▲ ${header} — Пинаем чужую фигуру пешкой и забираем темп.`;
+          return `▲ ${header} — Kicking the enemy piece with a pawn and gaining tempo.`;
         }
       }
 
@@ -238,105 +238,105 @@ window.ChessExplainer = (function () {
         return `◈ ${header} — ${m.bookName}.`;
       }
       if (m.savedHangingPiece) {
-        return `🛡 ${header} — Спасаем фигуру или пешку из-под прямого удара.`;
+        return `🛡 ${header} — Saving piece or pawn from a direct attack.`;
       }
       if (m.isTalSacrifice || m.isSacrifice) {
-        return `⚡ ${header} — Просчитанная тактическая жертва для прорыва к королю.`;
+        return `⚡ ${header} — Calculated tactical sacrifice to break through to the king.`;
       }
       if (m.isFork) {
-        return `⚔ ${header} — Двойной удар (вилка) сразу по двум целям.`;
+        return `⚔ ${header} — Double attack (fork) on two targets at once.`;
       }
       if (m.isPin) {
-        return `◈ ${header} — Связываем фигуру соперника по линии короля или ферзя.`;
+        return `◈ ${header} — Pinning the opponent's piece on the king or queen line.`;
       }
       if (m.isCastling) {
-        return `🛡 ${header} — Рокировка: прячем короля и вводим ладью в бой.`;
+        return `🛡 ${header} — Castling: hide the king and bring the rook into play.`;
       }
       if (m.captured && m.givesCheck) {
-        return `⚡ ${header} — Забираем ${capAcc} на ${m.to} с шахом!`;
+        return `⚡ ${header} — Taking ${capAcc} on ${m.to} with check!`;
       }
       if (m.captured) {
-        return `✦ ${header} — Выигрываем ${capAcc} или проводим выгодный размен на ${m.to}.`;
+        return `✦ ${header} — Winning ${capAcc} or making a favorable exchange on ${m.to}.`;
       }
       if (m.kicksEnemyPiece) {
-        return `▲ ${header} — Прогоняем фигуру врага с потерей темпа.`;
+        return `▲ ${header} — We drive away piece enemy s loss of tempo.`;
       }
       if (m.givesCheck) {
-        return `⚡ ${header} — Атакующий шах королю с захватом инициативы.`;
+        return `⚡ ${header} — Attacking check to the king seizing the initiative.`;
       }
       if (motifs.isSeventhRankInvasion) {
-        return `▲ ${header} — Врываемся в «обжорный ряд» за пешками врага.`;
+        return `▲ ${header} — Breaking into the 7th rank after enemy pawns.`;
       }
       if (motifs.isOpenFile || motifs.isSemiOpenFile) {
-        return `◈ ${header} — Захватываем вертикаль «${m.to[0]}» тяжелой фигурой.`;
+        return `◈ ${header} — Seizing the ${m.to[0]}-file with a heavy piece.`;
       }
       if (motifs.isBattery) {
-        return `❖ ${header} — Строим пробивную батарею по одной линии.`;
+        return `❖ ${header} — Building a powerful battery on one line.`;
       }
       if (motifs.isOutpost) {
-        return `✦ ${header} — Сажаем фигуру на мощный защищенный форпост ${m.to}.`;
+        return `✦ ${header} — Planting a piece on the strong protected outpost ${m.to}.`;
       }
       if (motifs.isFianchetto) {
-        return `◈ ${header} — Выводим слона на большую диагональ.`;
+        return `◈ ${header} — Developing the bishop onto the long diagonal.`;
       }
       if (motifs.challengesEnemyPawn) {
-        return `▲ ${header} — Подрываем пешечный центр соперника.`;
+        return `▲ ${header} — Undermining the opponent's pawn center.`;
       }
       if (motifs.isPassedPawn) {
-        return `▲ ${header} — Ведем проходную пешку вперед в ферзи.`;
+        return `▲ ${header} — We push passed pawn toward promotion.`;
       }
       if (motifs.isDevelopment) {
-        return `✦ ${header} — Быстро вводим фигуру в игру ближе к центру.`;
+        return `✦ ${header} — Quickly prepare piece into play closer to center.`;
       }
       if (m.piece === "p" && motifs.isCenterControl) {
-        return `✦ ${header} — Захватываем центр доски и открываем линии.`;
+        return `✦ ${header} — We seize center board and open line.`;
       }
-      return `✦ ${header} — Сильный позиционный ход: улучшаем фигуры и усиливаем нажим.`;
+      return `✦ ${header} — Strong positional move: we improve pieces и increase pressure.`;
     }
 
     if (category === "avg") {
       if (m.isTrap && m.trapChance >= 75) {
-        return `🪤 ${header} — Острая альтернативная ловушка (Шанс ошибки врага: ${m.trapChance}%).`;
+        return `🪤 ${header} — Sharp alternative trap (Chance of enemy error: ${m.trapChance}%).`;
       }
       if (m.promo === "q") {
-        return `❖ ${header} — Превращение в Ферзя с переходом в спокойный выигранный эндшпиль.`;
+        return `❖ ${header} — Promotion to Queen transitioning into a calm won endgame.`;
       }
       if (m.isEnPassant) {
-        return `❖ ${header} — Взятие пешки на проходе с разгрузкой центра.`;
+        return `❖ ${header} — En passant capture relieving the center.`;
       }
       if (m.bookName) {
-        return `❖ ${header} — Спокойное теоретическое продолжение (${m.bookName}).`;
+        return `❖ ${header} — Quiet theoretical continuation (${m.bookName}).`;
       }
       if (m.captured) {
-        return `❖ ${header} — Рабочий размен на ${m.to}, но 1-я линия точнее.`;
+        return `❖ ${header} — Working exchange on ${m.to}, but 1st line is more precise.`;
       }
-      return `❖ ${header} — Надежный запасной ход без риска.`;
+      return `❖ ${header} — Reliable backup move without risk.`;
     }
 
     if (category === "worst") {
       if (m.causesStalemate) {
-        return `✖ ${header} — ОПАСНОСТЬ ПАТА! Оставляет короля соперника без ходов и дарит ничью 1/2 в выигранной позиции!`;
+        return `✖ ${header} — DANGER STALEMATE! Leaves opponent king without moves and gives away a draw 1/2 in a won position!`;
       }
       if (m.isRepetitionDrawRisk) {
-        return `✖ ${header} — Повторение позиции! Ведет к троекратному повторению и потере победы.`;
+        return `✖ ${header} — Position repetition! Leads to threefold repetition and loss of the win.`;
       }
       if (m.underDirectAttack) {
-        return `✖ ${header} — Грубый зевок! Подставляет фигуру или пешку под бой на ${m.to}.`;
+        return `✖ ${header} — Crude blunder! Hangs piece or pawn under attack on ${m.to}.`;
       }
       if (m.ignoredHangingPiece) {
-        return `✖ ${header} — Оставляет вашу атакованную фигуру без защиты.`;
+        return `✖ ${header} — Leaves your attacked piece without defense.`;
       }
       if (m.ruinedCastling) {
-        return `✖ ${header} — Лишает короля рокировки в опасном центре.`;
+        return `✖ ${header} — Deprives the king of castling in a dangerous center.`;
       }
-      return `✖ ${header} — Слабый ход: теряет время и отдает инициативу.`;
+      return `✖ ${header} — Weak move: loses time and gives away the initiative.`;
     }
   }
 
   function roastOpponentMove(oppMove, evalDropPawns, fen, weHaveMateInOne = false) {
     if (!oppMove || !oppMove.from || !oppMove.to) return null;
 
-    const pName = PIECE_NAMES[oppMove.piece] || "Фигура";
+    const pName = PIECE_NAMES[oppMove.piece] || "Piece";
     const moveStr = `${pName} ${oppMove.from} → ${oppMove.to}`;
     const drop = parseFloat(evalDropPawns) || 0;
     const toRC = sqToRC(oppMove.to);
@@ -344,16 +344,16 @@ window.ChessExplainer = (function () {
     if (weHaveMateInOne) {
       return {
         emoji: "😱",
-        badgeText: "ЗЕВНУЛ ФОРСИРОВАННЫЙ МАТ! 😂💀",
-        text: `😱💀 ${moveStr} — АХАХАХ! Чел реально зевнул форсированный МАТ! Оформляй ему билет в лобби!`
+        badgeText: "BLUNDERED FORCED MATE! 😂💀",
+        text: `😱💀 ${moveStr} — HAHAHA! Dude really blundered forced MATE! Book him a ticket to the lobby!`
       };
     }
 
     if (drop >= 2.0) {
       const blunders = [
-        `💀 ${moveStr} (-${drop.toFixed(1)}) — Жесткий зевок! Соперник подарил перевес на ровном месте.`,
-        `😂 ${moveStr} (-${drop.toFixed(1)}) — Классический подгон от соперника, наказываем!`,
-        `🤡 ${moveStr} (-${drop.toFixed(1)}) — Развалил свою позицию одним ходом.`
+        `💀 ${moveStr} (-${drop.toFixed(1)}) — Firm blunder! Opponent gifted advantage in an equal position.`,
+        `😂 ${moveStr} (-${drop.toFixed(1)}) — Classical boost from opponent, we punish!`,
+        `🤡 ${moveStr} (-${drop.toFixed(1)}) — Collapsed their position with one move.`
       ];
       return {
         emoji: "💀",
@@ -366,15 +366,15 @@ window.ChessExplainer = (function () {
       return {
         emoji: "😂",
         badgeText: `MISTAKE • -${drop.toFixed(1)}`,
-        text: `😂 ${moveStr} (-${drop.toFixed(1)}) — Неточный ход, перехватываем инициативу!`
+        text: `😂 ${moveStr} (-${drop.toFixed(1)}) — Inaccurate move, we seize initiative!`
       };
     }
 
     if (oppMove.piece === "p" && (oppMove.to[0] === "a" || oppMove.to[0] === "h")) {
       return {
         emoji: "◈",
-        badgeText: "ПАССИВ НА КРАЮ",
-        text: `◈ ${moveStr} — Тратит время на краю доски, забираем центр.`
+        badgeText: "PASSIVE ON THE EDGE",
+        text: `◈ ${moveStr} — Wastes time on the edge of the board; we take the center.`
       };
     }
 

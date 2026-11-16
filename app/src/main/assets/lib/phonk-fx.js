@@ -21,10 +21,10 @@ window.ChessFX = (function (existing) {
   }
 
   const PHONK_CAPTIONS = [
-    "💎 БРИЛЛИАНТОВЫЙ ХОД !! 💎",
+    "💎 BRILLIANT MOVE !! 💎",
     "💀 TOTAL MOGGING // +999 AURA 💀",
-    "⚡ ГРОССМЕЙСТЕРСКАЯ ЖЕРТВА !! ⚡",
-    "👑 ОТПРАВЛЕН В ЛОББИ // EASY 👑",
+    "⚡ GRANDMASTER SACRIFICE !! ⚡",
+    "👑 SENT TO THE LOBBY // EASY 👑",
     "🔥 SIGMA TACTICAL DESTRUCTION 🔥"
   ];
 
@@ -53,7 +53,7 @@ window.ChessFX = (function (existing) {
   }
 
   /**
-   * ТАКТИЧЕСКИЙ АУДИО-РАДАР
+   * ТАКТИЧЕСКИЙ АУДИО-RADAR
    * @param {"blunder" | "mate_lock" | "trap"} type
    * @param {string} boardKey
    */
@@ -69,7 +69,7 @@ window.ChessFX = (function (existing) {
       const now = ctx.currentTime;
 
       if (type === "mate_lock") {
-        // Звук захвата цели (Cyberpunk Target Lock для Мата в 1-2 хода)
+        // Звук захвата цели (Cyberpunk Target Lock для Mate в 1-2 move)
         const freqs = [880, 1174.66, 1760];
         freqs.forEach((f, idx) => {
           const osc = ctx.createOscillator();
@@ -92,8 +92,8 @@ window.ChessFX = (function (existing) {
       }
 
       if (type === "blunder") {
-        // Тихий кристальный пинг, когда соперник допустил грубый зевок (drop >= 2.0 пешки)
-        const notes = [1318.51, 1975.53]; // E6 -> B6 кристальный интервал
+        // Тихий криsтальный пинг, когда opponent допуsтил грубый blunder (drop >= 2.0 pawns)
+        const notes = [1318.51, 1975.53]; // E6 -> B6 криsтальный интервал
         notes.forEach((f, idx) => {
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
@@ -114,7 +114,7 @@ window.ChessFX = (function (existing) {
       }
 
       if (type === "trap") {
-        // Короткий импульс обнаружения ловушки
+        // Короткий импульs обнарalreadyния traps
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = "sine";
@@ -278,7 +278,7 @@ window.ChessFX = (function (existing) {
       if (overlay) overlay.remove();
       const testBtn = targetShadowRoot.getElementById("cc-test-phonk-btn");
       if (testBtn) {
-        testBtn.textContent = "🔥 ТЕСТ ФОНК-ЭДИТА (15 СЕК)";
+        testBtn.textContent = "🔥 TEST BACKGROUND-EDIT (15 SEC)";
       }
     }
     activeShadowRoot = null;
@@ -304,7 +304,7 @@ window.ChessFX = (function (existing) {
 
     const testBtn = shadowRoot.getElementById("cc-test-phonk-btn");
     if (testBtn) {
-      testBtn.textContent = "⏹ ОСТАНОВИТЬ ФОНК-ЭДИТ [ESC]";
+      testBtn.textContent = "⏹ STOP BACKGROUND EDIT [ESC]";
     }
 
     const overlay = document.createElement("div");
@@ -392,11 +392,11 @@ window.ChessFX = (function (existing) {
       <div id="cc-phonk-flash"></div>
       <div id="cc-phonk-center-banner">
         <div class="cc-brilliant-pill"><span>💎</span><span>BRILLIANT MOVE !!</span><span>💀</span></div>
-        <div id="cc-phonk-main-title">💎 БРИЛЛИАНТОВЫЙ ХОД !! 💎</div>
-        <div id="cc-phonk-sub-move">⚡ ${moveText} • СИГМА ДОМИНАЦИЯ ⚡</div>
+        <div id="cc-phonk-main-title">💎 BRILLIANT MOVE !! 💎</div>
+        <div id="cc-phonk-sub-move">⚡ ${moveText} • SIGMA DOMINATION ⚡</div>
         <div id="cc-phonk-timer-bar"></div>
       </div>
-      <button id="cc-phonk-skip-btn">✖ ОСТАНОВИТЬ ЭДИТ [ESC]</button>
+      <button id="cc-phonk-skip-btn">✖ STOP EDIT [ESC]</button>
     `;
 
     shadowRoot.appendChild(overlay);
@@ -494,7 +494,7 @@ window.ChessFX = (function (existing) {
       playStepNow();
       activeBeatInterval = setInterval(playStepNow, 190);
     } catch (e) {
-      console.error("[ChessFX] Ошибка запуска аудио:", e);
+      console.error("[ChessFX] Error start audio:", e);
     }
 
     activeEditTimer = setTimeout(() => stopPhonkEdit(shadowRoot), durationMs);
@@ -532,7 +532,7 @@ window.ChessFX = (function (existing) {
                 fill="rgba(10, 12, 18, 0.96)" stroke="#00f5d4" stroke-width="3" />
           <text x="${bannerX}" y="${bannerY + 2}" text-anchor="middle" fill="#00f5d4"
                 font-family="monospace" font-weight="900" font-size="15.5">
-            💀 MOGGED // МАТ #1 ⚡
+            💀 MOGGED // MATE #1 ⚡
           </text>
         </g>
       `;
@@ -551,7 +551,7 @@ window.ChessFX = (function (existing) {
                 fill="rgba(8, 14, 24, 0.96)" stroke="#00bbf9" stroke-width="3" />
           <text x="${bannerX}" y="${bannerY + 2}" text-anchor="middle" fill="#00f5d4"
                 font-family="monospace" font-weight="900" font-size="15">
-            🎯 ORBITAL LOCK // МАТ #1
+            🎯 ORBITAL LOCK // MATE #1
           </text>
         </g>
       `;
@@ -569,7 +569,7 @@ window.ChessFX = (function (existing) {
                 fill="rgba(24, 16, 8, 0.96)" stroke="#ffbe0b" stroke-width="3" />
           <text x="${bannerX}" y="${bannerY + 2}" text-anchor="middle" fill="#ffbe0b"
                 font-family="-apple-system, sans-serif" font-weight="900" font-size="15.5">
-            👑 ШАХ И МАТ В 1 ХОД! ⚔️
+            👑 CHECK AND MATE IN 1 MOVE! ⚔️
           </text>
         </g>
       `;
@@ -588,7 +588,7 @@ window.ChessFX = (function (existing) {
               fill="rgba(16, 12, 20, 0.96)" stroke="#ffbe0b" stroke-width="3" />
         <text x="${bannerX}" y="${bannerY + 2}" text-anchor="middle" fill="#ffbe0b"
               font-family="-apple-system, sans-serif" font-weight="900" font-size="16">
-          💀 МАТ В 1 ХОД! 😂
+          💀 MATE В 1 MOVE! 😂
         </text>
       </g>
     `;

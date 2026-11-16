@@ -106,7 +106,7 @@
   text-rendering: optimizeLegibility;
 }
 
-/* КАСТОМНЫЙ ФОН МЕНЮ ИЗ ПРОВОДНИКА */
+/* CUSTOM BACKGROUND MENU FROM FILE PICKER */
 #cc-custom-bg-layer {
   position: absolute;
   inset: 0;
@@ -232,7 +232,7 @@
   height: 50px;
 }
 
-/* ФИЛЬТРАЦИЯ ЭЛЕМЕНТОВ ПО РЕЖИМАМ HvH / ВСЕ / LEGIT */
+/* ФИЛЬТРАЦИЯ ЭЛЕМЕНТОВ ПО MODEАМ HvH / ALL / LEGIT */
 #chesscoach-panel[data-work-mode="hvh"] .cc-hide-in-hvh {
   display: none !important;
 }
@@ -315,7 +315,7 @@
   transform: translateY(-1px);
 }
 
-/* ТРОЙНОЙ ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМОВ: HvH — ВСЕ — LEGIT */
+/* TRIPLE SWITCH MODES: HvH — ALL — LEGIT */
 #cc-mode-switcher-bar {
   position: relative;
   z-index: 3;
@@ -436,7 +436,7 @@
   border-color: var(--cc-accent);
 }
 
-/* ЖИВАЯ ТЕЛЕМЕТРИЯ ПАРТИИ 24/7 (РАБОТАЕТ И В ХОД СОПЕРНИКА) */
+/* ЖИВАЯ TELEMETRY GAME 24/7 (WORKS И В OPPONENT'S TURN) */
 #cc-live-telemetry-card {
   background: linear-gradient(145deg, rgba(12, 17, 28, 0.90), rgba(18, 12, 30, 0.88));
   border: 1px solid rgba(0, 245, 212, 0.28);

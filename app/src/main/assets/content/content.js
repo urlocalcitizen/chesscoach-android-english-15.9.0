@@ -9,7 +9,7 @@
   try { window.CC?.revive?.(); } catch (e) {}
   try { window.ChessCoachEngine?.revive?.(); } catch (e) {}
 
-  console.log("[ChessCoach REWORK v15.8.1 — Engine Core 2, Full NNUE & Position-ID] Запущен!");
+  console.log("[ChessCoach REWORK v15.8.1 — Engine Core 2, Full NNUE & Position-ID] Started!");
 
   function isStrictBrilliantMove(moveObj) {
     if (!moveObj) return false;
@@ -31,24 +31,24 @@
   }
 
   const ALL_STYLE_NAMES = {
-    mogging: "⚡ Моггинг",
-    tal: "✦ Таль",
+    mogging: "⚡ Mogging",
+    tal: "✦ Tal",
     alphazero: "🧠 AlphaZero",
-    morphy: "🎭 Морфи",
-    hikaru: "🚀 Накамура",
-    kasparov: "▲ Каспаров",
-    fischer: "◈ Фишер",
-    carlsen: "❖ Карлсен",
-    solid: "🛡 Карпов",
-    botvinnik: "🏛 Ботвинник",
-    balanced: "⚙ Стокфиш"
+    morphy: "🎭 Morphy",
+    hikaru: "🚀 Nakamura",
+    kasparov: "▲ Kasparov",
+    fischer: "◈ Fischer",
+    carlsen: "❖ Carlsen",
+    solid: "🛡 Karpov",
+    botvinnik: "🏛 Botvinnik",
+    balanced: "⚙ Stockfish"
   };
 
   const PREMOVE_RISK_LABELS = {
-    1: "🛡 Ур. 1: 100% Форсаж (Честный перебой / 1 ход)",
-    2: "⚡ Ур. 2: Форсаж + Надежная теория",
-    3: "🎯 Ур. 3: Умный Блиц (Мульти-ветки SEE)",
-    4: "🔥 Ур. 4: Резня 1+0 (Максимум премувов)"
+    1: "🛡 Lv. 1: 100% Force (Honest interrupt / 1 move)",
+    2: "⚡ Lv. 2: Force + Reliable theory",
+    3: "🎯 Lv. 3: Smart Blitz (Multi-branch SEE)",
+    4: "🔥 Lv. 4: Slaughter 1+0 (Maximum premoves)"
   };
 
   const THEME_ACCENT_COLORS = {
@@ -66,16 +66,16 @@
   };
 
   const DUBIOUS_GAMBIT_KEYWORDS = [
-    "Инопланетный",
-    "Хэллоуин",
-    "Теннисона",
+    "Alien",
+    "Halloween",
+    "Tennison",
     "ICBM",
-    "Нахмансона",
-    "Стаффорда",
-    "Тракслера",
-    "Энглунда",
-    "Блэкберна",
-    "Кохрена"
+    "Nachmanson",
+    "Stafford",
+    "Traxler",
+    "Englund",
+    "Blackburne",
+    "Cochrane"
   ];
 
   const FILES = "abcdefgh";
@@ -94,7 +94,7 @@
   ]);
   const storageKey = key => `${STORAGE_PREFIX}${key}`;
 
-  // Режим работы меню: "all" | "hvh" | "legit"
+  // Mode работы menu: "all" | "hvh" | "legit"
   let workMode = "all";
   let activeTabId = "analyzer";
   let panelLeft = null;
@@ -102,24 +102,24 @@
   let panelMinimized = false;
   let panelHidden = false;
 
-  // Пользовательский фон из проводника
+  // Custom фон из проводника
   let customBgDataUrl = "";
   let customBgDim = 0.72;
   let customBgBlur = 4;
 
-  // Живая телеметрия 24/7 (работает даже в ход соперника)
+  // Live telemetry 24/7 (работает даже в move opponent)
   let liveTelemetryEnabled = true;
   let teleShowClocks = true;
   let teleShowEngine = true;
   let teleShowWdl = true;
   let teleShowThreats = true;
   let lastTelemetryData = {
-    serverSource: "ГОТОВ",
+    serverSource: "READY",
     pingMs: 0,
     myWin: 50,
     draw: 30,
     enemyWin: 20,
-    nearestThreatText: "Ожидание начала партии..."
+    nearestThreatText: "Waiting for game start..."
   };
 
   let currentElo = 2000;
@@ -375,17 +375,17 @@
         const writeResult = chrome.storage.local.set(scoped, () => {
           try {
             const writeError = chrome.runtime?.lastError;
-            if (writeError) console.warn("[ChessCoach] Настройки не сохранены:", writeError.message);
+            if (writeError) console.warn("[ChessCoach] Settings not saved:", writeError.message);
           } catch (e) {}
         });
         if (writeResult && typeof writeResult.catch === "function") {
           writeResult.catch((error) => {
-            console.warn("[ChessCoach] Настройки не сохранены:", error?.message || error);
+            console.warn("[ChessCoach] Settings not saved:", error?.message || error);
           });
         }
       }
     } catch (e) {
-      console.warn("[ChessCoach] Настройки не сохранены:", e?.message || e);
+      console.warn("[ChessCoach] Settings not saved:", e?.message || e);
     }
   }
 
@@ -519,7 +519,7 @@
           autoMoveTriggerRate: 100
         });
       }
-      setAutoStatusText("♚ ENGINE MAX АКТИВЕН • ЖДЕМ PRIMARY STOCKFISH", "#64cdb9");
+      setAutoStatusText("♚ ENGINE MAX ACTIVE • WAITING FOR PRIMARY STOCKFISH", "#64cdb9");
     } else if (mode === "legit") {
       currentElo = 3000;
       currentStyle = "tal";
@@ -558,13 +558,13 @@
           autoMoveJitterMs: 220
         });
       }
-      setAutoStatusText("🛡 ПРОФИЛЬ LEGIT АКТИВЕН (3000 ELO • ТАЛЬ • ЖИВОЙ ДЖИТТЕР)", "#38b000");
+      setAutoStatusText("🛡 PROFILE LEGIT ACTIVE (3000 ELO • TAL • LIVE JITTER)", "#38b000");
     } else {
       engineMaxMode = false;
       if (triggerSave) {
         saveSetting({ workMode: "all", engineMaxMode: false });
       }
-      setAutoStatusText("◈ ПОЛНЫЙ РЕЖИМ «ВСЕ ФУНКЦИИ» АКТИВЕН", "#00f5d4");
+      setAutoStatusText("◈ FULL MODE «ALL FEATURES» ACTIVE", "#00f5d4");
     }
 
     updateUIValues();
@@ -579,16 +579,16 @@
       const clean = tagEl.textContent.trim().replace(/\s+/g, " ").split(" ")[0];
       if (clean && clean.length >= 2 && clean.length <= 22) return clean;
     }
-    return "Гроссмейстер";
+    return "Grandmaster";
   }
 
   function getDynamicGreetingText() {
     const hour = new Date().getHours();
     const user = detectPlayerDisplayName();
-    if (hour >= 5 && hour < 12) return `☀️ Доброе утро, ${user}! Готов разрывать Lichess?`;
-    if (hour >= 12 && hour < 18) return `⚡ Привет, ${user}! Тактический радар заряжен на 100%`;
-    if (hour >= 18 && hour < 23) return `🌌 Добрый вечер, ${user}! Время жесткого доминирования`;
-    return `🌙 Ночная катка, ${user}? Движок в максимальном фокусе!`;
+    if (hour >= 5 && hour < 12) return `☀️ Good morning, ${user}! Ready to dominate Lichess?`;
+    if (hour >= 12 && hour < 18) return `⚡ Hello, ${user}! Tactical radar charged at 100%`;
+    if (hour >= 18 && hour < 23) return `🌌 Good evening, ${user}! Time for hard domination`;
+    return `🌙 Night session, ${user}? Engine at maximum focus!`;
   }
 
   function initNeuralCanvasBackground(panel) {
@@ -815,8 +815,8 @@
 
   function buildOpeningOptionsHTML() {
     let html = `
-      <option value="auto">🤖 Авто-распознавание (Надежная теория 2000+ ELO)</option>
-      <option value="off">⛔ Без книжных премувов (только тактика/форсаж)</option>
+      <option value="auto">🤖 Auto-recognition (Reliable theory 2000+ ELO)</option>
+      <option value="off">⛔ No book premoves (tactics/force only)</option>
     `;
     if (window.ChessOpenings && Array.isArray(window.ChessOpenings.database)) {
       window.ChessOpenings.database.forEach((op, idx) => {
@@ -837,7 +837,7 @@
     const enSecs = getEnemyRemainingSeconds();
     const clocksKnown = Number.isFinite(mySecs) && Number.isFinite(enSecs);
     const diffSecs = clocksKnown ? Math.round(mySecs - enSecs) : 0;
-    const diffStr = clocksKnown ? (diffSecs > 0 ? `+${diffSecs}с` : `${diffSecs}с`) : "—";
+    const diffStr = clocksKnown ? (diffSecs > 0 ? `+${diffSecs}s` : `${diffSecs}s`) : "—";
 
     const boxClocks = $("cc-tele-box-clocks");
     if (boxClocks) {
@@ -867,7 +867,7 @@
       const l = telemetry.enemyWin ?? 20;
       const valEl = $("cc-tele-wdl-val");
       if (valEl) {
-        valEl.innerHTML = `<span style="color:var(--cc-positive);">Поб: ${w}%</span> • <span style="color:var(--cc-text-secondary);">Нич: ${d}%</span> • <span style="color:var(--cc-negative);">Пор: ${l}%</span>`;
+        valEl.innerHTML = `<span style="color:var(--cc-positive);">Win: ${w}%</span> • <span style="color:var(--cc-text-secondary);">Draw: ${d}%</span> • <span style="color:var(--cc-negative);">Loss: ${l}%</span>`;
       }
       if ($("cc-wdl-fill-w")) $("cc-wdl-fill-w").style.width = `${w}%`;
       if ($("cc-wdl-fill-d")) $("cc-wdl-fill-d").style.width = `${d}%`;
@@ -879,7 +879,7 @@
       boxThreats.style.display = teleShowThreats ? "block" : "none";
       const valEl = $("cc-tele-threats-val");
       if (valEl) {
-        valEl.textContent = telemetry.nearestThreatText || "Угроз не обнаружено";
+        valEl.textContent = telemetry.nearestThreatText || "No threats detected";
       }
     }
   }
@@ -904,17 +904,17 @@
       if (greetEl) greetEl.textContent = getDynamicGreetingText();
       const modeChip = $("cc-welcome-chip-mode");
       if (modeChip) {
-        const modeMap = { hvh: "⚡ Режим: HvH (Резня)", legit: "🛡 Режим: Legit (Беспалевный)", all: "◈ Режим: Все функции" };
+        const modeMap = { hvh: "⚡ Mode: HvH (Slaughter)", legit: "🛡 Mode: Legit (Stealth)", all: "◈ Mode: All features" };
         modeChip.textContent = modeMap[workMode] || modeMap.all;
       }
       const cpuChip = $("cc-welcome-chip-cpu");
       if (cpuChip) {
         const lightCpu = !showAverageMove && !showWorstMove;
-        cpuChip.textContent = lightCpu ? "🚀 CPU: Турбо (1-я линия)" : "🧠 CPU: Мульти-анализ";
+        cpuChip.textContent = lightCpu ? "🚀 CPU: Turbo (1st line)" : "🧠 CPU: Multi-analysis";
       }
       const wasmChip = $("cc-welcome-chip-wasm");
       if (wasmChip) {
-        wasmChip.textContent = useStockfishWasm ? "⚡ SF LOCAL + Syzygy: ВКЛ" : "⚙ Локальный JS + Syzygy";
+        wasmChip.textContent = useStockfishWasm ? "⚡ SF LOCAL + Syzygy: ON" : "⚙ Local JS + Syzygy";
       }
     }
 
@@ -929,7 +929,7 @@
         : "JS CORE";
     }
 
-    const styleLabel = ALL_STYLE_NAMES[currentStyle] || "✦ Таль";
+    const styleLabel = ALL_STYLE_NAMES[currentStyle] || "✦ Tal";
     const bestMv = cachedMoves.best;
     const isBrilliant = bestMv && isStrictBrilliantMove(bestMv);
     const isTrap = bestMv && bestMv.isTrap && bestMv.trapChance >= 75;
@@ -937,10 +937,10 @@
 
     if ($("cc-best-title")) {
       let badgesHtml = "";
-      if (isSyzygy) badgesHtml += `<span class="cc-syzygy-badge">🔮 SYZYGY БОГ</span>`;
-      if (isBrilliant) badgesHtml += `<span class="cc-brilliant-badge">💎 БРИЛЛИАНТ !!</span>`;
-      if (isTrap) badgesHtml += `<span class="cc-trap-badge">🪤 ЛОВУШКА (${bestMv.trapChance}%)</span>`;
-      $("cc-best-title").innerHTML = `✦ ЛУЧШИЙ ХОД • ${styleLabel}${badgesHtml}`;
+      if (isSyzygy) badgesHtml += `<span class="cc-syzygy-badge">🔮 SYZYGY GOD</span>`;
+      if (isBrilliant) badgesHtml += `<span class="cc-brilliant-badge">💎 BRILLIANT !!</span>`;
+      if (isTrap) badgesHtml += `<span class="cc-trap-badge">🪤 TRAP (${bestMv.trapChance}%)</span>`;
+      $("cc-best-title").innerHTML = `✦ BEST MOVE • ${styleLabel}${badgesHtml}`;
     }
     if ($("cc-active-style-stat")) {
       $("cc-active-style-stat").textContent = styleLabel.replace(/^[^\s]+\s/, "");
@@ -969,13 +969,13 @@
     updateLiveTelemetryUI();
 
     if ($("cc-color-pill")) {
-      const labels = { auto: "◈ АВТО", w: "⚪ БЕЛЫЕ", b: "⚫ ЧЕРНЫЕ" };
-      $("cc-color-pill").textContent = labels[forcedMyColor] || "◈ АВТО";
+      const labels = { auto: "◈ AUTO", w: "⚪ WHITE", b: "⚫ BLACK" };
+      $("cc-color-pill").textContent = labels[forcedMyColor] || "◈ AUTO";
     }
 
     const autoText = autoMoveEnabled
-      ? (bulletTurboMode ? "🔥 РЕЗНЯ 1+0: ВКЛ" : (workMode === "legit" ? "🛡 LEGIT АВТО: ВКЛ" : "🤖 АВТОХОД: ВКЛ"))
-      : "🤖 АВТОХОД: ВЫКЛ";
+      ? (bulletTurboMode ? "🔥 SLAUGHTER 1+0: ON" : (workMode === "legit" ? "🛡 LEGIT AUTO: ON" : "🤖 AUTOMOVE: ON"))
+      : "🤖 AUTOMOVE: OFF";
     if ($("cc-toggle-auto")) {
       $("cc-toggle-auto").textContent = autoText;
       $("cc-toggle-auto").style.borderColor = autoMoveEnabled ? "var(--cc-accent)" : "rgba(255,255,255,0.14)";
@@ -985,11 +985,11 @@
     if ($("cc-bullet-turbo-chk")) $("cc-bullet-turbo-chk").checked = bulletTurboMode;
     if ($("cc-legit-timing-chk")) $("cc-legit-timing-chk").checked = legitAutoTiming;
     if ($("cc-auto-delay-slider")) $("cc-auto-delay-slider").value = autoMoveDelayMs;
-    if ($("cc-auto-delay-val")) $("cc-auto-delay-val").textContent = `${(autoMoveDelayMs / 1000).toFixed(2)} сек`;
+    if ($("cc-auto-delay-val")) $("cc-auto-delay-val").textContent = `${(autoMoveDelayMs / 1000).toFixed(2)} sec`;
     if ($("cc-auto-jitter-slider")) $("cc-auto-jitter-slider").value = autoMoveJitterMs;
-    if ($("cc-auto-jitter-val")) $("cc-auto-jitter-val").textContent = `±${(autoMoveJitterMs / 1000).toFixed(2)} сек`;
+    if ($("cc-auto-jitter-val")) $("cc-auto-jitter-val").textContent = `±${(autoMoveJitterMs / 1000).toFixed(2)} sec`;
     if ($("cc-auto-rate-slider")) $("cc-auto-rate-slider").value = autoMoveTriggerRate;
-    if ($("cc-auto-rate-val")) $("cc-auto-rate-val").textContent = `${autoMoveTriggerRate}% ходов`;
+    if ($("cc-auto-rate-val")) $("cc-auto-rate-val").textContent = `${autoMoveTriggerRate}% moves`;
 
     if ($("cc-premove-chk")) $("cc-premove-chk").checked = premoveEnabled;
     if ($("cc-premove-risk-slider")) $("cc-premove-risk-slider").value = premoveRiskLevel;
@@ -1062,7 +1062,7 @@
     if (detail?.cancelPendingMoves === true || detail?.state === "settings") {
       resetTurnDecision();
       cancelNativeMove("mobile-pause");
-      if (autoMoveEnabled) setAutoStatusText(detail?.state === "settings" ? "Автоход на паузе: открыты настройки" : "Автоход приостановлен", "#ffbe0b");
+      if (autoMoveEnabled) setAutoStatusText(detail?.state === "settings" ? "Automove paused: settings open" : "Automove suspended", "#ffbe0b");
     } else if (detail?.state === "active") {
       scheduleAutoMoveIfNeeded();
     }
@@ -1116,7 +1116,7 @@
     };
   }
 
-  function clearPositionPresentation(label = "СИНХРОНИЗАЦИЯ ПОЗИЦИИ...") {
+  function clearPositionPresentation(label = "SYNCING POSITION...") {
     if (autoMoveTimer) { clearTimeout(autoMoveTimer); autoMoveTimer = null; }
     if (premoveTimer) { clearTimeout(premoveTimer); premoveTimer = null; }
     for (const timerId of premoveStepTimers) clearTimeout(timerId);
@@ -1132,15 +1132,15 @@
     if (activeBox) activeBox.style.display = "flex";
     if ($("cc-best-desc")) $("cc-best-desc").textContent = label;
     if ($("cc-best-eval")) $("cc-best-eval").textContent = "--";
-    if ($("cc-best-pv")) $("cc-best-pv").textContent = "Ожидаем стабильную доску";
+    if ($("cc-best-pv")) $("cc-best-pv").textContent = "Waiting for stable board";
     if ($("cc-avg-box")) $("cc-avg-box").style.display = "none";
     if ($("cc-worst-box")) $("cc-worst-box").style.display = "none";
     for (const id of ["cc-mate-banner", "cc-time-sniper-banner", "cc-roast-box"]) {
       const node = $(id); if (node) node.style.display = "none";
     }
-    if ($("cc-opening-name")) $("cc-opening-name").textContent = "◈ ОБНОВЛЕНИЕ ПОЗИЦИИ";
-    if ($("cc-opening-plan")) $("cc-opening-plan").textContent = "Ожидаем новый анализ";
-    if ($("cc-tele-threats-val")) $("cc-tele-threats-val").textContent = "Синхронизация позиции...";
+    if ($("cc-opening-name")) $("cc-opening-name").textContent = "◈ UPDATING POSITION";
+    if ($("cc-opening-plan")) $("cc-opening-plan").textContent = "Waiting for new analysis";
+    if ($("cc-tele-threats-val")) $("cc-tele-threats-val").textContent = "Syncing position...";
     lastTelemetryData = null;
     updateEvalMoodAndEngineBadge(null, null);
   }
@@ -1155,7 +1155,7 @@
     positionAnalysisId++;
     analysisRequestId++;
     StockfishWasmEngine.cancel?.();
-    clearPositionPresentation("СИНХРОНИЗАЦИЯ ПОЗИЦИИ...");
+    clearPositionPresentation("SYNCING POSITION...");
   }
 
   function adoptPositionState(state) {
@@ -1166,7 +1166,7 @@
       if (currentPositionKey) {
         analysisRequestId++;
         StockfishWasmEngine.cancel?.();
-        clearPositionPresentation("НОВАЯ ПОЗИЦИЯ • АНАЛИЗ...");
+        clearPositionPresentation("NEW POSITION • ANALYZING...");
       }
       currentPositionKey = state.positionKey;
       positionId++;
@@ -1445,24 +1445,24 @@
           <span>CHESSCOACH // VISION v15</span>
           <span class="cc-badge" id="cc-elo-badge">${currentElo} ELO</span>
           <span class="cc-engine-power" id="cc-engine-power">JS CORE</span>
-          <span class="cc-deep-status" id="cc-deep-status">⚡ ДОРАСЧЕТ...</span>
+          <span class="cc-deep-status" id="cc-deep-status">⚡ DEEP SEARCH...</span>
         </div>
         <div class="cc-header-controls">
-          <button class="cc-pill-btn" id="cc-color-pill" title="Быстрое переключение вашего цвета">◈ АВТО</button>
-          <button class="cc-pill-btn" id="cc-toggle-btn" title="Свернуть/Развернуть (или клавиша INSERT)">—</button>
+          <button class="cc-pill-btn" id="cc-color-pill" title="Quick switch of your color">◈ AUTO</button>
+          <button class="cc-pill-btn" id="cc-toggle-btn" title="Collapse/Expand (or INSERT key)">—</button>
         </div>
       </div>
 
-      <!-- ТРОЙНОЙ ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМОВ: HvH — ВСЕ — LEGIT -->
+      <!-- TRIPLE SWITCH MODES: HvH — ALL — LEGIT -->
       <div id="cc-mode-switcher-bar">
-        <button class="cc-mode-btn" data-mode="hvh" title="Профиль HvH: 3000 ELO, Стокфиш + Syzygy, Резня 1+0, отключены средний/худший ходы">
-          ⚡ HvH (РЕЗНЯ)
+        <button class="cc-mode-btn" data-mode="hvh" title="Profile HvH: 3000 ELO, Stockfish + Syzygy, Slaughter 1+0, average/worst moves disabled">
+          ⚡ HvH (SLAUGHTER)
         </button>
-        <button class="cc-mode-btn active" data-mode="all" title="Показывать абсолютно все настройки и вкладки">
-          ◈ ВСЕ ФУНКЦИИ
+        <button class="cc-mode-btn active" data-mode="all" title="Show absolutely all settings and tabs">
+          ◈ ALL FEATURES
         </button>
-        <button class="cc-mode-btn" data-mode="legit" title="Профиль Legit: 3000 ELO, стиль Таль, без Резни, умный живой джиттер под время часов">
-          🛡 LEGIT (СТЕЛС)
+        <button class="cc-mode-btn" data-mode="legit" title="Profile Legit: 3000 ELO, Tal style, no Slaughter, smart live jitter under clock time">
+          🛡 LEGIT (STEALTH)
         </button>
       </div>
 
@@ -1470,37 +1470,37 @@
         <div class="cc-sidebar">
           <div class="cc-nav-list">
             <button class="cc-tab-btn active" data-tab="analyzer">
-              <span class="cc-tab-icon">◈</span> АНАЛИЗ
+              <span class="cc-tab-icon">◈</span> ANALYSIS
             </button>
             <button class="cc-tab-btn" data-tab="automove">
-              <span class="cc-tab-icon">🤖</span> АВТОХОД v2
+              <span class="cc-tab-icon">🤖</span> AUTOMOVE v2
             </button>
             <button class="cc-tab-btn" data-tab="rage">
-              <span class="cc-tab-icon">⚡</span> ДВИЖОК
+              <span class="cc-tab-icon">⚡</span> ENGINE
             </button>
             <button class="cc-tab-btn" data-tab="visuals">
-              <span class="cc-tab-icon">✦</span> ВИЗУАЛ
+              <span class="cc-tab-icon">✦</span> VISUAL
             </button>
             <button class="cc-tab-btn" data-tab="misc">
-              <span class="cc-tab-icon">❖</span> БАЗА / ОПЫТ
+              <span class="cc-tab-icon">❖</span> DATABASE / EXPERIENCE
             </button>
           </div>
 
           <div class="cc-sidebar-footer">
             <div class="cc-mini-stat">
-              <span>СТИЛЬ</span>
-              <strong id="cc-active-style-stat">Таль</strong>
+              <span>STYLE</span>
+              <strong id="cc-active-style-stat">Tal</strong>
             </div>
             <div class="cc-mini-stat">
-              <span>ПАМЯТЬ</span>
-              <strong id="cc-memory-stat">0 ПОЗ.</strong>
+              <span>MEMORY</span>
+              <strong id="cc-memory-stat">0 POS.</strong>
             </div>
             <div class="cc-mini-stat" style="opacity:0.75;">
-              <span>КАРТА ДОСКИ</span>
+              <span>BOARD MAP</span>
               <strong style="color:#c77dff;">[ALT]</strong>
             </div>
             <div class="cc-mini-stat" style="opacity:0.65;">
-              <span>СКРЫТЬ HUD</span>
+              <span>HIDE HUD</span>
               <span>[INS]</span>
             </div>
           </div>
@@ -1510,44 +1510,44 @@
           <div class="cc-tab-pane active" id="cc-pane-analyzer">
             <div id="cc-welcome-card">
               <div class="cc-welcome-top">
-                <div class="cc-welcome-greeting" id="cc-welcome-greeting">⚡ Привет, Гроссмейстер! Тактический радар заряжен</div>
-                <button class="cc-welcome-close" id="cc-welcome-close-btn" title="Скрыть приветствие">✕</button>
+                <div class="cc-welcome-greeting" id="cc-welcome-greeting">⚡ Hello, Grandmaster! Tactical radar charged</div>
+                <button class="cc-welcome-close" id="cc-welcome-close-btn" title="Hide welcome">✕</button>
               </div>
               <div class="cc-welcome-sub">
-                Переключай <strong>HvH / Все / Legit</strong> сверху. Позиция меню и скрытие сохраняются автоматически!
+                Switch <strong>HvH / All / Legit</strong> at the top. Position menu and visibility are saved automatically!
               </div>
               <div class="cc-welcome-chips">
-                <span class="cc-welcome-chip" id="cc-welcome-chip-mode">◈ Режим: Все функции</span>
-                <span class="cc-welcome-chip" id="cc-welcome-chip-cpu">🧠 CPU: Мульти-анализ</span>
-                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF LOCAL + Syzygy: ВКЛ</span>
+                <span class="cc-welcome-chip" id="cc-welcome-chip-mode">◈ Mode: All features</span>
+                <span class="cc-welcome-chip" id="cc-welcome-chip-cpu">🧠 CPU: Multi-analysis</span>
+                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF LOCAL + Syzygy: ON</span>
               </div>
             </div>
 
-            <!-- ЖИВОЕ ПОЛОЖЕНИЕ ПАРТИИ 24/7 (РАБОТАЕТ ДАЖЕ В ХОД СОПЕРНИКА) -->
+            <!-- LIVE POSITION GAME 24/7 (WORKS EVEN ON OPPONENT'S TURN) -->
             <div id="cc-live-telemetry-card">
               <div class="cc-tele-header">
-                <span>📡 ТЕКУЩЕЕ ПОЛОЖЕНИЕ ПАРТИИ (LIVE 24/7)</span>
-                <button class="cc-tele-gear-btn" id="cc-tele-gear-btn" title="Настроить отображаемые поля">⚙️ Поля</button>
+                <span>📡 CURRENT GAME POSITION (LIVE 24/7)</span>
+                <button class="cc-tele-gear-btn" id="cc-tele-gear-btn" title="Configure displayed fields">⚙️ Fields</button>
               </div>
               <div id="cc-tele-settings-drawer">
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-clocks-chk" checked> ⏱️ Часы игроков</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-engine-chk" checked> 🛰️ Статус и сервер</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-wdl-chk" checked> 📊 Шансы победы %</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-threats-chk" checked> 🪤 Ловушки и маты</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-clocks-chk" checked> ⏱️ Player clocks</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-engine-chk" checked> 🛰️ Status & server</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-wdl-chk" checked> 📊 Win chance %</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-threats-chk" checked> 🪤 Traps & mates</label>
               </div>
               <div class="cc-tele-grid">
                 <div class="cc-tele-box" id="cc-tele-box-clocks">
-                  <div class="cc-tele-box-title">⏱️ ЧАСЫ (МЫ vs ВРАГ)</div>
+                  <div class="cc-tele-box-title">⏱️ CLOCKS (US vs ENEMY)</div>
                   <div class="cc-tele-box-val" id="cc-tele-clocks-val">--:-- vs --:--</div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-engine">
-                  <div class="cc-tele-box-title">🛰️ ДВИЖОК / СЕРВЕР</div>
-                  <div class="cc-tele-box-val" id="cc-tele-engine-val" style="color:#c77dff;">SF LOCAL • ГОТОВ</div>
+                  <div class="cc-tele-box-title">🛰️ ENGINE / SERVER</div>
+                  <div class="cc-tele-box-val" id="cc-tele-engine-val" style="color:#c77dff;">SF LOCAL • READY</div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-wdl" style="grid-column: span 2;">
                   <div class="cc-tele-box-title" style="display:flex; justify-content:space-between;">
-                    <span>📊 ШАНСЫ НА ПОБЕДУ (WDL ПРОГНОЗ)</span>
-                    <span id="cc-tele-wdl-val">Поб: 50% • Нич: 30% • Пор: 20%</span>
+                    <span>📊 WIN CHANCES (WDL FORECAST)</span>
+                    <span id="cc-tele-wdl-val">Win: 50% • Draw: 30% • Loss: 20%</span>
                   </div>
                   <div class="cc-wdl-bar">
                     <div class="cc-wdl-w" id="cc-wdl-fill-w" style="width:50%;"></div>
@@ -1556,119 +1556,119 @@
                   </div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-threats" style="grid-column: span 2;">
-                  <div class="cc-tele-box-title">🪤 БЛИЖАЙШИЕ ПРОСЧИТАННЫЕ ЛОВУШКИ, УГРОЗЫ И МАТЫ</div>
-                  <div class="cc-tele-box-val" id="cc-tele-threats-val" style="color:#ffbe0b; font-family:inherit;">Ожидание хода...</div>
+                  <div class="cc-tele-box-title">🪤 NEAREST CALCULATED TRAPS, THREATS & MATES</div>
+                  <div class="cc-tele-box-val" id="cc-tele-threats-val" style="color:#ffbe0b; font-family:inherit;">Waiting for move...</div>
                 </div>
               </div>
             </div>
 
             <div id="cc-peer-detector-banner" style="display:none; background:linear-gradient(135deg, rgba(0,245,212,0.20), rgba(199,125,255,0.24)); border:1.5px solid #00f5d4; border-radius:12px; padding:8px 12px; color:#fff; box-shadow:0 0 20px rgba(0,245,212,0.28);">
               <div id="cc-peer-detector-title" style="font-size:11px; font-weight:900; color:#00f5d4; display:flex; justify-content:space-between; align-items:center;">
-                <span>👁️ РАДАР СВОИХ: ОБНАРУЖЕН CHESSCOACH!</span>
+                <span>👁️ RADAR OWN: DETECTED CHESSCOACH!</span>
                 <span style="background:rgba(0,0,0,0.45); padding:1px 6px; border-radius:4px; font-family:monospace;">⚡ HVH</span>
               </div>
               <div id="cc-peer-detector-text" style="font-size:11px; color:#f1f5f9; margin-top:2px; font-weight:600; line-height:1.35;">
-                У вашего соперника установлено это же расширение!
+                Your opponent has the same extension!
               </div>
             </div>
 
             <div id="cc-enemy-turn-standby">
               <div class="cc-standby-icon">⏳</div>
-              <div class="cc-standby-title" id="cc-standby-title">Ход соперника...</div>
+              <div class="cc-standby-title" id="cc-standby-title">Move opponent...</div>
               <div class="cc-standby-sub" id="cc-standby-sub">
-                Старые метки очищены. Живая телеметрия выше продолжает следить за часами и угрозами!
+                Old markers cleared. Live telemetry above continues watching clocks and threats!
               </div>
             </div>
 
             <div id="cc-my-turn-active" style="display:flex; flex-direction:column; gap:7px; flex:1;">
               <div id="cc-mate-banner">
                 <div class="cc-mate-title">
-                  <span id="cc-mate-banner-title">👑💀 АХАХАХ! МАТ НА ДОСКЕ!</span>
+                  <span id="cc-mate-banner-title">👑💀 HAHAHA! MATE ON BOARD!</span>
                   <span style="font-size:16px;">😱😂</span>
                 </div>
                 <div class="cc-mate-sub" id="cc-mate-banner-text">
-                  Соперник зевнул прямое фаталити! Жми «Сделать ход» и отправляй его в лобби!
+                  Opponent blundered a direct fatality! Hit «Make move» and send him to the lobby!
                 </div>
               </div>
 
               <div class="cc-glass-card" id="cc-opening-card" style="border-left: 3.5px solid var(--cc-accent);">
                 <div class="cc-section-title">
-                  <span id="cc-opening-name">◈ ГОТОВ К ПАРТИИ</span>
-                  <span id="cc-turn-indicator" style="color:#94a3b8;">ОЖИДАНИЕ</span>
+                  <span id="cc-opening-name">◈ READY FOR GAME</span>
+                  <span id="cc-turn-indicator" style="color:#94a3b8;">WAITING</span>
                 </div>
                 <div id="cc-opening-plan" style="font-size:11px; color:#cbd5e1; line-height:1.36;">
-                  Сделайте ход на доске Lichess для мгновенного расчета.
+                  Make a move on the Lichess board for instant calculation.
                 </div>
               </div>
 
               <div id="cc-eval-graph-card">
                 <div class="cc-graph-header">
-                  <span>📈 ЖИВОЙ ГРАФИК ПЕРЕВЕСА</span>
-                  <span class="cc-graph-meta"><span id="cc-eval-mood-label">РАВНО</span><span id="cc-eval-graph-label">0.00</span></span>
+                  <span>📈 LIVE EVAL GRAPH</span>
+                  <span class="cc-graph-meta"><span id="cc-eval-mood-label">EQUAL</span><span id="cc-eval-graph-label">0.00</span></span>
                 </div>
                 <canvas id="cc-eval-graph-canvas" width="410" height="42"></canvas>
               </div>
 
               <div id="cc-time-sniper-banner">
                 <div class="cc-time-sniper-top">
-                  <span id="cc-time-sniper-badge">⏱️ СНАЙПЕРСКИЙ ТАЙМ-КОНТРОЛЬ</span>
+                  <span id="cc-time-sniper-badge">⏱️ SNIPER TIME CONTROL</span>
                   <span id="cc-time-sniper-clocks" style="font-family:monospace; color:#ffbe0b;">--:-- vs --:--</span>
                 </div>
-                <div id="cc-time-sniper-text">Контроль темпа активен.</div>
+                <div id="cc-time-sniper-text">Tempo control active.</div>
               </div>
 
               <div class="cc-roast-banner" id="cc-roast-box">
                 <div class="cc-roast-title">
-                  <span id="cc-roast-badge">⚡ РАДАР ОШИБОК СОПЕРНИКА</span>
+                  <span id="cc-roast-badge">⚡ OPPONENT ERROR RADAR</span>
                   <span>💀</span>
                 </div>
-                <div id="cc-roast-text">Ожидание хода соперника...</div>
+                <div id="cc-roast-text">Waiting for opponent's move...</div>
               </div>
 
               <div class="cc-move-card" id="cc-best-card" style="border-left-color:#00f5d4;">
                 <div class="cc-move-header">
-                  <span style="color:#00f5d4" id="cc-best-title">✦ ЛУЧШИЙ ХОД</span>
+                  <span style="color:#00f5d4" id="cc-best-title">✦ BEST MOVE</span>
                   <span class="cc-eval" id="cc-best-eval">--</span>
                 </div>
-                <div id="cc-best-desc">Анализ позиции...</div>
+                <div id="cc-best-desc">Analyzing position...</div>
                 <div id="cc-best-pv" style="margin-top:3px; font-size:10px; color:var(--cc-accent); font-family:monospace; opacity:0.92;"></div>
               </div>
 
               <div class="cc-move-card cc-hide-in-hvh" id="cc-avg-card" style="border-left-color:#ffbe0b;">
                 <div class="cc-move-header">
-                  <span style="color:#ffbe0b">❖ СРЕДНИЙ ХОД (2-Я ЛИНИЯ)</span>
+                  <span style="color:#ffbe0b">❖ AVERAGE MOVE (2ND LINE)</span>
                   <span class="cc-eval" id="cc-avg-eval">--</span>
                 </div>
-                <div id="cc-avg-desc">Анализ альтернативы...</div>
+                <div id="cc-avg-desc">Analysis alternatives...</div>
               </div>
 
               <div class="cc-move-card cc-hide-in-hvh cc-hide-in-legit" id="cc-worst-card" style="border-left-color:#ff2a85;">
                 <div class="cc-move-header">
-                  <span style="color:#ff2a85">✖ ХУДШИЙ ХОД (ЗЕВОК)</span>
+                  <span style="color:#ff2a85">✖ WORST MOVE (BLUNDER)</span>
                   <span class="cc-eval" id="cc-worst-eval">--</span>
                 </div>
-                <div id="cc-worst-desc">Проверка угроз...</div>
+                <div id="cc-worst-desc">Checking threats...</div>
               </div>
             </div>
 
             <div class="cc-actions-bar">
-              <button class="cc-btn cc-btn-primary" id="cc-play-once">⚡ СДЕЛАТЬ ХОД</button>
-              <button class="cc-btn" id="cc-toggle-auto">🤖 АВТОХОД: ВЫКЛ</button>
+              <button class="cc-btn cc-btn-primary" id="cc-play-once">⚡ MAKE MOVE</button>
+              <button class="cc-btn" id="cc-toggle-auto">🤖 AUTOMOVE: OFF</button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-automove">
             <div class="cc-auto-status-box">
-              <span>Статус Автохода v2:</span>
-              <strong id="cc-auto-live-status" style="color:#00f5d4;">Готов к работе</strong>
+              <span>Status Automove v2:</span>
+              <strong id="cc-auto-live-status" style="color:#00f5d4;">Ready to work</strong>
             </div>
 
             <div class="cc-glass-card cc-hide-in-legit" style="border-left: 3.5px solid #ff2a85; background: linear-gradient(135deg, rgba(255,42,133,0.14), rgba(199,125,255,0.10));">
               <div class="cc-Switch-row" style="padding:0; border:none;">
                 <div>
-                  <span style="font-weight:900; color:#ff4d94; font-size:11.5px;">🔥 РЕЖИМ РЕЗНИ 1+0 (BULLET TURBO)</span>
+                  <span style="font-weight:900; color:#ff4d94; font-size:11.5px;">🔥 MODE SLAUGHTER 1+0 (BULLET TURBO)</span>
                   <div style="font-size:10px; color:#cbd5e1; margin-top:2px;">
-                    Мгновенные ходы за 35 мс + умные SEE-премувы без патов и подстав
+                    Instant moves in 35 ms + smart SEE-premoves without stalemates and hangs
                   </div>
                 </div>
                 <input type="checkbox" id="cc-bullet-turbo-chk">
@@ -1678,9 +1678,9 @@
             <div class="cc-glass-card cc-hide-in-hvh" style="border-left: 3.5px solid #38b000; background: linear-gradient(135deg, rgba(56,176,0,0.14), rgba(0,245,212,0.08));">
               <div class="cc-Switch-row" style="padding:0; border:none;">
                 <div>
-                  <span style="font-weight:900; color:#70e000; font-size:11.5px;">🛡 АДАПТИВНЫЙ LEGIT-ТАЙМИНГ (АВТО-ДЖИТТЕР ПО ЧАСАМ)</span>
+                  <span style="font-weight:900; color:#70e000; font-size:11.5px;">🛡 ADAPTIVE LEGIT-TIMING (AUTO-JITTER BY CLOCK)</span>
                   <div style="font-size:10px; color:#cbd5e1; margin-top:2px;">
-                    Сам считывает контроль времени (10+0 / 3+0 / 1+0) и плавно меняет задержку хода с живым разбросом, исключая палевные минимальные тайминги
+                    Itself reads control time (10+0 / 3+0 / 1+0) и smoothly changes delay move s live variance, excluding risky minimal timings
                   </div>
                 </div>
                 <input type="checkbox" id="cc-legit-timing-chk" checked>
@@ -1689,95 +1689,95 @@
 
             <div class="cc-glass-card cc-hide-in-legit" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>⚡ УМНЫЕ ПРЕМУВЫ НА ДОСКЕ (SEE PREMOVE v2)</span>
-                <span id="cc-premove-book-status" style="font-size:10px; color:#00f5d4;">📖 ТЕОРИЯ АКТИВНА</span>
+                <span>⚡ SMART PREMOVES ON BOARD (SEE PREMOVE v2)</span>
+                <span id="cc-premove-book-status" style="font-size:10px; color:#00f5d4;">📖 THEORY ACTIVE</span>
               </div>
 
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span style="font-weight:800; color:#fff;">🔮 Выставлять премувы на доске Lichess</span>
+                <span style="font-weight:800; color:#fff;">🔮 Place premoves on the Lichess board</span>
                 <input type="checkbox" id="cc-premove-chk">
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Сила и частота премувов:</span>
-                <strong id="cc-premove-risk-val" style="color:#c77dff; font-size:10.5px;">🎯 Ур. 3: Умный Блиц</strong>
+                <span>Strength and frequency of premoves:</span>
+                <strong id="cc-premove-risk-val" style="color:#c77dff; font-size:10.5px;">🎯 Lv. 3: Smart Blitz</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-premove-risk-slider" min="1" max="4" step="1" value="3" style="accent-color:#c77dff;">
 
               <div class="cc-control-row" style="margin-top:6px;">
-                <span>Дебютная линия премувов:</span>
+                <span>Opening line premoves:</span>
               </div>
               <select class="cc-select" id="cc-premove-opening-select">
                 ${buildOpeningOptionsHTML()}
               </select>
 
               <div class="cc-Switch-row" style="margin-top:4px;">
-                <span>Показывать прогноз премува в ход врага</span>
+                <span>Show forecast premove on enemy move</span>
                 <input type="checkbox" id="cc-premove-arrows-chk" checked>
               </div>
             </div>
 
             <div class="cc-glass-card">
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span style="font-weight:800; color:#fff;">🤖 Включить автоматический ход</span>
+                <span style="font-weight:800; color:#fff;">🤖 Enable automatic move</span>
                 <input type="checkbox" id="cc-auto-master-chk">
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Базовая скорость / задержка хода:</span>
-                <strong id="cc-auto-delay-val" style="color:var(--cc-accent);">0.18 сек</strong>
+                <span>Base speed / delay move:</span>
+                <strong id="cc-auto-delay-val" style="color:var(--cc-accent);">0.18 sec</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-delay-slider" min="20" max="2500" step="20" value="180">
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Случайный разброс времени (Humanizer):</span>
-                <strong id="cc-auto-jitter-val" style="color:var(--cc-accent);">±0.06 сек</strong>
+                <span>Random variance time (Humanizer):</span>
+                <strong id="cc-auto-jitter-val" style="color:var(--cc-accent);">±0.06 sec</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-jitter-slider" min="0" max="1000" step="20" value="60">
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Частота срабатывания автохода:</span>
-                <strong id="cc-auto-rate-val" style="color:var(--cc-accent);">100% ходов</strong>
+                <span>Frequency trigger automove:</span>
+                <strong id="cc-auto-rate-val" style="color:var(--cc-accent);">100% moves</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-rate-slider" min="10" max="100" step="10" value="100">
             </div>
 
             <div class="cc-glass-card cc-hide-in-hvh" style="border-left: 3.5px solid #ffbe0b;">
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>Иногда делать Средний ход (2-я линия)</span>
+                <span>Sometimes play Average move (2nd line)</span>
                 <input type="checkbox" id="cc-auto-avg-chk">
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Шанс Среднего хода:</span>
+                <span>Chance Average move:</span>
                 <strong id="cc-auto-avg-freq-val" style="color:#ffbe0b;">20%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-avg-freq-slider" min="0" max="100" step="5" value="20" style="accent-color:#ffbe0b;">
 
               <div class="cc-Switch-row" style="margin-top:4px;">
-                <span>Страховка: только Лучший ход при Мате в 1 и угрозах</span>
+                <span>Insurance: only Best move on Mate in 1 and threats</span>
                 <input type="checkbox" id="cc-auto-protect-chk" checked>
               </div>
 
               <div class="cc-control-row" style="margin-top:5px; margin-bottom:0;">
-                <span>Канал отправки:</span>
+                <span>Send channel:</span>
                 <select class="cc-select" id="cc-auto-method-select" style="width:210px;">
-                  <option value="twoclick" selected>🎯 Безопасный 2-Клик по доске</option>
-                  <option value="drag">🖐 Перетаскивание (Drag & Drop)</option>
+                  <option value="twoclick" selected>🎯 Safe 2-Click on board</option>
+                  <option value="drag">🖐 Dragging (Drag & Drop)</option>
                 </select>
               </div>
             </div>
 
             <div class="cc-actions-bar">
-              <button class="cc-btn cc-btn-primary" id="cc-auto-test-best">⚡ Сходить Лучшим</button>
-              <button class="cc-btn cc-hide-in-hvh" id="cc-auto-test-avg" style="border-color:#ffbe0b; color:#ffbe0b;">❖ Сходить Средним</button>
+              <button class="cc-btn cc-btn-primary" id="cc-auto-test-best">⚡ Play Best</button>
+              <button class="cc-btn cc-hide-in-hvh" id="cc-auto-test-avg" style="border-color:#ffbe0b; color:#ffbe0b;">❖ Play Average</button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-rage">
             <div class="cc-glass-card">
               <div class="cc-control-row">
-                <span style="font-weight:800;">СИЛА ДВИЖКА (400 – 3000 ELO)</span>
+                <span style="font-weight:800;">STRENGTH ENGINE (400 – 3000 ELO)</span>
                 <strong id="cc-elo-val" style="color:var(--cc-accent);">${currentElo} ELO</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-elo-slider" min="400" max="3000" step="100" value="${currentElo}">
@@ -1785,171 +1785,171 @@
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>🧠 ГИБРИДНЫЙ STOCKFISH 19 LOCAL + ТЕЛЕМЕТРИЯ 24/7</span>
+                <span>🧠 HYBRID STOCKFISH 19 LOCAL + TELEMETRY 24/7</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>🧠 Фоновый WebWorker Stockfish 19 Local</span>
+                <span>🧠 Background WebWorker Stockfish 19 Local</span>
                 <input type="checkbox" id="cc-sf-wasm-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>♚ ENGINE MAX: ждать primary SF, без average и turbo</span>
+                <span>♚ ENGINE MAX: wait primary SF, without average and turbo</span>
                 <input type="checkbox" id="cc-engine-max-chk">
               </div>
               <div class="cc-Switch-row">
-                <span>📡 Положение партии 24/7 (Часы, WDL%, Сервер в ход врага)</span>
+                <span>📡 Game position 24/7 (Clocks, WDL%, Server on enemy move)</span>
                 <input type="checkbox" id="cc-live-telemetry-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🪤 Радар ловушек (Подсветка ходов с шансом ошибки врага)</span>
+                <span>🪤 Radar traps (Highlight moves s chance of enemy error)</span>
                 <input type="checkbox" id="cc-trap-radar-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🔊 Тактический аудио-радар (Пинг зевков врага и Мата)</span>
+                <span>🔊 Tactical audio radar (ping enemy blunders & mate)</span>
                 <input type="checkbox" id="cc-audio-radar-chk" checked>
               </div>
             </div>
 
             <div class="cc-glass-card cc-hide-in-hvh" style="border-left: 3.5px solid #00f5d4;">
               <div class="cc-section-title">
-                <span>🚀 РАЗГРУЗКА ДВИЖКА (ОПТИМИЗАЦИЯ CPU)</span>
+                <span>🚀 OFFLOAD ENGINE (OPTIMIZATION CPU)</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>❖ Показывать и считать Средний ход (2-я линия)</span>
+                <span>❖ Show and count Average move (2nd line)</span>
                 <input type="checkbox" id="cc-show-avg-chk" checked>
               </div>
               <div class="cc-Switch-row cc-hide-in-legit">
-                <span>✖ Показывать и считать Худший ход (Анти-зевок)</span>
+                <span>✖ Show and count Worst move (Anti-blunder)</span>
                 <input type="checkbox" id="cc-show-worst-chk" checked>
               </div>
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>⚡ ВЫБОР СТИЛЯ ИГРЫ (11 ЛЕГЕНД)</span></div>
+              <div class="cc-section-title"><span>⚡ CHOOSE PLAY STYLE (11 LEGENDS)</span></div>
               <div class="cc-style-grid">
-                <button class="cc-style-btn" data-style="mogging"><span>⚡ Моггинг</span><small>ДОМИНАЦИЯ</small></button>
-                <button class="cc-style-btn active" data-style="tal"><span>✦ Михаил Таль</span><small>ЖЕРТВЫ</small></button>
-                <button class="cc-style-btn" data-style="alphazero"><span>🧠 AlphaZero</span><small>НЕЙРОСЕТЬ</small></button>
-                <button class="cc-style-btn" data-style="morphy"><span>🎭 Пол Морфи</span><small>ГЕНИЙ ТЕМПА</small></button>
-                <button class="cc-style-btn" data-style="hikaru"><span>🚀 Накамура</span><small>КОРОЛЬ ПУЛЬКИ</small></button>
-                <button class="cc-style-btn" data-style="kasparov"><span>▲ Каспаров</span><small>АТАКА</small></button>
-                <button class="cc-style-btn" data-style="fischer"><span>◈ Фишер</span><small>ТОЧНОСТЬ</small></button>
-                <button class="cc-style-btn" data-style="carlsen"><span>❖ Карлсен</span><small>ТЕХНИКА</small></button>
-                <button class="cc-style-btn" data-style="solid"><span>🛡 Карпов</span><small>ЗАЖИМ</small></button>
-                <button class="cc-style-btn" data-style="botvinnik"><span>🏛 Ботвинник</span><small>ПАТРИАРХ</small></button>
+                <button class="cc-style-btn" data-style="mogging"><span>⚡ Mogging</span><small>DOMINATION</small></button>
+                <button class="cc-style-btn active" data-style="tal"><span>✦ Mikhail Tal</span><small>SACRIFICES</small></button>
+                <button class="cc-style-btn" data-style="alphazero"><span>🧠 AlphaZero</span><small>NEURAL NET</small></button>
+                <button class="cc-style-btn" data-style="morphy"><span>🎭 Paul Morphy</span><small>TEMPO GENIUS</small></button>
+                <button class="cc-style-btn" data-style="hikaru"><span>🚀 Nakamura</span><small>KING BULLET</small></button>
+                <button class="cc-style-btn" data-style="kasparov"><span>▲ Kasparov</span><small>ATTACK</small></button>
+                <button class="cc-style-btn" data-style="fischer"><span>◈ Fischer</span><small>ACCURACY</small></button>
+                <button class="cc-style-btn" data-style="carlsen"><span>❖ Carlsen</span><small>TECHNIQUE</small></button>
+                <button class="cc-style-btn" data-style="solid"><span>🛡 Karpov</span><small>SQUEEZE</small></button>
+                <button class="cc-style-btn" data-style="botvinnik"><span>🏛 Botvinnik</span><small>PATRIARCH</small></button>
                 <button class="cc-style-btn" data-style="balanced" style="grid-column: span 2;">
-                  <span>⚙ Stockfish 3000 Cloud + Syzygy</span><small>ЧИСТЫЙ МАКСИМУМ</small>
+                  <span>⚙ Stockfish 3000 Cloud + Syzygy</span><small>PURE MAXIMUM</small>
                 </button>
               </div>
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>⚙ РЕЖИМ РАБОТЫ</span></div>
+              <div class="cc-section-title"><span>⚙ WORK MODE</span></div>
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Когда считать:</span>
+                <span>When count:</span>
                 <select class="cc-select" id="cc-turn-select" style="width:200px;">
-                  <option value="my" selected>Только в мой ход (+ Премув)</option>
-                  <option value="auto">Всегда (и за соперника)</option>
-                  <option value="w">Всегда за Белых</option>
-                  <option value="b">Всегда за Черных</option>
+                  <option value="my" selected>Only on my move (+ Premove)</option>
+                  <option value="auto">Always (and for opponent)</option>
+                  <option value="w">Always as White</option>
+                  <option value="b">Always as Black</option>
                 </select>
               </div>
               <div class="cc-Switch-row">
-                <span>⚡ Радар зевков соперника и спецэффекты мата</span>
+                <span>⚡ Opponent blunder radar and mate special effects</span>
                 <input type="checkbox" id="cc-rage-rofl-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🛡 Блокировать Автоход в Rated-играх</span>
+                <span>🛡 Block Automove in Rated games</span>
                 <input type="checkbox" id="cc-rage-antiban-chk">
               </div>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-visuals">
-            <!-- КАСТОМНЫЙ ФОН МЕНЮ ИЗ ПРОВОДНИКА -->
+            <!-- CUSTOM BACKGROUND MENU FROM FILE PICKER -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>🖼️ СВОЕ ФОТО НА ФОН МЕНЮ (ВЫБОР ИЗ ПРОВОДНИКА)</span>
+                <span>🖼️ YOUR PHOTO ON BACKGROUND MENU (CHOOSE FROM FILE PICKER)</span>
               </div>
               <div style="font-size:10.5px; color:#cbd5e1; margin-bottom:7px; line-height:1.35;">
-                Выберите любое фото с компьютера — расширение само сожмет его под размер окна (900×800) и сохранит в память:
+                Choose any photo s computer — extension itself will resize it to window size (900×800) и will save в memory:
               </div>
               <div class="cc-actions-bar" style="margin-bottom:7px;">
-                <button class="cc-btn cc-btn-primary" id="cc-upload-bg-btn">📂 ВЫБРАТЬ ФОТО...</button>
-                <button class="cc-btn cc-btn-danger" id="cc-clear-bg-btn">🗑 СБРОСИТЬ ФОН</button>
+                <button class="cc-btn cc-btn-primary" id="cc-upload-bg-btn">📂 CHOOSE PHOTO...</button>
+                <button class="cc-btn cc-btn-danger" id="cc-clear-bg-btn">🗑 RESET BACKGROUND</button>
               </div>
               <input type="file" id="cc-bg-file-input" accept="image/*" style="display:none;" />
               <div class="cc-control-row">
-                <span>Затемнение фото (читаемость текста):</span>
+                <span>Dimming photo (readability text):</span>
                 <strong id="cc-bg-dim-val" style="color:#c77dff;">72%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-bg-dim-slider" min="0.2" max="0.92" step="0.04" value="0.72" style="accent-color:#c77dff;">
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Размытие фона (Glass Blur):</span>
+                <span>Background blur (Glass Blur):</span>
                 <strong id="cc-bg-blur-val" style="color:#c77dff;">4px</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-bg-blur-slider" min="0" max="16" step="1" value="4" style="accent-color:#c77dff;">
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>✦ ТЕМА МЕНЮ (11 СТИЛЕЙ VISION GLASS)</span></div>
+              <div class="cc-section-title"><span>✦ THEME MENU (11 STYLES VISION GLASS)</span></div>
               <select class="cc-select" id="cc-vis-theme">
-                <option value="cyberpunk">🌌 Liquid Cyan Wave (Неоновая волна)</option>
-                <option value="minimal">⚪ Pure Minimal (Чистый минимализм)</option>
-                <option value="aurora">🌌 Aurora 3D Glass (Северное сияние)</option>
-                <option value="hologram">🔮 Hologram Violet (Голограмма)</option>
-                <option value="crimson">🔥 Crimson Rose (Агрессивный рубин)</option>
-                <option value="gold">👑 Royal Gold (Королевское золото)</option>
-                <option value="matrix">🧪 Matrix Toxic (Кибер-Матрица)</option>
-                <option value="titanium">❄️ Vision Pro Titanium (Матовый титан)</option>
-                <option value="obsidian">🌑 Obsidian Stealth (Темный обсидиан)</option>
-                <option value="nebula">🌠 Nebula Director (Космическая студия)</option>
-                <option value="grandmaster">♛ Grandmaster Club (Изумруд и золото)</option>
+                <option value="cyberpunk">🌌 Liquid Cyan Wave (Neon wave)</option>
+                <option value="minimal">⚪ Pure Minimal (Clean minimalism)</option>
+                <option value="aurora">🌌 Aurora 3D Glass (Northern lights)</option>
+                <option value="hologram">🔮 Hologram Violet (Hologram)</option>
+                <option value="crimson">🔥 Crimson Rose (Aggressive ruby)</option>
+                <option value="gold">👑 Royal Gold (Royal gold)</option>
+                <option value="matrix">🧪 Matrix Toxic (Cyber-Matrix)</option>
+                <option value="titanium">❄️ Vision Pro Titanium (Mate titanium)</option>
+                <option value="obsidian">🌑 Obsidian Stealth (Dark obsidian)</option>
+                <option value="nebula">🌠 Nebula Director (Cosmic studio)</option>
+                <option value="grandmaster">♛ Grandmaster Club (Emerald and gold)</option>
               </select>
             </div>
 
             <div class="cc-glass-card" style="border-left: 3.5px solid var(--cc-accent);">
-              <div class="cc-section-title"><span>◈ ТИП УКАЗАТЕЛЯ ХОДА (16 ВАРИАЦИЙ: КВАДРАТЫ И СТРЕЛКИ)</span></div>
+              <div class="cc-section-title"><span>◈ POINTER TYPE MOVES (16 VARIATIONS: SQUARES AND ARROWS)</span></div>
               <select class="cc-select" id="cc-vis-arrow-style" style="margin-bottom:7px;">
-                <optgroup label="🔲 БЕЗ СТРЕЛОК (ВЫДЕЛЕНИЕ КВАДРАТИКОВ ХОДА)">
-                  <option value="sq_cyber_frame">🔲 Неоновые рамки клеток (ОТКУДА ➔ КУДА)</option>
-                  <option value="sq_Step_badges">🎯 Тактические метки [1: СТАРТ] ➔ [2: ЦЕЛЬ]</option>
-                  <option value="sq_hologram_tiles">💠 Голографическая заливка квадратов + Прицел</option>
-                  <option value="sq_minimal_dots">⚫ Стелс-точки Lichess Pro (Без стрелок)</option>
+                <optgroup label="🔲 NO ARROWS (SQUARE HIGHLIGHTS MOVES)">
+                  <option value="sq_cyber_frame">🔲 Neon square frames (FROM ➔ TO)</option>
+                  <option value="sq_Step_badges">🎯 Tactical markers [1: START] ➔ [2: TARGET]</option>
+                  <option value="sq_hologram_tiles">💠 Holographic square fill + Crosshair</option>
+                  <option value="sq_minimal_dots">⚫ Stealth-dots Lichess Pro (Without arrows)</option>
                 </optgroup>
-                <optgroup label="🏹 ВЕКТОРНЫЕ И 3D СТРЕЛКИ (12 СТИЛЕЙ)">
-                  <option value="curved_neon">🌈 Плавная неоновая дуга с потоком</option>
-                  <option value="comet_trail">☄️ Огненная комета с градиентным хвостом</option>
-                  <option value="cyber_chevron">⏩ Тактический конвейер шевронов (>>>)</option>
-                  <option value="quantum_portal">🌀 Квантовый телепорт (Порталы на клетках)</option>
-                  <option value="tube_3d">🧊 3D Объемная трубка с падающей тенью</option>
-                  <option value="plasma">⚡ Плазменная молния-зигзаг</option>
-                  <option value="sniper_3d">🎯 3D Снайперский радар-прицел</option>
-                  <option value="dna_wave">🧬 Двойная кибер-волна ДНК</option>
-                  <option value="chroma_rgb">🌈 Chroma RGB Перелив</option>
-                  <option value="laser">⚡ Прямой кибер-лазер</option>
-                  <option value="classic">♟️ Классическая прямая</option>
-                  <option value="dotted">✨ Тактический пунктир</option>
+                <optgroup label="🏹 VECTOR AND 3D ARROWS (12 STYLES)">
+                  <option value="curved_neon">🌈 Smooth neon arc s with flow</option>
+                  <option value="comet_trail">☄️ Fire comet s gradient tail</option>
+                  <option value="cyber_chevron">⏩ Tactical chevron conveyor (>>>)</option>
+                  <option value="quantum_portal">🌀 Quantum teleport (Portals on squares)</option>
+                  <option value="tube_3d">🧊 3D Volumetric tube s drop shadow</option>
+                  <option value="plasma">⚡ Plasma lightning-zigzag</option>
+                  <option value="sniper_3d">🎯 3D Sniper radar-crosshair</option>
+                  <option value="dna_wave">🧬 Double cyber-DNA wave</option>
+                  <option value="chroma_rgb">🌈 Chroma RGB Iridescence</option>
+                  <option value="laser">⚡ Direct cyber-laser</option>
+                  <option value="classic">♟️ Classical straight</option>
+                  <option value="dotted">✨ Tactical dashed</option>
                 </optgroup>
               </select>
 
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Стиль «Мата в 1 ход»:</span>
+                <span>Style «Mate in 1 move»:</span>
                 <select class="cc-select" id="cc-vis-mate-style" style="width:225px;">
                   <option value="phonk_skull">💀 Phonk Skull Mogging</option>
-                  <option value="orbital_laser">🛸 Орбитальный Кибер-Лазер</option>
-                  <option value="royal_exec">👑 Королевский Приговор</option>
-                  <option value="rofl_classic">😂 Классический Рофл</option>
+                  <option value="orbital_laser">🛸 Orbital Cyber-Laser</option>
+                  <option value="royal_exec">👑 Royal Verdict</option>
+                  <option value="rofl_classic">😂 Classical Rofl</option>
                 </select>
               </div>
 
               <div class="cc-control-row">
-                <span>Масштаб стрелок и рамок:</span>
+                <span>Scale arrows and frames:</span>
                 <strong id="cc-vis-scale-val" style="color:var(--cc-accent);">1.0x</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-vis-scale" min="0.6" max="1.6" step="0.1" value="1.0">
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Яркость / Прозрачность:</span>
+                <span>Brightness / Transparency:</span>
                 <strong id="cc-vis-opacity-val" style="color:var(--cc-accent);">88%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-vis-opacity" min="0.3" max="1.0" step="0.05" value="0.88">
@@ -1957,94 +1957,94 @@
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #ff2a85;">
               <div class="cc-section-title" style="color:#ff4d94;">
-                <span>🔥 ТЕПЛОВАЯ КАРТА КОНТРОЛЯ И СПЕЦЭФФЕКТЫ</span>
+                <span>🔥 CONTROL HEATMAP AND SPECIAL EFFECTS</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>🗺️ Постоянная тепловая карта доски (Иначе — зажатие [Alt])</span>
+                <span>🗺️ Permanent heatmap board (Otherwise — squeeze [Alt])</span>
                 <input type="checkbox" id="cc-heatmap-always-chk">
               </div>
               <div class="cc-Switch-row">
-                <span>🔥 Эдит Бриллиантовому Ходу (15 сек Phonk + Mogging)</span>
+                <span>🔥 Edit Brilliant Move (15 sec Phonk + Mogging)</span>
                 <input type="checkbox" id="cc-vis-phonk-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>Показывать подсказки на доске</span>
+                <span>Show hints on board</span>
                 <input type="checkbox" id="cc-vis-arrows-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>Боковая шкала оценки (Eval Bar)</span>
+                <span>Side evaluation bar (Eval Bar)</span>
                 <input type="checkbox" id="cc-vis-eval-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>Объемные 3D-тени под фигурами и доской</span>
+                <span>Volumetric 3D-shadows under pieces and board</span>
                 <input type="checkbox" id="cc-vis-shadow-chk" checked>
               </div>
               <button class="cc-btn cc-btn-primary" id="cc-test-phonk-btn" style="width:100%; margin-top:6px;">
-                🔥 ТЕСТ ФОНК-ЭДИТА (15 СЕК)
+                🔥 TEST BACKGROUND-EDIT (15 SEC)
               </button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-misc">
-            <!-- СИСТЕМА КОНФИГОВ (.CHESS) -->
+            <!-- CONFIG SYSTEM (.CHESS) -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #00f5d4; background: linear-gradient(135deg, rgba(0, 245, 212, 0.12), rgba(199, 125, 255, 0.08));">
               <div class="cc-section-title">
-                <span>⚙️ СИСТЕМА КОНФИГОВ (.CHESS)</span>
-                <span id="cc-cfg-status-badge" style="color:#00f5d4; font-size:9.5px;">ГОТОВ</span>
+                <span>⚙️ CONFIG SYSTEM (.CHESS)</span>
+                <span id="cc-cfg-status-badge" style="color:#00f5d4; font-size:9.5px;">READY</span>
               </div>
               <div style="font-size:10.5px; color:#cbd5e1; margin-bottom:7px; line-height:1.35;">
-                Сохраняйте свои настройки движка, автохода, стрелок и обоев меню в файл <strong>.chess</strong> или загружайте чужие конфиги в 1 клик:
+                Save own settings engine, automove, arrows и wallpapers menu в file <strong>.chess</strong> or load other configs в 1 click:
               </div>
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Название конфига:</span>
-                <input type="text" id="cc-cfg-name-input" placeholder="Например: Legit_Tal_3000" value="My_ChessCoach"
+                <span>Config name:</span>
+                <input type="text" id="cc-cfg-name-input" placeholder="For example: Legit_Tal_3000" value="My_ChessCoach"
                        style="width:190px; background:rgba(10,13,20,0.95); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:7px; padding:4px 8px; font-size:11px; font-weight:700; outline:none;" />
               </div>
               <div class="cc-Switch-row" style="padding:3px 0 7px 0; border:none;">
-                <span style="font-size:10.5px; color:#e2e8f0;">🖼️ Вшивать текущее фото фона в файл .chess</span>
+                <span style="font-size:10.5px; color:#e2e8f0;">🖼️ Embed current photo background in .chess file</span>
                 <input type="checkbox" id="cc-cfg-include-bg-chk" checked>
               </div>
               <div class="cc-actions-bar">
-                <button class="cc-btn cc-btn-primary" id="cc-export-cfg-btn">💾 СКАЧАТЬ .CHESS</button>
-                <button class="cc-btn" id="cc-import-cfg-btn" style="border-color:#c77dff; color:#c77dff;">📂 ЗАГРУЗИТЬ .CHESS</button>
+                <button class="cc-btn cc-btn-primary" id="cc-export-cfg-btn">💾 DOWNLOAD .CHESS</button>
+                <button class="cc-btn" id="cc-import-cfg-btn" style="border-color:#c77dff; color:#c77dff;">📂 LOAD .CHESS</button>
               </div>
               <input type="file" id="cc-import-cfg-input" accept=".chess,.json" style="display:none;" />
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>❖ РУЧНОЕ ОБУЧЕНИЕ БОТА</span></div>
+              <div class="cc-section-title"><span>❖ MANUAL BOT TRAINING</span></div>
               <div style="font-size:11px; color:#cbd5e1; margin-bottom:8px; line-height:1.38;">
-                Закрепите лучший ход как любимый шаблон или забаньте его, чтобы движок сразу нашел другой вариант:
+                Pin the best move as favorite template or ban it, so the engine immediately finds another variation:
               </div>
               <div class="cc-actions-bar">
-                <button class="cc-btn" id="cc-train-good">👍 ЗАКРЕПИТЬ ХОД</button>
-                <button class="cc-btn cc-btn-danger" id="cc-train-bad">👎 ЗАБАНИТЬ ХОД</button>
+                <button class="cc-btn" id="cc-train-good">👍 PIN MOVE</button>
+                <button class="cc-btn cc-btn-danger" id="cc-train-bad">👎 BAN MOVE</button>
               </div>
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>◈ БАЗА САМООБУЧЕНИЯ (EXPERIENCE DB)</span></div>
+              <div class="cc-section-title"><span>◈ DATABASE SELF-LEARNING (EXPERIENCE DB)</span></div>
               <div id="cc-misc-db-summary" style="font-size:11.5px; color:#e2e8f0; margin-bottom:8px;">
-                Выучено позиций в памяти: 0
+                Positions learned in memory: 0
               </div>
               <div class="cc-actions-bar" style="margin-bottom:7px;">
-                <button class="cc-btn" id="cc-export-db">📥 ЭКСПОРТ (.JSON)</button>
-                <button class="cc-btn" id="cc-import-db">📤 ИМПОРТ (.JSON)</button>
+                <button class="cc-btn" id="cc-export-db">📥 EXPORT (.JSON)</button>
+                <button class="cc-btn" id="cc-import-db">📤 IMPORT (.JSON)</button>
               </div>
               <input type="file" id="cc-import-file-input" accept=".json" style="display:none;" />
               <button class="cc-btn cc-btn-danger" id="cc-clear-db" style="width:100%;">
-                🗑 ПОЛНОСТЬЮ ОЧИСТИТЬ ПАМЯТЬ
+                🗑 FULLY CLEAR MEMORY
               </button>
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>👋 ПРИВЕТСТВЕННЫЙ ЭКРАН И СБРОС ПОЗИЦИИ ОКНА</span></div>
+              <div class="cc-section-title"><span>👋 WELCOME SCREEN И RESET POSITION WINDOW</span></div>
               <div class="cc-actions-bar">
                 <button class="cc-btn" id="cc-restore-welcome-btn">
-                  ✨ Показать приветствие
+                  ✨ Show welcome
                 </button>
                 <button class="cc-btn" id="cc-reset-pos-btn">
-                  📍 Сбросить позицию меню
+                  📍 Reset position menu
                 </button>
               </div>
             </div>
@@ -2167,7 +2167,7 @@
       updateLiveTelemetryUI();
     });
 
-    // Загрузка кастомного фона из Проводника со сжатием через Canvas
+    // Loading каsтомного background из Проводника sо sжатием через Canvas
     $("cc-upload-bg-btn").addEventListener("click", () => {
       const inp = $("cc-bg-file-input");
       if (inp) inp.click();
@@ -2268,10 +2268,10 @@
       updateUIValues();
       resetTurnDecision();
       if (autoMoveEnabled) {
-        setAutoStatusText("Автоход v2 включен — анализ позиции...", "#00f5d4");
+        setAutoStatusText("Automove v2 enabled — analysis position...", "#00f5d4");
         forceRecalculate();
       } else {
-        setAutoStatusText("Автоход выключен", "#94a3b8");
+        setAutoStatusText("Automove disabled", "#94a3b8");
       }
     };
 
@@ -2296,7 +2296,7 @@
           autoMoveDelayMs: 45,
           autoMoveJitterMs: 15
         });
-        setAutoStatusText("🔥 РЕЖИМ РЕЗНИ 1+0 АКТИВИРОВАН", "#ff4d94");
+        setAutoStatusText("🔥 MODE SLAUGHTER 1+0 ACTIVATED", "#ff4d94");
       } else {
         premoveEnabled = false;
         showPremoveArrows = false;
@@ -2312,7 +2312,7 @@
           autoMoveDelayMs: 180,
           autoMoveJitterMs: 60
         });
-        setAutoStatusText("Режим Резни 1+0 выключен — стандартный режим", "#00f5d4");
+        setAutoStatusText("Mode Slaughter 1+0 disabled — standard mode", "#00f5d4");
       }
       applySafeBoardDepth();
       updateUIValues();
@@ -2422,7 +2422,7 @@
         StockfishWasmEngine.initWorker();
       }
       saveSetting({ engineMaxMode, elo: currentElo, style: currentStyle, useStockfishWasm, showAverageMove, useAverageMoveSometimes, bulletTurboMode, premoveEnabled, showPremoveArrows, legitAutoTiming, autoMoveTriggerRate });
-      setAutoStatusText(engineMaxMode ? "♚ ENGINE MAX: ОЖИДАНИЕ PRIMARY STOCKFISH" : "ENGINE MAX ВЫКЛЮЧЕН", engineMaxMode ? "#64cdb9" : "#94a3b8");
+      setAutoStatusText(engineMaxMode ? "♚ ENGINE MAX: WAITING PRIMARY STOCKFISH" : "ENGINE MAX DISABLED", engineMaxMode ? "#64cdb9" : "#94a3b8");
       updateUIValues();
       forceRecalculate();
     });
@@ -2466,19 +2466,19 @@
     $("cc-play-once").addEventListener("click", () => {
       const state = captureBoardState(true);
       if (state && !state.animating && isCachedAnalysisCurrent(state)) {
-        setAutoStatusText(`Выполняем ход: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
+        setAutoStatusText(`Playing move: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
         executeMoveOnBoard(cachedMoves.best, state, true, false);
       }
     });
 
     $("cc-auto-test-best").addEventListener("click", () => {
       if (engineMaxMode && !cachedMoves.engineMeta && !cachedMoves.best?.fromSyzygy) {
-        setAutoStatusText("♚ ENGINE MAX: дождитесь завершения primary Stockfish", "#d9ad58");
+        setAutoStatusText("♚ ENGINE MAX: wait for completion primary Stockfish", "#d9ad58");
         return;
       }
       const state = captureBoardState(true);
       if (state && !state.animating && cachedMoves.best) {
-        setAutoStatusText(`Лучший ход: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
+        setAutoStatusText(`Best move: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
         executeMoveOnBoard(cachedMoves.best, state, true, false);
       }
     });
@@ -2488,7 +2488,7 @@
       const state = captureBoardState(true);
       const move = cachedMoves.average || cachedMoves.best;
       if (state && !state.animating && move && isCachedAnalysisCurrent(state)) {
-        setAutoStatusText(`Средний ход: ${move.from}→${move.to}`, "#ffbe0b");
+        setAutoStatusText(`Average move: ${move.from}→${move.to}`, "#ffbe0b");
         executeMoveOnBoard(move, state, true, false);
       }
     });
@@ -2608,11 +2608,11 @@
         { type: "TRAIN_MOVE_MANUAL", fenKey: cachedMoves.boardKey, uci: cachedMoves.best.uci, delta: 95 },
         (res) => {
           const btn = $("cc-train-good");
-          btn.textContent = "✦ ЗАКРЕПЛЕНО!";
-          setTimeout(() => { btn.textContent = "👍 ЗАКРЕПИТЬ ХОД"; }, 800);
+          btn.textContent = "✦ PINNED!";
+          setTimeout(() => { btn.textContent = "👍 PIN MOVE"; }, 800);
           if (res && res.positionsCount !== undefined) {
-            $("cc-memory-stat").textContent = `${res.positionsCount} ПОЗ.`;
-            $("cc-misc-db-summary").textContent = `Выучено позиций в памяти: ${res.positionsCount}`;
+            $("cc-memory-stat").textContent = `${res.positionsCount} POS.`;
+            $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
           }
           forceRecalculate();
         }
@@ -2625,11 +2625,11 @@
         { type: "TRAIN_MOVE_MANUAL", fenKey: cachedMoves.boardKey, uci: cachedMoves.best.uci, delta: -210 },
         (res) => {
           const btn = $("cc-train-bad");
-          btn.textContent = "✖ ЗАБАНЕНО!";
-          setTimeout(() => { btn.textContent = "👎 ЗАБАНИТЬ ХОД"; }, 800);
+          btn.textContent = "✖ BANNED!";
+          setTimeout(() => { btn.textContent = "👎 BAN MOVE"; }, 800);
           if (res && res.positionsCount !== undefined) {
-            $("cc-memory-stat").textContent = `${res.positionsCount} ПОЗ.`;
-            $("cc-misc-db-summary").textContent = `Выучено позиций в памяти: ${res.positionsCount}`;
+            $("cc-memory-stat").textContent = `${res.positionsCount} POS.`;
+            $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
           }
           forceRecalculate();
         }
@@ -2662,8 +2662,8 @@
           const parsed = JSON.parse(String(reader.result || "{}"));
           safeSendMessage({ type: "IMPORT_MEMORY", data: parsed }, (res) => {
             if (res && res.positionsCount !== undefined) {
-              $("cc-memory-stat").textContent = `${res.positionsCount} ПОЗ.`;
-              $("cc-misc-db-summary").textContent = `Выучено позиций в памяти: ${res.positionsCount}`;
+              $("cc-memory-stat").textContent = `${res.positionsCount} POS.`;
+              $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
             }
           });
         } catch (err) {}
@@ -2673,12 +2673,12 @@
 
     $("cc-clear-db").addEventListener("click", () => {
       safeSendMessage({ type: "CLEAR_MEMORY" }, () => {
-        $("cc-memory-stat").textContent = "0 ПОЗ.";
-        $("cc-misc-db-summary").textContent = "Выучено позиций в памяти: 0";
+        $("cc-memory-stat").textContent = "0 POS.";
+        $("cc-misc-db-summary").textContent = "Positions learned in memory: 0";
       });
     });
 
-    // ЭКСПОРТ И ИМПОРТ КОНФИГОВ (.CHESS) ВНУТРИ ensurePanel()
+    // EXPORT И IMPORT КОНФИГОВ (.CHESS) ВНУТРИ ensurePanel()
     $("cc-export-cfg-btn").addEventListener("click", () => {
       const rawName = ($("cc-cfg-name-input")?.value || "My_ChessCoach").trim();
       const safeFileName = rawName.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, "_") || "ChessCoach_Cfg";
@@ -2696,7 +2696,7 @@
 
       const badge = $("cc-cfg-status-badge");
       if (badge) {
-        badge.textContent = `💾 ВЫГРУЖЕН: ${safeFileName}.chess`;
+        badge.textContent = `💾 UNLOADED: ${safeFileName}.chess`;
         badge.style.color = "#00f5d4";
       }
     });
@@ -2723,18 +2723,18 @@
             const cfgTitle = parsed.name || file.name.replace(/\.chess$/i, "");
             if ($("cc-cfg-name-input")) $("cc-cfg-name-input").value = cfgTitle;
             if (badge) {
-              badge.textContent = `✅ АКТИВЕН: ${cfgTitle}`;
+              badge.textContent = `✅ ACTIVE: ${cfgTitle}`;
               badge.style.color = "#38b000";
             }
-            setAutoStatusText(`⚙️ Загружен конфиг: ${cfgTitle}`, "#00f5d4");
+            setAutoStatusText(`⚙️ Config loaded: ${cfgTitle}`, "#00f5d4");
           } else if (badge) {
-            badge.textContent = "❌ ОШИБКА ФАЙЛА .CHESS";
+            badge.textContent = "❌ ERROR FILE .CHESS";
             badge.style.color = "#ff2a85";
           }
         } catch (err) {
           const badge = $("cc-cfg-status-badge");
           if (badge) {
-            badge.textContent = "❌ ПОВРЕЖДЕННЫЙ ФАЙЛ";
+            badge.textContent = "❌ CORRUPTED FILE";
             badge.style.color = "#ff2a85";
           }
         }
@@ -2745,8 +2745,8 @@
 
   function isRatedGameAgainstHuman() {
     const metaText = (document.querySelector(".game__meta")?.innerText || "");
-    const isRated = metaText.includes("Rated") || metaText.includes("Рейтинговая");
-    const isBot = metaText.includes("Stockfish") || metaText.includes("BOT") || metaText.includes("АИ");
+    const isRated = metaText.includes("Rated") || metaText.includes("Rated");
+    const isBot = metaText.includes("Stockfish") || metaText.includes("BOT") || metaText.includes("AI");
     return isRated && !isBot;
   }
 
@@ -2802,7 +2802,7 @@
     const enemySecs = getEnemyRemainingSeconds();
     const clocksEl = $("cc-time-sniper-clocks");
     if (clocksEl) {
-      clocksEl.textContent = `МЫ ${formatClockMMSS(mySecs)} ⚡ ВРАГ ${formatClockMMSS(enemySecs)}`;
+      clocksEl.textContent = `US ${formatClockMMSS(mySecs)} ⚡ ENEMY ${formatClockMMSS(enemySecs)}`;
     }
 
     const advice = res?.timeAdvice;
@@ -2814,12 +2814,12 @@
     } else if (enemySecs < 600 || mySecs < 600) {
       banner.style.display = "block";
       banner.style.borderColor = "rgba(0, 245, 212, 0.25)";
-      if ($("cc-time-sniper-badge")) $("cc-time-sniper-badge").textContent = "⏱️ СНАЙПЕРСКИЙ ТАЙМ-КОНТРОЛЬ";
+      if ($("cc-time-sniper-badge")) $("cc-time-sniper-badge").textContent = "⏱️ SNIPER TIME CONTROL";
       if ($("cc-time-sniper-text")) {
         $("cc-time-sniper-text").textContent =
           enemySecs < 20
-            ? "У соперника мало времени — готовьте острые тактические тычки!"
-            : "Часы под контролем. При цейтноте врага (< 10с) включится режим сруба флага.";
+            ? "У opponent few time — prepare sharp tactical jabs!"
+            : "Clocks under control. In time trouble enemy (< 10s) will turn on mode hunting flag.";
       }
     } else {
       banner.style.display = "none";
@@ -2832,7 +2832,7 @@
     const powerBadge = $("cc-engine-power");
     if (!state || !res?.best) {
       if (panel) panel.dataset.evalMood = "neutral";
-      if (moodLabel) moodLabel.textContent = "ОЖИДАНИЕ";
+      if (moodLabel) moodLabel.textContent = "WAITING";
       if (powerBadge) {
         powerBadge.textContent = "ENGINE IDLE";
         delete powerBadge.dataset.consensus;
@@ -2852,7 +2852,7 @@
       : myEval >= 0.75 ? "ahead" : myEval <= -0.75 ? "behind" : "neutral";
     if (panel) panel.dataset.evalMood = mood;
     if (moodLabel) {
-      moodLabel.textContent = mood === "critical" ? "КРИТИЧНО" : mood === "ahead" ? "ПЕРЕВЕС" : mood === "behind" ? "ПОД ДАВЛЕНИЕМ" : "РАВНО";
+      moodLabel.textContent = mood === "critical" ? "CRITICAL" : mood === "ahead" ? "ADVANTAGE" : mood === "behind" ? "UNDER PRESSURE" : "EQUAL";
     }
 
     if (powerBadge) {
@@ -3028,7 +3028,7 @@
     const badgeEl = $("cc-premove-book-status");
     if (premoveOpeningMode === "off" || !window.ChessOpenings || !Array.isArray(window.ChessOpenings.database)) {
       if (badgeEl) {
-        badgeEl.textContent = "⛔ КНИГА ВЫКЛ";
+        badgeEl.textContent = "⛔ BOOK OFF";
         badgeEl.style.color = "#94a3b8";
       }
       return null;
@@ -3036,7 +3036,7 @@
 
     if (openingBookDeviated) {
       if (badgeEl) {
-        badgeEl.textContent = "⚠️ ВНЕ КНИГИ (SEE ТАКТИКА)";
+        badgeEl.textContent = "⚠️ OUT OF BOOK (SEE TACTICS)";
         badgeEl.style.color = "#ffbe0b";
       }
       return null;
@@ -3088,7 +3088,7 @@
         const replySupport = bestPair.count / Math.max(1, enemyCounts.get(bestPair.enemyUci) || 0);
         const confidence = Math.min(94, Math.round(62 + 32 * enemySupport * replySupport));
         if (badgeEl) {
-          badgeEl.textContent = `📖 ПО КНИГЕ: ${bestPair.op.name.slice(0, 18)}`;
+          badgeEl.textContent = `📖 IN BOOK: ${bestPair.op.name.slice(0, 18)}`;
           badgeEl.style.color = "#00f5d4";
         }
         return {
@@ -3105,7 +3105,7 @@
     if (plyCount > 0) {
       openingBookDeviated = true;
       if (badgeEl) {
-        badgeEl.textContent = "⚠️ ВНЕ КНИГИ (SEE ТАКТИКА)";
+        badgeEl.textContent = "⚠️ OUT OF BOOK (SEE TACTICS)";
         badgeEl.style.color = "#ffbe0b";
       }
     }
@@ -3138,7 +3138,7 @@
           predictionConfidence: bookPlan.predictionConfidence,
           validatedBranches: 1,
           predictionType: "opening_book",
-          reasonText: `📖 ДЕБЮТНЫЙ ПРОГНОЗ ${bookPlan.predictionConfidence}%: ${bookPlan.bookOpeningName}`,
+          reasonText: `📖 OPENING FORECAST ${bookPlan.predictionConfidence}%: ${bookPlan.bookOpeningName}`,
           predictedEnemyMove: { from: eFrom, to: eTo, uci: bookPlan.bookEnemyUci },
           premove: { from: bFrom, to: bTo, uci: bookPlan.bookMyReplyUci, piece: "p" }
         };
@@ -3220,10 +3220,10 @@
     if (!res || !res.best) return null;
     if (engineMaxMode) return { move: res.best, typeLabel: "♚ ENGINE MAX / PRIMARY SF", choiceKind: "engine-max" };
     if (currentElo >= 2000) {
-      return { move: res.best, typeLabel: currentElo >= 3000 ? "3000 ELO / ЛУЧШИЙ" : "2000+ ELO / ЛУЧШИЙ", choiceKind: "best" };
+      return { move: res.best, typeLabel: currentElo >= 3000 ? "3000 ELO / BEST" : "2000+ ELO / BEST", choiceKind: "best" };
     }
     if (getStructuredMateIn(res.best) !== null) {
-      return { move: res.best, typeLabel: "ФОРСИРОВАННЫЙ МАТ / ЛУЧШИЙ", choiceKind: "best" };
+      return { move: res.best, typeLabel: "FORCED MATE / BEST", choiceKind: "best" };
     }
 
     if (protectCriticalMoves || bulletTurboMode || res.isDangerPosition) {
@@ -3238,8 +3238,8 @@
         bulletTurboMode
       ) {
         const label = res.isDangerPosition
-          ? "🛡 ЗАЩИТА ОТ МАТА"
-          : (res.best.fromSyzygy ? "🔮 SYZYGY БОГ" : (bulletTurboMode ? "🔥 РЕЗНЯ 1+0" : "ЛУЧШИЙ"));
+          ? "🛡 DEFENSE FROM MATE"
+          : (res.best.fromSyzygy ? "🔮 SYZYGY GOD" : (bulletTurboMode ? "🔥 SLAUGHTER 1+0" : "BEST"));
         return { move: res.best, typeLabel: label, choiceKind: "best" };
       }
     }
@@ -3247,11 +3247,11 @@
     if (useAverageMoveSometimes && canUseAverageAutoMove(res)) {
       const roll = Math.random() * 100;
       if (roll < averageMoveFrequency) {
-        return { move: res.average, typeLabel: "СРЕДНИЙ (2-Я ЛИНИЯ)", choiceKind: "average" };
+        return { move: res.average, typeLabel: "AVERAGE (2ND LINE)", choiceKind: "average" };
       }
     }
 
-    return { move: res.best, typeLabel: "ЛУЧШИЙ", choiceKind: "best" };
+    return { move: res.best, typeLabel: "BEST", choiceKind: "best" };
   }
 
   function computeLegitHumanDelayMs(moveObj, mySecs, isDanger) {
@@ -3294,7 +3294,7 @@
   function scheduleAutoMoveIfNeeded() {
     if (!autoMoveEnabled || extensionInvalidated || document.hidden) return;
     if (window.__CC_ANDROID_SETTINGS_OPEN__ === true) {
-      setAutoStatusText("Автоход на паузе: открыты настройки", "#ffbe0b");
+      setAutoStatusText("Automove paused: settings open", "#ffbe0b");
       return;
     }
     if (isExecutingMove || Date.now() < moveCooldownUntil) return;
@@ -3303,17 +3303,17 @@
     const state = captureBoardState(false);
     if (!state || state.animating || state.actualTurn !== state.myColor) return;
     if (safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Автоход заблокирован: рейтинговая партия против человека. Сходите вручную.", "#ffbe0b");
+      setAutoStatusText("Automove blocked: rated game vs human. Move manually.", "#ffbe0b");
       return;
     }
     if (boardDirty || state.positionKey !== currentPositionKey || !isCachedAnalysisCurrent(state) || cachedMoves.boardKey !== state.boardKey) return;
     if (cachedMoves.analysisIncomplete && !hasFinalAutoAnalysis(cachedMoves)) {
-      setAutoStatusText("Автоход на паузе: ждём завершённый анализ Stockfish.", "#ffbe0b");
+      setAutoStatusText("Automove paused: waiting for completed Stockfish analysis.", "#ffbe0b");
       return;
     }
     if ((engineMaxMode || currentElo >= 2000) && !hasFinalAutoAnalysis(cachedMoves)) {
       setAutoStatusText(
-        engineMaxMode ? "♚ ENGINE MAX: ЖДЕМ PRIMARY STOCKFISH..." : "🧠 2000+ ELO: ЖДЕМ ФИНАЛЬНЫЙ STOCKFISH...",
+        engineMaxMode ? "♚ ENGINE MAX: WAITING FOR PRIMARY STOCKFISH..." : "🧠 2000+ ELO: WAITING FOR FINAL STOCKFISH...",
         "#64cdb9"
       );
       return;
@@ -3327,11 +3327,11 @@
           decided: true,
           skip: true,
           move: null,
-          typeLabel: "ПРОПУСК",
+          typeLabel: "SKIP",
           totalDelay: 0,
           attempts: 0
         };
-        setAutoStatusText(`Пропуск хода по шансу (${autoMoveTriggerRate}%) — ваш ход`, "#ffbe0b");
+        setAutoStatusText(`Skip move by chance (${autoMoveTriggerRate}%) — your move`, "#ffbe0b");
         return;
       }
 
@@ -3350,10 +3350,10 @@
         modeLabel = "♚ ENGINE MAX";
       } else if (isBulletPanic) {
         totalDelay = 35 + Math.floor(Math.random() * 18);
-        modeLabel = "🔥 ТУРБО 1+0";
+        modeLabel = "🔥 TURBO 1+0";
       } else if (workMode === "legit" || legitAutoTiming) {
         totalDelay = computeLegitHumanDelayMs(picked.move, mySecs, cachedMoves.isDangerPosition);
-        modeLabel = `🛡 LEGIT (${(totalDelay / 1000).toFixed(2)}с)`;
+        modeLabel = `🛡 LEGIT (${(totalDelay / 1000).toFixed(2)}s)`;
       } else {
         const jitter = autoMoveJitterMs > 0 ? Math.round((Math.random() * 2 - 1) * autoMoveJitterMs) : 0;
         const dangerExtraDelay = cachedMoves.isDangerPosition ? 220 : 0;
@@ -3376,7 +3376,7 @@
 
     if (currentTurnDecision.skip) return;
     if (currentTurnDecision.attempts >= 3) {
-      setAutoStatusText("Не удалось кликнуть по доске — сделайте ход вручную", "#ff2a85");
+      setAutoStatusText("Could not click the board — make the move manually", "#ff2a85");
       return;
     }
 
@@ -3384,7 +3384,7 @@
     const delayToWait = currentTurnDecision.attempts === 0 ? currentTurnDecision.totalDelay : 220;
 
     setAutoStatusText(
-      `⚡ Ход (${delayToWait}мс): ${mv.from}→${mv.to} [${currentTurnDecision.typeLabel}]`,
+      `⚡ Move (${delayToWait}ms): ${mv.from}→${mv.to} [${currentTurnDecision.typeLabel}]`,
       cachedMoves.isDangerPosition ? "#ffbe0b" : (bulletTurboMode ? "#ff4d94" : "#00f5d4")
     );
 
@@ -3432,13 +3432,13 @@
     if (!premoveObj || !/^[a-h][1-8]$/.test(premoveObj.from || "") || !/^[a-h][1-8]$/.test(premoveObj.to || "") ||
         premoveObj.from === premoveObj.to || !state || !state.grid || document.hidden || window.__CC_ANDROID_SETTINGS_OPEN__ === true) return;
     if (safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Премув заблокирован: рейтинговая партия против человека.", "#ffbe0b");
+      setAutoStatusText("Premove blocked: rated game vs human.", "#ffbe0b");
       return;
     }
 
     const premovePromo = String(premoveObj.promo || premoveObj.uci?.[4] || "").toLowerCase();
     if (premovePromo && premovePromo !== "q") {
-      setAutoStatusText(`Премув отменён: безопасный выбор превращения ${premovePromo.toUpperCase()} недоступен`, "#ff2a85");
+      setAutoStatusText(`Premove cancelled: safe choice promotion ${premovePromo.toUpperCase()} unavailable`, "#ff2a85");
       return;
     }
 
@@ -3542,7 +3542,7 @@
               fireDragMouse(cgBoard, "mouseup", p2.x, p2.y, 0);
             }, 15);
           }
-          setAutoStatusText(`🔮 ПРЕМУВ ВЫСТАВЛЕН: ${premoveObj.from} → ${premoveObj.to}`, "#c77dff");
+          setAutoStatusText(`🔮 PREMOVE SET: ${premoveObj.from} → ${premoveObj.to}`, "#c77dff");
         }, 25);
       }, 22);
     }, 18);
@@ -3554,7 +3554,7 @@
     const failureKey = `${location.href}|${state.positionId}|${state.positionKey}|${isPremove ? "premove" : "move"}`;
     if (nativeMoveFailureKey !== failureKey) { nativeMoveFailureKey = failureKey; nativeMoveFailures = 0; }
     if (!manualClick && nativeMoveFailures >= 3) {
-      setAutoStatusText("Нативный ввод не подтверждён после 3 попыток. Сходите вручную.", "#ffbe0b");
+      setAutoStatusText("Native input not confirmed after 3 attempts. Move manually.", "#ffbe0b");
       return;
     }
     const attempt = ++nativeMoveFailures;
@@ -3573,8 +3573,8 @@
     const expectedPiece = promoPiece ? (state.myColor === "w" ? promoPiece.toUpperCase() : promoPiece) : movingPiece;
     const wait = ms => new Promise((resolve, reject) => {
       const signal = action.controller.signal;
-      if (signal.aborted) { reject(new Error("Ввод отменён")); return; }
-      const onAbort = () => { clearTimeout(timer); reject(new Error("Ввод отменён")); };
+      if (signal.aborted) { reject(new Error("Input cancelled")); return; }
+      const onAbort = () => { clearTimeout(timer); reject(new Error("Input cancelled")); };
       const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
       signal.addEventListener("abort", onAbort, { once: true });
     });
@@ -3582,9 +3582,9 @@
       if (activeNativeMove !== action || action.controller.signal.aborted || extensionInvalidated || document.hidden ||
           location.href !== pageUrl || !boardEl?.isConnected || runtime.disposed ||
           (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true) ||
-          (!manualClick && !(isPremove ? premoveEnabled || bulletTurboMode : autoMoveEnabled))) throw new Error("Контекст хода изменился");
-      if ((document.querySelector(".main-board cg-board") || document.querySelector("cg-board")) !== boardEl) throw new Error("Доска была заменена");
-      if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) throw new Error("Рейтинговая партия против человека: автоход заблокирован");
+          (!manualClick && !(isPremove ? premoveEnabled || bulletTurboMode : autoMoveEnabled))) throw new Error("Move context changed");
+      if ((document.querySelector(".main-board cg-board") || document.querySelector("cg-board")) !== boardEl) throw new Error("Board was replaced");
+      if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) throw new Error("Rated game vs human: automove blocked");
     };
     const requireCurrentPosition = () => {
       requireVisibleContext();
@@ -3593,12 +3593,12 @@
       if (!fresh || fresh.animating || fresh.positionKey !== state.positionKey || fresh.boardKey !== state.boardKey ||
           fresh.myColor !== state.myColor || fresh.isBlackOrientation !== state.isBlackOrientation ||
           (isPremove ? fresh.actualTurn === fresh.myColor : fresh.actualTurn !== fresh.myColor) ||
-          !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) throw new Error("Позиция или очередь хода изменилась");
+          !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) throw new Error("Position or move queue changed");
       return fresh;
     };
     const pointFor = square => {
       const rect = boardEl.getBoundingClientRect();
-      if (rect.width < 50 || rect.height < 50) throw new Error("Доска недоступна");
+      if (rect.width < 50 || rect.height < 50) throw new Error("Board unavailable");
       const file = FILES.indexOf(square[0]);
       const rank = Number(square[1]) - 1;
       const col = state.isBlackOrientation ? 7 - file : file;
@@ -3609,20 +3609,20 @@
       requireVisibleContext();
       for (const point of points) {
         const hit = document.elementFromPoint(point.x, point.y);
-        if (!hit || (hit !== target && !target.contains(hit))) throw new Error("Доска перекрыта меню или другим элементом");
+        if (!hit || (hit !== target && !target.contains(hit))) throw new Error("Board covered by menu or another element");
       }
       const result = await runtime.nativeRequest("input.gesture", { action: actionType, points, durationMs: actionType === "tap" ? 80 : 180 });
-      if (result?.ok !== true || result?.dispatched !== true) throw new Error("Android не подтвердил отправку касания");
+      if (result?.ok !== true || result?.dispatched !== true) throw new Error("Android did not confirm touch send");
     };
     const moveConfirmed = fresh => Boolean(fresh && fresh.boardKey !== state.boardKey &&
       fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === expectedPiece);
     setMoveExecutionState(true, isPremove ? "premove-start" : "move-start");
-    setAutoStatusText(`Нативный ввод: ${moveObj.from} -> ${moveObj.to}...`, "#00f5d4");
+    setAutoStatusText(`Native input: ${moveObj.from} -> ${moveObj.to}...`, "#00f5d4");
     try {
       const layout = new Promise(resolve => {
         layoutFrame = requestAnimationFrame(() => { layoutFrame = requestAnimationFrame(resolve); });
       });
-      await Promise.race([layout, wait(400).then(() => { throw new Error("Меню не успело освободить доску"); })]);
+      await Promise.race([layout, wait(400).then(() => { throw new Error("Menu did not free the board in time"); })]);
       boardEl = document.querySelector(".main-board cg-board") || document.querySelector("cg-board");
       requireCurrentPosition();
       const selected = boardEl.querySelector("square.selected:not(.current-premove)");
@@ -3648,7 +3648,7 @@
           if (moveConfirmed(fresh)) break;
           if (fresh && fresh.boardKey !== state.boardKey &&
               !(fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === movingPiece)) {
-            throw new Error("Позиция изменилась до выбора превращения");
+            throw new Error("Position changed before promotion choice");
           }
           const promotionClass = { q: "queen", r: "rook", b: "bishop", n: "knight" }[promoPiece];
           const root = document.querySelector("#promotion-choice, .promotion-choice");
@@ -3670,19 +3670,19 @@
           completed = true;
           break;
         }
-        if (isPremove && fresh?.positionKey !== state.positionKey) throw new Error("Позиция изменилась до подтверждения премува");
+        if (isPremove && fresh?.positionKey !== state.positionKey) throw new Error("Position changed before premove confirmation");
         await wait(75);
       }
-      if (!completed) throw new Error(promoPiece ? "Превращение не подтверждено на доске" : "Касания отправлены, но ход на доске не подтверждён");
+      if (!completed) throw new Error(promoPiece ? "Promotion not confirmed on board" : "Touches sent, but move on board not confirmed");
       if (!isPremove) {
         lastOurExecutedMove = moveObj;
         preparedLookahead = (premoveEnabled || bulletTurboMode) && moveObj.nextPremove?.canPremove ? moveObj.nextPremove : null;
       }
-      setAutoStatusText(`${isPremove ? "Премув установлен" : "Ход подтверждён"}: ${moveObj.from} -> ${moveObj.to}`, "#00f5d4");
+      setAutoStatusText(`${isPremove ? "Premove set" : "Move confirmed"}: ${moveObj.from} -> ${moveObj.to}`, "#00f5d4");
     } catch (error) {
       if (activeNativeMove === action) {
         lastOurExecutedMove = previousMove;
-        setAutoStatusText(`Нативный ввод: ${error.message || "ошибка"}${error.code ? ` [${error.code}]` : ""}`, "#ffbe0b");
+        setAutoStatusText(`Native input: ${error.message || "error"}${error.code ? ` [${error.code}]` : ""}`, "#ffbe0b");
       }
     } finally {
       if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
@@ -3705,7 +3705,7 @@
     if (!moveObj || !/^[a-h][1-8]$/.test(moveObj.from || "") || !/^[a-h][1-8]$/.test(moveObj.to || "") || moveObj.from === moveObj.to) return;
 
     if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Автоход заблокирован: рейтинговая партия против человека. Сходите вручную.", "#ffbe0b");
+      setAutoStatusText("Automove blocked: rated game vs human. Move manually.", "#ffbe0b");
       return;
     }
 
@@ -3722,7 +3722,7 @@
     const isPromotion = movingPiece === "p" && (toSq[1] === "8" || toSq[1] === "1");
     const promoPiece = isPromotion ? String(moveObj.promo || moveObj.uci?.[4] || "q").toLowerCase() : null;
     if (isPromotion && !["q", "r", "b", "n"].includes(promoPiece)) {
-      setAutoStatusText(`Автоход отменён: неизвестное превращение «${promoPiece}»`, "#ff2a85");
+      setAutoStatusText(`Automove cancelled: unknown promotion «${promoPiece}»`, "#ff2a85");
       return;
     }
 
@@ -3730,7 +3730,7 @@
       const uci = `${fromSq}${toSq}${promoPiece || ""}`;
       if (state.actualTurn !== state.myColor ||
           (Array.isArray(cachedMoves.legalUcis) && cachedMoves.legalUcis.length && !cachedMoves.legalUcis.includes(uci))) {
-        setAutoStatusText("Ход отменён: очередь хода или список легальных ходов изменились.", "#ffbe0b");
+        setAutoStatusText("Move cancelled: move queue or legal moves list changed.", "#ffbe0b");
         return;
       }
       executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece);
@@ -3748,7 +3748,7 @@
     moveCooldownUntil = Date.now() + (bulletTurboMode ? 180 : 320);
     const actionPositionId = positionId;
 
-    setAutoStatusText(`Отправка хода: ${fromSq} → ${toSq}...`, "#00f5d4");
+    setAutoStatusText(`Sending move: ${fromSq} → ${toSq}...`, "#00f5d4");
 
     setTimeout(() => {
       if (positionId !== actionPositionId) {
@@ -3786,12 +3786,12 @@
         setMoveExecutionState(false, completed ? "dispatched" : "failed");
         if (!completed) {
           setAutoStatusText(
-            promoPiece ? `Автоход отменён: не удалось безопасно выбрать превращение ${promoPiece.toUpperCase()}` : "Ход отменён: позиция уже изменилась",
+            promoPiece ? `Automove cancelled: could not safely choose promotion ${promoPiece.toUpperCase()}` : "Move cancelled: position already changed",
             "#d9ad58"
           );
           return;
         }
-        setAutoStatusText(`Сделан ход: ${fromSq} → ${toSq}`, "#00f5d4");
+        setAutoStatusText(`Made move: ${fromSq} → ${toSq}`, "#00f5d4");
         triggerDebouncedCycle();
       });
     }, 10);
@@ -4622,7 +4622,7 @@
           ${cornerBrackets(p2.x, p2.y, 44, solidColor, sw * 1.15)}
           ${isBest ? `
             <rect x="${p1.x - 32}" y="${p1.y + 24}" width="64" height="17" rx="5" fill="rgba(8,10,16,0.9)" stroke="${solidColor}" stroke-width="1.5" />
-            <text x="${p1.x}" y="${p1.y + 36}" text-anchor="middle" fill="${solidColor}" font-family="monospace" font-weight="900" font-size="10">СТАРТ</text>
+            <text x="${p1.x}" y="${p1.y + 36}" text-anchor="middle" fill="${solidColor}" font-family="monospace" font-weight="900" font-size="10">START</text>
             <rect x="${p2.x - 38}" y="${p2.y + 24}" width="76" height="18" rx="5" fill="rgba(8,10,16,0.94)" stroke="${solidColor}" stroke-width="1.8" />
             <text x="${p2.x}" y="${p2.y + 36.5}" text-anchor="middle" fill="#ffffff" font-family="monospace" font-weight="900" font-size="10.5">➔ ${m.to.toUpperCase()}</text>
           ` : ""}
@@ -4630,7 +4630,7 @@
       }
 
       if (arrowStyle === "sq_Step_badges") {
-        const tag = isBest ? "ЛУЧШИЙ" : (roleLabel === "avg" ? "2-Я ЛИНИЯ" : "ЗЕВОК");
+        const tag = isBest ? "BEST" : (roleLabel === "avg" ? "2ND LINE" : "BLUNDER");
         return `
           <rect x="${p1.x - 44}" y="${p1.y - 44}" width="88" height="88" rx="14"
                 fill="none" stroke="${solidColor}" stroke-width="${sw * 0.75}" stroke-dasharray="12 6" stroke-opacity="${op * 0.85}" />
@@ -4640,9 +4640,9 @@
           ${isBest ? `
             <g style="animation: cc-marker-float 1.3s ease-in-out infinite;">
               <rect x="${p1.x - 36}" y="${p1.y - 42}" width="72" height="20" rx="6" fill="rgba(7,9,15,0.94)" stroke="${solidColor}" stroke-width="2" />
-              <text x="${p1.x}" y="${p1.y - 28}" text-anchor="middle" fill="${solidColor}" font-family="monospace" font-weight="900" font-size="10.5">1: БЕРИ</text>
+              <text x="${p1.x}" y="${p1.y - 28}" text-anchor="middle" fill="${solidColor}" font-family="monospace" font-weight="900" font-size="10.5">1: TAKE</text>
               <rect x="${p2.x - 42}" y="${p2.y - 42}" width="84" height="22" rx="6" fill="${solidColor}" />
-              <text x="${p2.x}" y="${p2.y - 27}" text-anchor="middle" fill="#05070c" font-family="monospace" font-weight="900" font-size="11">2: СЮДА!</text>
+              <text x="${p2.x}" y="${p2.y - 27}" text-anchor="middle" fill="#05070c" font-family="monospace" font-weight="900" font-size="11">2: HERE!</text>
             </g>
           ` : `
             <rect x="${p2.x - 34}" y="${p2.y + 23}" width="68" height="17" rx="5" fill="rgba(7,9,15,0.9)" stroke="${solidColor}" stroke-width="1.5" />
@@ -4855,7 +4855,7 @@
           <rect x="${p.x - 48}" y="${by - 12}" width="96" height="24" rx="7"
                 fill="rgba(14, 10, 22, 0.96)" stroke="#ffbe0b" stroke-width="2" />
           <text x="${p.x}" y="${by + 4}" text-anchor="middle" fill="#ffbe0b"
-                font-family="monospace" font-weight="900" font-size="11">🪤 ЛОВУШКА ${trapChance}%</text>
+                font-family="monospace" font-weight="900" font-size="11">🪤 TRAP ${trapChance}%</text>
         </g>
       `;
     };
@@ -4952,9 +4952,9 @@
     if (!statusEl) return;
     const statusText = statusEl.innerText || "";
 
-    const whiteWon = statusText.includes("White is victorious") || statusText.includes("Победа белых");
-    const blackWon = statusText.includes("Black is victorious") || statusText.includes("Победа черных");
-    const isDraw = statusText.includes("Stalemate") || statusText.includes("Draw") || statusText.includes("Ничья");
+    const whiteWon = statusText.includes("White is victorious") || statusText.includes("White wins");
+    const blackWon = statusText.includes("Black is victorious") || statusText.includes("Black wins");
+    const isDraw = statusText.includes("Stalemate") || statusText.includes("Draw") || statusText.includes("Draw");
 
     if (!whiteWon && !blackWon && !isDraw) return;
 
@@ -4967,12 +4967,12 @@
       { type: "RECORD_GAME_RESULT", history: sessionMoveHistory, result: outcome },
       (res) => {
         if (res && res.ok) {
-          $("cc-memory-stat").textContent = `${res.positionsCount} ПОЗ.`;
+          $("cc-memory-stat").textContent = `${res.positionsCount} POS.`;
           if ($("cc-misc-db-summary")) {
-            $("cc-misc-db-summary").textContent = `Выучено позиций в памяти: ${res.positionsCount}`;
+            $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
           }
           $("cc-opening-name").textContent =
-            outcome === "win" ? "👑 ПОБЕДА ЗАПИСАНА В БАЗУ" : "◈ ОШИБКИ ПАРТИИ ИЗУЧЕНЫ";
+            outcome === "win" ? "👑 WIN SAVED TO DATABASE" : "◈ GAME ERRORS STUDIED";
         }
       }
     );
@@ -5022,15 +5022,15 @@
         if (res && res.detected) {
           peerExtensionDetected = true;
           const stName = ALL_STYLE_NAMES[res.enemyStyle] || res.enemyStyle;
-          const autoTag = res.enemyAuto ? "🤖 Автоход: ВКЛ" : "🖐 Ходит сам";
+          const autoTag = res.enemyAuto ? "🤖 Automove: ON" : "🖐 Moves himself";
           banner.style.display = "block";
           banner.style.borderColor = "#00f5d4";
           $("cc-peer-detector-title").innerHTML = `
-            <span>👁️ РАДАР СВОИХ: ОБНАРУЖЕН CHESSCOACH!</span>
+            <span>👁️ RADAR OWN: DETECTED CHESSCOACH!</span>
             <span style="background:rgba(0,0,0,0.45); padding:1px 6px; border-radius:4px; font-family:monospace;">⚡ HVH</span>
           `;
           $("cc-peer-detector-text").textContent =
-            `Соперник играет с ChessCoach REWORK! Его профиль: ${stName} (${res.enemyElo} ELO • ${autoTag})`;
+            `Opponent is running ChessCoach REWORK! His profile: ${stName} (${res.enemyElo} ELO • ${autoTag})`;
         }
       }
     );
@@ -5052,11 +5052,11 @@
       banner.style.display = "block";
       banner.style.borderColor = "#ffbe0b";
       $("cc-peer-detector-title").innerHTML = `
-        <span style="color:#ffbe0b;">🕵️ ЧИТ-РАДАР: ПОДОЗРЕНИЕ НА ДВИЖОК!</span>
+        <span style="color:#ffbe0b;">🕵️ CHEAT RADAR: SUSPICION OF ENGINE!</span>
         <span style="background:rgba(0,0,0,0.45); color:#ffbe0b; padding:1px 6px; border-radius:4px; font-family:monospace;">⚠️ BOT?</span>
       `;
       $("cc-peer-detector-text").textContent =
-        `Соперник сделал ${suspectEngineStreak} ходов подряд по 1-й линии без потери оценки (0.00 CP Loss). Высокая вероятность софта!`;
+        `Opponent played ${suspectEngineStreak} moves in a row on 1st line without eval loss (0.00 CP Loss). High chance of software!`;
     }
   }
 
@@ -5174,7 +5174,7 @@
     const isMateIn2 = Boolean(chosenLine.isMate && chosenLine.mateIn === 2);
     const sameAsBase = chosenLine.uci === baseRes.best.uci;
     const evalPawnsStr = chosenLine.isMate
-      ? (chosenLine.mateIn > 0 ? `МАТ #${chosenLine.mateIn}` : `-МАТ #${Math.abs(chosenLine.mateIn)}`)
+      ? (chosenLine.mateIn > 0 ? `MATE #${chosenLine.mateIn}` : `-MATE #${Math.abs(chosenLine.mateIn)}`)
       : (chosenLine.scoreCp / 100).toFixed(2);
     const whiteEval = chosenLine.isMate
       ? (state.sideToAnalyze === "w" ? (chosenLine.mateIn > 0 ? 10 : -10) : (chosenLine.mateIn > 0 ? -10 : 10))
@@ -5261,7 +5261,7 @@
           pvLine: l2.pvChain,
           pureSearchScore: l2.scoreCp,
           evalPawns: l2.isMate
-            ? (l2.mateIn > 0 ? `МАТ #${l2.mateIn}` : `-МАТ #${Math.abs(l2.mateIn)}`)
+            ? (l2.mateIn > 0 ? `MATE #${l2.mateIn}` : `-MATE #${Math.abs(l2.mateIn)}`)
             : (l2.scoreCp / 100).toFixed(2),
           whitePerspectiveEval: l2.isMate
             ? (state.sideToAnalyze === "w" ? (l2.mateIn > 0 ? 10 : -10) : (l2.mateIn > 0 ? -10 : 10))
@@ -5284,10 +5284,10 @@
           ...(mergedWdl || {}),
           serverSource: `${engineLabel} ${workerCount}C • H${wasmOut.hashMb || "?"}M • D${chosenLine.depth || 12} • ${consensusLabel}${sourceSuffix}`,
           nearestThreatText: isMateIn1
-            ? `👑 МАТ В 1 ХОД: ${updatedBest.from}→${updatedBest.to}#`
+            ? `👑 MATE IN 1 MOVE: ${updatedBest.from}→${updatedBest.to}#`
             : (isMateIn2
-                ? `👑 ФОРС. МАТ В 2 ХОДА: ${updatedBest.from}→${updatedBest.to}+`
-                : `План SF LOCAL: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
+                ? `👑 FORCED MATE IN 2 MOVES: ${updatedBest.from}→${updatedBest.to}+`
+                : `SF LOCAL plan: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
         }
       : null;
 
@@ -5318,7 +5318,7 @@
     const requiresFinalDisplay = engineMaxMode || currentElo >= 2000;
     if (requiresFinalDisplay && !res.engineMeta && !res.syzygyActive && !res.best?.fromSyzygy) {
       setAutoStatusText(
-        engineMaxMode ? "♚ ENGINE MAX: ЖДЕМ PRIMARY STOCKFISH..." : "🧠 2000+ ELO: ЖДЕМ ФИНАЛЬНЫЙ STOCKFISH...",
+        engineMaxMode ? "♚ ENGINE MAX: WAITING FOR PRIMARY STOCKFISH..." : "🧠 2000+ ELO: WAITING FOR FINAL STOCKFISH...",
         "#64cdb9"
       );
       return;
@@ -5379,9 +5379,9 @@
     }
 
     if (res.positionsCount !== undefined) {
-      $("cc-memory-stat").textContent = `${res.positionsCount} ПОЗ.`;
+      $("cc-memory-stat").textContent = `${res.positionsCount} POS.`;
       if ($("cc-misc-db-summary")) {
-        $("cc-misc-db-summary").textContent = `Выучено позиций в памяти: ${res.positionsCount}`;
+        $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
       }
     }
 
@@ -5392,12 +5392,12 @@
         const mateTitleEl = $("cc-mate-banner-title");
         if (mateTitleEl) {
           mateTitleEl.textContent = res.best.isMateInOne
-            ? "👑💀 АХАХАХ! МАТ В 1 ХОД НА ДОСКЕ!"
-            : "👑⚡ ФОРСИРОВАННЫЙ МАТ В 2 ХОДА!";
+            ? "👑💀 HAHAHA! MATE IN 1 MOVE ON BOARD!"
+            : "👑⚡ FORCED MATE IN 2 MOVES!";
         }
         $("cc-mate-banner-text").textContent = res.best.isMateInOne
-          ? `Ход ${res.best.from} → ${res.best.to}# ставит чистый МАТ В 1 ХОД! Соперник доигрался!`
-          : `Ход ${res.best.from} → ${res.best.to}+ гарантированно ставит МАТ В 2 ХОДА при любом ответе врага!`;
+          ? `Move ${res.best.from} → ${res.best.to}# delivers clean MATE IN 1 MOVE! Opponent messed up!`
+          : `Move ${res.best.from} → ${res.best.to}+ guaranteed MATE IN 2 MOVES on any enemy reply!`;
       } else {
         mateBanner.style.display = "none";
       }
@@ -5433,13 +5433,13 @@
         bestCard.classList.toggle("cc-trap-card", !isBrilliant && isTrap);
       }
 
-      const styleLabel = ALL_STYLE_NAMES[currentStyle] || "✦ Таль";
+      const styleLabel = ALL_STYLE_NAMES[currentStyle] || "✦ Tal";
       if ($("cc-best-title")) {
         let badgesHtml = "";
-        if (isSyzygy) badgesHtml += `<span class="cc-syzygy-badge">🔮 SYZYGY БОГ</span>`;
-        if (isBrilliant) badgesHtml += `<span class="cc-brilliant-badge">💎 БРИЛЛИАНТ !!</span>`;
-        if (isTrap) badgesHtml += `<span class="cc-trap-badge">🪤 ЛОВУШКА (${res.best.trapChance}%)</span>`;
-        $("cc-best-title").innerHTML = `✦ ЛУЧШИЙ ХОД • ${styleLabel}${badgesHtml}`;
+        if (isSyzygy) badgesHtml += `<span class="cc-syzygy-badge">🔮 SYZYGY GOD</span>`;
+        if (isBrilliant) badgesHtml += `<span class="cc-brilliant-badge">💎 BRILLIANT !!</span>`;
+        if (isTrap) badgesHtml += `<span class="cc-trap-badge">🪤 TRAP (${res.best.trapChance}%)</span>`;
+        $("cc-best-title").innerHTML = `✦ BEST MOVE • ${styleLabel}${badgesHtml}`;
       }
 
       if (!bulletTurboMode && (isDeepPass || res.best.isMateInOne) && isBrilliant && phonkEditEnabled && state.actualTurn === state.myColor && window.ChessFX) {
@@ -5451,28 +5451,28 @@
       const evalPrefix = (getStructuredMateIn(res.best) === null && !res.best.isMateInOne && !res.best.isForcedMateInTwo && !res.best.fromSyzygy && Number.isFinite(numericBestEval) && numericBestEval > 0) ? "+" : "";
       $("cc-best-eval").textContent = `${evalPrefix}${res.best.evalPawns}`;
       $("cc-best-desc").textContent =
-        (improvedByDeep ? "✦ [УЛУЧШЕНО ГЛУБИНОЙ] " : "") + explainWithModule(res.best, "best", state.fen);
-      $("cc-best-pv").textContent = res.best.pvLine ? `◈ Вариант: ${res.best.pvLine}` : "";
+        (improvedByDeep ? "✦ [IMPROVED BY DEPTH] " : "") + explainWithModule(res.best, "best", state.fen);
+      $("cc-best-pv").textContent = res.best.pvLine ? `◈ Line: ${res.best.pvLine}` : "";
 
       const openingCard = $("cc-opening-card");
       const detectedOpening = window.ChessOpenings ? window.ChessOpenings.detect(uciHistoryList) : null;
 
       if (res.syzygyActive && res.best.fromSyzygy) {
         if (openingCard) openingCard.style.borderLeftColor = "#c77dff";
-        $("cc-opening-name").textContent = `🔮 ТАБЛИЦА SYZYGY (${res.pieceCount} ФИГУР НА ДОСКЕ)`;
-        $("cc-opening-plan").textContent = `${res.best.syzygyBadge || "100% математическая точность эндшпиля"}. Движок знает точное число ходов до размена или мата.`;
+        $("cc-opening-name").textContent = `🔮 SYZYGY TABLEBASE (${res.pieceCount} PIECES ON BOARD)`;
+        $("cc-opening-plan").textContent = `${res.best.syzygyBadge || "100% mathematical accuracy endgame"}. Engine knows the exact number of moves until exchange or mate.`;
       } else if (res.isDangerPosition && !res.best.isMateInOne) {
         if (openingCard) openingCard.style.borderLeftColor = "#ff2a85";
-        $("cc-opening-name").textContent = `🛡 АНТИ-МАТ РАДАР: ${res.dangerReason || "УГРОЗА КОРОЛЮ"}!`;
-        $("cc-opening-plan").textContent = `Внимание! Движок обнаружил матовую угрозу соперника и включил глубокий поиск защиты (${res.best.from} → ${res.best.to}).`;
+        $("cc-opening-name").textContent = `🛡 ANTI-MATE RADAR: ${res.dangerReason || "KING THREAT"}!`;
+        $("cc-opening-plan").textContent = `Attention! Engine detected opponent mating threat and enabled deep defense search (${res.best.from} → ${res.best.to}).`;
       } else if (res.hangingSquare && !res.best.isMateInOne) {
         if (openingCard) openingCard.style.borderLeftColor = "#ffbe0b";
-        $("cc-opening-name").textContent = `⚠️ ВНИМАНИЕ: ПОЛЕ ${res.hangingSquare.toUpperCase()} ПОД БОЕМ!`;
-        $("cc-opening-plan").textContent = `Ваша пешка или фигура на клетке ${res.hangingSquare} атакована — защитите или уведите её!`;
+        $("cc-opening-name").textContent = `⚠️ WARNING: SQUARE ${res.hangingSquare.toUpperCase()} UNDER ATTACK!`;
+        $("cc-opening-plan").textContent = `Your pawn or piece on square ${res.hangingSquare} is attacked — defend or move it!`;
       } else {
         if (openingCard) openingCard.style.borderLeftColor = "var(--cc-accent)";
         if (res.best.bookName) {
-          $("cc-opening-name").textContent = `◈ ДЕБЮТ: ${res.best.bookName.split("—")[0].trim()}`;
+          $("cc-opening-name").textContent = `◈ OPENING: ${res.best.bookName.split("—")[0].trim()}`;
           $("cc-opening-plan").textContent = detectedOpening?.plan || res.best.bookName;
         } else if (detectedOpening) {
           $("cc-opening-name").textContent = `◈ ${detectedOpening.name.toUpperCase()}`;
@@ -5492,7 +5492,7 @@
           !res.best.fromSyzygy
         );
         if (!isDeepPass && needsDeepVerification && !isExtremePanicTime) {
-          setAutoStatusText(`🛡 Проверка тактической угрозы глубоким движком...`, "#ffbe0b");
+          setAutoStatusText(`🛡 Checking tactical threats with deep engine...`, "#ffbe0b");
         } else {
           scheduleAutoMoveIfNeeded();
         }
@@ -5555,7 +5555,7 @@
         ...backgroundFresh,
         predictedEnemyMove: localFresh.predictedEnemyMove,
         predictionConfidence: localFresh.predictionConfidence,
-        reasonText: `${backgroundFresh.reasonText} • КНИГА ${localFresh.predictionConfidence}%`
+        reasonText: `${backgroundFresh.reasonText} • BOOK ${localFresh.predictionConfidence}%`
       };
     }
     return selected;
@@ -5578,7 +5578,7 @@
         hideArrows();
       }
       if (standbySub) {
-        standbySub.textContent = "Старые метки очищены. Живая телеметрия выше продолжает следить за часами и угрозами!";
+        standbySub.textContent = "Old markers cleared. Live telemetry above continues watching clocks and threats!";
       }
       return;
     }
@@ -5595,7 +5595,7 @@
         hideArrows();
       }
       if (standbySub) {
-        standbySub.textContent = "Позиция со множеством веток врага — не рискуем слепым премувом, ждем хода!";
+        standbySub.textContent = "Position with many enemy branches — not risking a blind premove, waiting for the move!";
       }
       return;
     }
@@ -5603,7 +5603,7 @@
     if (standbySub) {
       standbySub.innerHTML = `
         <strong>${plan.reasonText}</strong><br>
-        Наш премув: <strong style="color:#c77dff;">${plan.premove.from} → ${plan.premove.to} (${plan.confidence}%)</strong>
+        Our premove: <strong style="color:#c77dff;">${plan.premove.from} → ${plan.premove.to} (${plan.confidence}%)</strong>
       `;
     }
 
@@ -5625,7 +5625,7 @@
         }, 25);
       } else if (lastPremoveSentBoardKey !== state.boardKey) {
         setAutoStatusText(
-          `Прогноз ${plan.premove.from}→${plan.premove.to} (${plan.confidence}% < порога Ур.${premoveRiskLevel})`,
+          `Forecast ${plan.premove.from}→${plan.premove.to} (${plan.confidence}% < Lv. threshold${premoveRiskLevel})`,
           "#94a3b8"
         );
       }
@@ -5774,12 +5774,12 @@
       if (deepBadge) deepBadge.style.display = "none";
       if (standbyBox) {
         standbyBox.style.display = "flex";
-        const mySideText = state.myColor === "w" ? "вы за Белых ⚪" : "вы за Черных ⚫";
-        $("cc-standby-title").textContent = `Ход соперника (${mySideText})`;
+        const mySideText = state.myColor === "w" ? "you are White ⚪" : "you are Black ⚫";
+        $("cc-standby-title").textContent = `Move opponent (${mySideText})`;
       }
       if (activeBox) activeBox.style.display = "none";
       if (autoMoveEnabled && !premoveEnabled && !bulletTurboMode) {
-        setAutoStatusText("Ждем ответа соперника...", "#94a3b8");
+        setAutoStatusText("Waiting for reply opponent...", "#94a3b8");
       }
       committedBoardKey = "";
 
@@ -5815,7 +5815,7 @@
     const fastMeta = createAnalysisMeta(state, "fast", cycleAnalysisId);
     const deepMeta = createAnalysisMeta(state, "deep", cycleAnalysisId);
     activeEngineBoardKey = state.boardKey;
-    const sideText = state.sideToAnalyze === "w" ? "ХОД БЕЛЫХ ⚪" : "ХОД ЧЕРНЫХ ⚫";
+    const sideText = state.sideToAnalyze === "w" ? "WHITE TO MOVE ⚪" : "BLACK TO MOVE ⚫";
     if ($("cc-turn-indicator")) $("cc-turn-indicator").textContent = sideText;
 
     const mySecs = getMyRemainingSeconds();
@@ -5855,7 +5855,7 @@
         if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
         if (!fastRes || !fastRes.best || fastRes.error) {
           activeEngineBoardKey = "";
-          clearPositionPresentation(fastRes?.error ? "ОШИБКА АНАЛИЗА • ПОВТОР..." : "МАТ / ПАТ • НЕТ ХОДОВ");
+          clearPositionPresentation(fastRes?.error ? "ANALYSIS ERROR • RETRY..." : "MATE / STALEMATE • NO MOVES");
           committedBoardKey = state.boardKey;
           boardDirty = false;
           if (fastRes?.error && analysisRetryCount < 5) {
@@ -5881,8 +5881,8 @@
 
         if (deepBadge) {
           deepBadge.textContent = fastRes.isDangerPosition
-            ? "🛡 ПОИСК ЗАЩИТЫ..."
-            : (useStockfishWasm ? "🧠 SF LOCAL + CLOUD..." : "⚡ ДОРАСЧЕТ...");
+            ? "🛡 SEARCHING DEFENSE..."
+            : (useStockfishWasm ? "🧠 SF LOCAL + CLOUD..." : "⚡ DEEP SEARCH...");
           deepBadge.style.display = "inline-block";
         }
         const firstBestUci = fastRes.best ? fastRes.best.uci : "";
@@ -5944,7 +5944,7 @@
               if (!useStockfishWasm) {
                 if (deepBadge) deepBadge.style.display = "none";
                 committedBoardKey = state.boardKey;
-                setAutoStatusText(currentElo >= 2000 || engineMaxMode ? "2000+ ELO требует включённый STOCKFISH LOCAL" : "Анализ не завершён: включите Stockfish или сходите вручную.", "#ffbe0b");
+                setAutoStatusText(currentElo >= 2000 || engineMaxMode ? "2000+ ELO requires STOCKFISH LOCAL enabled" : "Analysis incomplete: enable Stockfish or move manually.", "#ffbe0b");
                 return;
               }
               if (finalEngineRetryCount < 3) {
@@ -5958,7 +5958,7 @@
               } else {
                 if (deepBadge) deepBadge.style.display = "none";
                 committedBoardKey = state.boardKey;
-                setAutoStatusText("STOCKFISH недоступен • автоход заблокирован", "#ff2a85");
+                setAutoStatusText("STOCKFISH unavailable • automove blocked", "#ff2a85");
               }
               return;
             }

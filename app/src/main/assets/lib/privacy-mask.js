@@ -2,17 +2,17 @@
   "use strict";
 
   const PROFILES = Object.freeze([
-    { id: "custom", label: "Свой профиль", nickname: "", elo: 1500, title: "", countryCode: "", avatarUrl: "" },
-    { id: "anonymous", label: "Анонимный стример", nickname: "HiddenKnight", elo: 2400, title: "GM", countryCode: "", avatarUrl: "" },
-    { id: "legend9999", label: "GM 9999 (максимум)", nickname: "Grandmaster9999", elo: 9999, title: "GM", countryCode: "", avatarUrl: "" },
-    { id: "carlsen", label: "Магнус Карлсен", account: "magnuscarlsen", nickname: "MagnusCarlsen", elo: 2882, title: "GM", countryCode: "NO", avatarUrl: "" },
-    { id: "nakamura", label: "Хикару Накамура", account: "hikaru", nickname: "Hikaru", elo: 2802, title: "GM", countryCode: "US", avatarUrl: "" },
-    { id: "caruana", label: "Фабиано Каруана", account: "fabianocaruana", nickname: "FabianoCaruana", elo: 2805, title: "GM", countryCode: "US", avatarUrl: "" },
-    { id: "firouzja", label: "Алиреза Фирузджа", account: "firouzja2003", nickname: "Firouzja2003", elo: 2785, title: "GM", countryCode: "FR", avatarUrl: "" },
-    { id: "nepo", label: "Ян Непомнящий", account: "lachesisq", nickname: "lachesisQ", elo: 2795, title: "GM", countryCode: "RU", avatarUrl: "" },
-    { id: "gukesh", label: "Гукеш Доммараджу", account: "gukeshdommaraju", nickname: "GukeshDommaraju", elo: 2783, title: "GM", countryCode: "IN", avatarUrl: "" },
-    { id: "polgar", label: "Юдит Полгар", account: "juditpolgar", nickname: "JuditPolgar", elo: 2735, title: "GM", countryCode: "HU", avatarUrl: "" },
-    { id: "juwenjun", label: "Цзюй Вэньцзюнь", account: "juwenjun", nickname: "JuWenjun", elo: 2568, title: "GM", countryCode: "CN", avatarUrl: "" }
+    { id: "custom", label: "Own profile", nickname: "", elo: 1500, title: "", countryCode: "", avatarUrl: "" },
+    { id: "anonymous", label: "Anonymous streamer", nickname: "HiddenKnight", elo: 2400, title: "GM", countryCode: "", avatarUrl: "" },
+    { id: "legend9999", label: "GM 9999 (maximum)", nickname: "Grandmaster9999", elo: 9999, title: "GM", countryCode: "", avatarUrl: "" },
+    { id: "carlsen", label: "Magnus Carlsen", account: "magnuscarlsen", nickname: "MagnusCarlsen", elo: 2882, title: "GM", countryCode: "NO", avatarUrl: "" },
+    { id: "nakamura", label: "Hikaru Nakamura", account: "hikaru", nickname: "Hikaru", elo: 2802, title: "GM", countryCode: "US", avatarUrl: "" },
+    { id: "caruana", label: "Fabiano Caruana", account: "fabianocaruana", nickname: "FabianoCaruana", elo: 2805, title: "GM", countryCode: "US", avatarUrl: "" },
+    { id: "firouzja", label: "Alireza Firouzja", account: "firouzja2003", nickname: "Firouzja2003", elo: 2785, title: "GM", countryCode: "FR", avatarUrl: "" },
+    { id: "nepo", label: "Ian Nepomniachtchi", account: "lachesisq", nickname: "lachesisQ", elo: 2795, title: "GM", countryCode: "RU", avatarUrl: "" },
+    { id: "gukesh", label: "Gukesh Dommaraju", account: "gukeshdommaraju", nickname: "GukeshDommaraju", elo: 2783, title: "GM", countryCode: "IN", avatarUrl: "" },
+    { id: "polgar", label: "Judit Polgar", account: "juditpolgar", nickname: "JuditPolgar", elo: 2735, title: "GM", countryCode: "HU", avatarUrl: "" },
+    { id: "juwenjun", label: "Ju Wenjun", account: "juwenjun", nickname: "JuWenjun", elo: 2568, title: "GM", countryCode: "CN", avatarUrl: "" }
   ]);
 
   const STYLES = Object.freeze([

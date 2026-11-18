@@ -12,7 +12,7 @@
   let runtimeIntervalId = null;
   let destroyed = false;
 
-  // HUD региsтрирует sвой закрытый ShadowRoot явно, не затрагивая компоненты sайта.
+  // HUD региstreamрует свой forкрыт ShadowRoot explicitly, not forтрагивая кпоnotнты сайта.
   const registerHudShadow = (root) => {
     if (root instanceof ShadowRoot) hudShadow = root;
   };
@@ -174,7 +174,7 @@
     }
   }
 
-  // ДИНАМИЧЕСКИЙ ЗАГРУЗЧИК SCRIPTОВ ИЗ FOLDER scripts/ NO ПРАВКИ MANIFEST.JSON
+  // ДИONМИЧЕСКИЙ ГРУЗЧИК SCRIPTS OF FOLDER scripts/ БЕЗ ПРАВКИ MANIFEST.JSON
   async function loadScriptFileFromFolder(fileName, saveToList = true) {
     if (destroyed || !isExtensionContextValid()) return false;
     const cleanName = String(fileName || "").trim().replace(/^.*[\\/]/, "");
@@ -197,7 +197,7 @@
       }
       return true;
     } catch (err) {
-      console.warn("[ChessCoach SDK] Could not load scripts/" + cleanName + ". Make sure the file is in the scripts/ folder and you pressed Refresh в chrome://extensions/.", err);
+      console.warn("[ChessCoach SDK] Could not load scripts/" + cleanName + ". Make sure, that file lies in folder scripts/ and you pressed Update in chrome://extensions/.", err);
       return false;
     }
   }
@@ -557,7 +557,7 @@
         const top = document.createElement("div");
         top.style.cssText = "display:flex; justify-content:space-between; font-weight:700;";
         const lbl = document.createElement("span");
-        lbl.textContent = opts.label || "Slider";
+        lbl.textContent = opts.label || "PaulSlider";
         const valSpan = document.createElement("strong");
         valSpan.style.color = "#00f5d4";
         valSpan.textContent = (opts.value ?? opts.min ?? 0) + (opts.unit || "");
@@ -665,7 +665,7 @@
         row.className = "cc-ctrl-row";
 
         const span = document.createElement("span");
-        span.textContent = opts.label || "Hotkey";
+        span.textContent = opts.label || "Hot key";
 
         const bindBtn = document.createElement("button");
         bindBtn.style.cssText =
@@ -877,7 +877,7 @@
     header.className = "cc-script-win-header";
     header.innerHTML =
       '<div style="display:flex; align-items:center; gap:7px;"><span style="width:8px; height:8px; border-radius:50%; background:#00f5d4; box-shadow:0 0 10px #00f5d4;"></span><span>' +
-      (opts.title || "📜 MENU SCRIPT") +
+      (opts.title || "📜 SCRIPT MENU") +
       "</span></div>";
 
     const minBtn = document.createElement("button");
@@ -1452,10 +1452,10 @@
       "</span>" +
       "</div>" +
       "<div style='font-size:10.5px; color:#cbd5e1; margin-bottom:6px; line-height:1.35;'>" +
-      (scriptObj.description || "Custom script from the scripts/ folder") +
+      (scriptObj.description || "Custom script from folders scripts/") +
       "</div>" +
       '<div class="cc-Switch-row" style="padding:2px 0 0 0; border:none;">' +
-      "<span style='font-weight:800; color:#fff;'>⚡ Activate и open window script</span>" +
+      "<span style='font-weight:800; color:#fff;'>⚡ Activate and open script window</span>" +
       "<input type='checkbox' id='cc-script-chk-" +
       scriptObj.id +
       "' " +
@@ -1497,10 +1497,10 @@
       "<span id='cc-script-loader-status' style='color:#00f5d4;'>SDK v2.0 (60 FPS)</span>" +
       "</div>" +
       "<div style='font-size:10.5px; color:#cbd5e1; line-height:1.38; margin-bottom:8px;'>" +
-      "Put any script (example, <code>snake.js</code>) в folder <strong>scripts/</strong>, refresh extension в browser и press the button below, to connect it without replacement <code>sample.js</code>:" +
+      "Place any script (for example, <code>snake.js</code>) in folder <strong>scripts/</strong>, refresh extension in browser and press button below, to underkey his without replacement <code>sample.js</code>:" +
       "</div>" +
       '<div class="cc-actions-bar">' +
-      '<button class="cc-btn cc-btn-primary" id="cc-add-script-file-btn">📂 CONNECT .JS FROM SCRIPTS/ FOLDER</button>' +
+      '<button class="cc-btn cc-btn-primary" id="cc-add-script-file-btn">📂 CONNECT .JS FROM SCRIPTS FOLDER/</button>' +
       '<button class="cc-btn cc-btn-danger" id="cc-reset-script-files-btn">🗑 RESET LIST</button>' +
       "</div>" +
       '<input type="file" id="cc-script-file-picker" accept=".js" multiple style="display:none;" />' +
@@ -1529,8 +1529,8 @@
         }
         if (statusEl) {
           statusEl.textContent = loadedCount > 0
-            ? "✅ DISABLED: " + loadedCount + " SCRIPT(S)"
-            : "⚠️ FIRST UPDATE THE EXTENSION В CHROME://EXTENSIONS";
+            ? "✅ ENABLED: " + loadedCount + " SCRIPT(S)"
+            : "⚠️ UPDATE THE EXTENSION IN CHROME FIRST://EXTENSIONS";
           statusEl.style.color = loadedCount > 0 ? "#38b000" : "#ffbe0b";
         }
       });
@@ -1541,7 +1541,7 @@
         try {
           chrome.storage?.local?.set({ cc_custom_script_files: [] }, () => {
             if (statusEl) {
-              statusEl.textContent = "🔄 LIST CLEARED (REFRESH THE PAGE)";
+              statusEl.textContent = "🔄 LIST CLEARED (UPDATE PAGE)";
               statusEl.style.color = "#ff4d94";
             }
           });

@@ -2,63 +2,63 @@ window.ChessOpenings = {
   database: [
     {
       id: "italian",
-      name: "Italian game",
+      name: "Italian Game",
       moves: "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5",
-      plan: "We control center, aim к f7 и prepare advance c3 + d4."
+      plan: "We control the center, aim at f7 and prepare the c3 + d4 advance."
     },
     {
       id: "spanish",
-      name: "Spanish game (Ruy Lopez)",
+      name: "Spanish Game (Ruy Lopez)",
       moves: "e2e4 e7e5 g1f3 b8c6 f1b5",
-      plan: "Pressure on knight c6, quickly castle и prepare seizure of center."
+      plan: "Pressure on knight c6, castle quickly and prepare seizure of the center."
     },
     {
       id: "scotch",
-      name: "Scotch game",
+      name: "Scotch Game",
       moves: "e2e4 e7e5 g1f3 b8c6 d2d4",
-      plan: "Immediately open center and open lines for bishops and queen."
+      plan: "Now we open the center and open lines for bishops and queen."
     },
     {
       id: "petrov",
-      name: "Russian game (Petroff Defense)",
+      name: "Russian Game (Defense Petroff)",
       moves: "e2e4 e7e5 g1f3 g8f6",
-      plan: "Counterattack on the e4 pawn and solid symmetrical fight for the center."
+      plan: "Counterattack on pawn e4 and solid symmetric fight for center."
     },
     {
       id: "vienna",
       name: "Vienna game",
       moves: "e2e4 e7e5 b1c3",
-      plan: "We reinforce e4 и prepare active break on kingside flank."
+      plan: "We reinforce e4 and prepare an active break on the kingside flank."
     },
     {
       id: "sicilian",
-      name: "Sicilian defense",
+      name: "Sicilian Defense",
       moves: "e2e4 c7c5",
-      plan: "Sharp fight: black control the square d4 и prepare counterplay on line «c»."
+      plan: "Sharp fight: Black control d4 and prepare counterplay on the c-file."
     },
     {
       id: "sicilian_najdorf",
-      name: "Sicilian: Najdorf Variation",
+      name: "Sicilian: Variation OnNajdorf",
       moves: "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6",
-      plan: "We take away square b5 и prepare counter strike e7-e5 or b7-b5."
+      plan: "We take away b5 and prepare the counter strike e7-e5 or b7-b5."
     },
     {
       id: "sicilian_dragon",
-      name: "Sicilian: Dragon Variation",
+      name: "Sicilian: Variation Dragonon",
       moves: "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 g7g6",
-      plan: "Bishop black s g7 rakes long diagonal, play goes on counter courses."
+      plan: "Bishop Black with g7 aboutrakes long diagonal, game goes on counter courses."
     },
     {
       id: "sicilian_alapin",
-      name: "Sicilian: Alapin Variation",
+      name: "Sicilian: Variation Alapinon",
       moves: "e2e4 c7c5 c2c3",
-      plan: "White build powerful pawn center d2-d4, black counterattack via d5 or Nf6."
+      plan: "White build powerful pawn center d2-d4, black counterattack through d5 or Nf6."
     },
     {
       id: "caro_kann",
       name: "Caro-Kann Defense",
       moves: "e2e4 c7c6 d2d4 d7d5",
-      plan: "Reliable pawn triangle black и free develop light-squared bishop c8."
+      plan: "Reliable Black pawn triangle and free development of the light-squared bishop on c8."
     },
     {
       id: "french",
@@ -70,169 +70,169 @@ window.ChessOpenings = {
       id: "scandinavian",
       name: "Scandinavian Defense",
       moves: "e2e4 d7d5 e4d5",
-      plan: "Immediate exchange of central e4 pawn and rapid piece development."
+      plan: "Immediate exchange of the central e4 pawn and rapid piece development."
     },
     {
       id: "queens_gambit",
       name: "Queen's Gambit",
       moves: "d2d4 d7d5 c2c4",
-      plan: "Undermine d5 pawn, seize the center and pressure the c-file."
+      plan: "Break pawns d5, seizure center and pressure by file «c»."
     },
     {
       id: "london",
       name: "London System",
       moves: "d2d4 d7d5 g1f3 g8f6 c1f4",
-      plan: "Solid pawn pyramid d4-c3-e3, bishop on f4 and knight on e5 outpost."
+      plan: "Solid pyramidyes pawns d4-c3-e3, bishop on f4 and setup knight on outpost e5."
     },
     {
       id: "kings_indian",
       name: "King's Indian Defense",
       moves: "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7",
-      plan: "Fianchetto bishop on g7, break e7-e5 and kingside attack."
+      plan: "Fianchetto bishop on g7, breakthrough e7-e5 and attack on kingside flank."
     },
     {
       id: "grunfeld",
       name: "Grünfeld Defense",
       moves: "d2d4 g8f6 c2c4 g7g6 b1c3 d7d5",
-      plan: "Direct piece pressure on White's center with g7 bishop and c7-c5."
+      plan: "Direct pieces underbreak white center bishop with g7 and move c7-c5."
     },
     {
       id: "nimzo_indian",
       name: "Nimzo-Indian Defense",
       moves: "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4",
-      plan: "Pin on c3 knight and fight for key central square e4."
+      plan: "Pin knight c3 and fight for the key central square e4."
     },
     {
       id: "dutch",
       name: "Dutch Defense",
       moves: "d2d4 f7f5",
-      plan: "Firm grip on e4 and prepare kingside attack."
+      plan: "Hard squeeze squares e4 and preparation attack on kingside flank."
     },
     {
       id: "english",
       name: "English Opening",
       moves: "c2c4",
-      plan: "Flexible flank control of center and pressure on d5."
+      plan: "Flexible control center with flank and pressure on square d5."
     },
     {
       id: "evans",
       name: "🔥 Evans Gambit",
       moves: "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 b2b4",
-      plan: "Sacrifice b4 pawn for instant center seizure with c3 and d4."
+      plan: "We sacrifice pawn b4 for instant seizure of the center moves c3 and d4."
     },
     {
       id: "fried_liver",
-      name: "⚔ Fried Liver Attack",
+      name: "⚔ Attack Fried Liver (Fried Liver)",
       moves: "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5",
-      plan: "Direct knight and bishop strike on f7. Pressure the king in the center."
+      plan: "Direct strike knight and bishop on square f7. Yes on king in the center."
     },
     {
       id: "morra",
       name: "⚡ Morra Gambit",
       moves: "e2e4 c7c5 d2d4 c5d4 c2c3",
-      plan: "Pawn sacrifice in the Sicilian for rapid development and open c- and d-files."
+      plan: "Sacrifice pawns in Sicilianor for fast development pieces and open lines «c» and «d»."
     },
     {
       id: "kings_gambit",
       name: "👑 King's Gambit",
       moves: "e2e4 e7e5 f2f4",
-      plan: "Open the f-file for the rook and seize the center with d4."
+      plan: "We open file «f» for rook and seizure center pawn d4."
     },
     {
       id: "danish",
-      name: "⚔ Danish Gambit",
+      name: "⚔ Northern (Yes) gambit",
       moves: "e2e4 e7e5 d2d4 e5d4 c2c3",
-      plan: "Give up pawns for two sniper bishops on c4 and b2 raking the kingside."
+      plan: "We open lines for two bishop-snipers on c4 and b2, raking the kingside flank."
     },
     {
       id: "budapest",
-      name: "⚡ Budapest Gambit",
+      name: "⚡ Budapest gambit",
       moves: "d2d4 g8f6 c2c4 e7e5",
-      plan: "Black sacrifices a central pawn for a tempo piece attack."
+      plan: "Black sacrifices a central pawn for piece tempo and attack."
     },
     {
       id: "albin",
-      name: "⚡ Albin Countergambit",
+      name: "⚡ Countergambit Albinon",
       moves: "d2d4 d7d5 c2c4 e7e5",
-      plan: "Undermine White's center aiming to push d4 and cramp development."
+      plan: "Break White center with the idea of pushing d4 and cramping their development."
     },
     {
       id: "alien",
       dubious: true,
-      name: "👽 Alien Gambit",
+      name: "👽 Alien gambit (Alien Gambit)",
       moves: "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 g8f6 e4g5 h7h6 g5f7",
-      plan: "Bold knight sacrifice on f7! Deprive Black's king of castling, lure it в center и attack all pieces (Bc4, Qh5, Nf3)."
+      plan: "Bold sacrifice knight on f7! deprive Black's king of castling, lure it to the center and attack with all pieces (Bc4, Qh5, Nf3)."
     },
     {
       id: "alien_prep",
       dubious: true,
-      name: "👽 Preparing the Alien Gambit",
+      name: "👽 Alien Gambit setup",
       moves: "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 g8f6 e4g5",
-      plan: "We provoke move h7-h6, to blow up position with a sacrifice of knight Nxf7! If black play e6 — we develop bishop to c4 and queen to e2."
+      plan: "We provoke move h7-h6, to bloblow up the position with knight sacrifice Nxf7! If Black plays e6 — develop bishop to c4 and queen to e2."
     },
     {
       id: "halloween",
       dubious: true,
-      name: "🎃 Halloween Gambit",
+      name: "🎃 Gambit Halloween (Halloween Gambit)",
       moves: "e2e4 e7e5 g1f3 b8c6 b1c3 g8f6 f3e5",
-      plan: "Shocking sacrifice of a whole knight for a pawn! Push d2-d4 and e4-e5, driving both Black knights back."
+      plan: "Shocking sacrifice of the target knight for a pawn! We push d2-d4 and e4-e5, driviving both knights Black on starting squares."
     },
     {
       id: "scandi_icbm",
       dubious: true,
-      name: "🚀 Tennison Gambit (ICBM Rocket)",
+      name: "🚀 Tennison Gambit (ICBM )",
       moves: "e2e4 d7d5 g1f3 d5e4 f3g5",
-      plan: "Attack e4: after Nf6 d3 exd3 Bxd3 prepare Bg6 trap winning Black queen on d8!"
+      plan: "We attack the e4 pawn: after Nf6 d3 exd3 Bxd3 prepare trap Bg6 winning the black queen on d8!"
     },
     {
       id: "tennison_nf3",
       dubious: true,
-      name: "🚀 Tennison Gambit (via 1. Nf3)",
+      name: "🚀 Tennison Gambit (through 1. Nf3)",
       moves: "g1f3 d7d5 e2e4",
-      plan: "Sacrifice a pawn for rapid seizure of g5 and c4 aiming at f7."
+      plan: "We sacrifice pawn for rapid seizure of squares g5 and c4 with focus on square f7."
     },
     {
       id: "nakhmanson",
       dubious: true,
-      name: "💥 Nachmanson Gambit",
+      name: "💥 Gambit Nachmanson",
       moves: "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d4 e5d4 e1g1 f6e4 b1c3",
-      plan: "Total tactical meat grinder: give the c3 knight too for crushing open e-file against Black king!"
+      plan: "Total tactical meat grinder: press still and knight on c3 for crushing opening lines «e» about king Black!"
     },
     {
       id: "stafford",
       dubious: true,
-      name: "⚡ Stafford Gambit",
+      name: "⚡ Gambit Staffordyes",
       moves: "e2e4 e7e5 g1f3 g8f6 f3e5 b8c6",
-      plan: "Trap for Black: after Nxc6 dxc6 immediately develop bishop to c5, queen to d4 and knight to g4 with mating threats."
+      plan: "Trap for Black: after Nxc6 dxc6 instantly we develop bishop on c5, queen on d4 and knight on g4 with mate threats."
     },
     {
       id: "traxler",
       dubious: true,
-      name: "🔥 Traxler Counterattack",
+      name: "🔥 Counterattack Traxler",
       moves: "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 f8c5",
-      plan: "Ignore the hit on f7 and sacrifice bishop Bxf2+, dragging White king under mating attack with queen and knight!"
+      plan: "We ignore strike on f7 and we ourselves sacrifice bishop Bxf2+, dragging white king under mate attack queen and knight!"
     },
     {
       id: "englund",
       dubious: true,
-      name: "💣 Gambit Englund",
+      name: "💣 Gambit Englundyes",
       moves: "d2d4 e7e5",
-      plan: "Explosive reply against 1. d4: we sacrifice pawn, to seize initiative with queen on e7 and bishop on b4."
+      plan: "Explosive reply against 1. d4: we sacrifice pawn, to seize initiative queen on e7 and bishop on b4."
     },
     {
       id: "blackburne",
       dubious: true,
-      name: "🪤 Blackburne-Shilling Gambit",
+      name: "🪤 Gambit Blackburne-Shilling",
       moves: "e2e4 e7e5 g1f3 b8c6 f1c4 c6d4",
-      plan: "Cunning trap: if white greedily capture Nxe5, should Qg5! s double attack on g2 и knight."
+      plan: "Cunning trap: if white greedily take Nxe5, should Qg5! with double attack on g2 and knight."
     }
   ],
 
   detect(uciMoveList) {
     if (!Array.isArray(uciMoveList) || uciMoveList.length === 0) {
       return {
-        name: "Start game",
-        plan: "Occupy the center with pawns e4 or d4, develop light pieces and prepare castling.",
+        name: "Start of game",
+        plan: "Occupy center pawns e4 or d4, develop light pieces and prepare castling.",
         inBook: true
       };
     }
@@ -271,14 +271,14 @@ window.ChessOpenings = {
     if (futureMatches > 0) {
       return {
         name: "Opening preparation",
-        plan: `Position matches s ${futureMatches} opening branches. Don't name the variation until the defining move opponent.`,
+        plan: `Position matches ${futureMatches} opening branches. Don't name the variation until the opponent's defining move opponent.`,
         inBook: true
       };
     }
 
     return {
       name: "Middlegame • Active phase",
-      plan: "Look for checks, captures and double attacks. Put the rook on open files.",
+      plan: "Look for checks, captures and double attacks. Put rook on open lines.",
       inBook: false
     };
   }

@@ -169,7 +169,7 @@ window.ChessExplainer = (function () {
   }
 
   function explainMove(m, category, fen = "", style = "tal", roflMode = false) {
-    if (!m) return "Waiting your move...";
+    if (!m) return "Waiting for your move...";
 
     const pName = PIECE_NAMES[m.piece] || "Piece";
     const capAcc = m.captured ? PIECE_GENITIVE[m.captured] || "piece" : "";
@@ -207,30 +207,30 @@ window.ChessExplainer = (function () {
         return `🪤 ${header} — TRAP (Chance of enemy error: ${m.trapChance}%)! ${m.trapSubtitle}`;
       }
       if (m.promo === "n") {
-        return `⚔ ${header} — Tactical promotion to Knight! Instead of queen we put knight with a fork or mating threat.`;
+        return `⚔ ${header} — Tactical underpromotion to Knight! Instead of queen we put a knight with a fork or mating threat.`;
       }
       if (m.promo === "q") {
-        return `👑 ${header} — We promote the pawn to a new Queen and get a decisive material advantage!`;
+        return `👑 ${header} — Aboutbring pawn in new Queen and we get decisive matematerial advantage!`;
       }
       if (m.isEnPassant) {
-        return `⚡ ${header} — Capture on passant (En Passant)! We remove s board passed-over pawn opponent.`;
+        return `⚡ ${header} — Capture en passant! We remove from the boardtpassed pawn opponent.`;
       }
 
       if (style === "mogging" || roflMode) {
         if (m.isTalSacrifice || m.isSacrifice) {
-          return `⚡ ${header} — Sound tactical sacrifice! Open king's cover s objective advantage.`;
+          return `⚡ ${header} — Sound tactical sacrifice! We open the king's cover with objective advantage.`;
         }
         if (m.isFork) {
-          return `⚔ ${header} — Brutal fork on two pieces! One will have to say goodbye.`;
+          return `⚔ ${header} — Hard fork on two pieces! One will have to say goodbye.`;
         }
         if (m.isPin) {
-          return `◈ ${header} — Device pin completely. Piece opponent paralyzed.`;
+          return `◈ ${header} — or pin ondead. Piece opponent paralyzed.`;
         }
         if (m.captured) {
-          return `✦ ${header} — Taking ${capAcc} on ${m.to} and pressing further.`;
+          return `✦ ${header} — Taking ${capAcc} on ${m.to} and yes yes.`;
         }
         if (m.kicksEnemyPiece) {
-          return `▲ ${header} — Kicking the enemy piece with a pawn and gaining tempo.`;
+          return `▲ ${header} — Kicking the enemy piece with a pawn and we take tempo.`;
         }
       }
 
@@ -238,19 +238,19 @@ window.ChessExplainer = (function () {
         return `◈ ${header} — ${m.bookName}.`;
       }
       if (m.savedHangingPiece) {
-        return `🛡 ${header} — Saving piece or pawn from a direct attack.`;
+        return `🛡 ${header} — Saving piece or pawn from under a direct attack.`;
       }
       if (m.isTalSacrifice || m.isSacrifice) {
-        return `⚡ ${header} — Calculated tactical sacrifice to break through to the king.`;
+        return `⚡ ${header} — Calculated tactical sacrifice for breakthrough to the king.`;
       }
       if (m.isFork) {
-        return `⚔ ${header} — Double attack (fork) on two targets at once.`;
+        return `⚔ ${header} — Double attack (fork) immediately by two targets.`;
       }
       if (m.isPin) {
-        return `◈ ${header} — Pinning the opponent's piece on the king or queen line.`;
+        return `◈ ${header} — We pin piece opponent by lines king or queen.`;
       }
       if (m.isCastling) {
-        return `🛡 ${header} — Castling: hide the king and bring the rook into play.`;
+        return `🛡 ${header} — Castling: hide king and we bring rook in play.`;
       }
       if (m.captured && m.givesCheck) {
         return `⚡ ${header} — Taking ${capAcc} on ${m.to} with check!`;
@@ -259,50 +259,50 @@ window.ChessExplainer = (function () {
         return `✦ ${header} — Winning ${capAcc} or making a favorable exchange on ${m.to}.`;
       }
       if (m.kicksEnemyPiece) {
-        return `▲ ${header} — We drive away piece enemy s loss of tempo.`;
+        return `▲ ${header} — We drive piece enemy with loss of tempo.`;
       }
       if (m.givesCheck) {
-        return `⚡ ${header} — Attacking check to the king seizing the initiative.`;
+        return `⚡ ${header} — Attacking check king with seizing the initiative.`;
       }
       if (motifs.isSeventhRankInvasion) {
-        return `▲ ${header} — Breaking into the 7th rank after enemy pawns.`;
+        return `▲ ${header} — Breaking in in «7th rank» for pawns enemy.`;
       }
       if (motifs.isOpenFile || motifs.isSemiOpenFile) {
-        return `◈ ${header} — Seizing the ${m.to[0]}-file with a heavy piece.`;
+        return `◈ ${header} — We seize file «${m.to[0]}» heavy piece.`;
       }
       if (motifs.isBattery) {
-        return `❖ ${header} — Building a powerful battery on one line.`;
+        return `❖ ${header} — Building powerful battery on one line.`;
       }
       if (motifs.isOutpost) {
-        return `✦ ${header} — Planting a piece on the strong protected outpost ${m.to}.`;
+        return `✦ ${header} — Planting piece on powerful protected outpost ${m.to}.`;
       }
       if (motifs.isFianchetto) {
-        return `◈ ${header} — Developing the bishop onto the long diagonal.`;
+        return `◈ ${header} — Developing the bishop on long diagonal.`;
       }
       if (motifs.challengesEnemyPawn) {
-        return `▲ ${header} — Undermining the opponent's pawn center.`;
+        return `▲ ${header} — Undermining the pawn center opponent.`;
       }
       if (motifs.isPassedPawn) {
-        return `▲ ${header} — We push passed pawn toward promotion.`;
+        return `▲ ${header} — Push passed pawn forward toward queens.`;
       }
       if (motifs.isDevelopment) {
-        return `✦ ${header} — Quickly prepare piece into play closer to center.`;
+        return `✦ ${header} — Quickly bringing the piece into play closer to the center.`;
       }
       if (m.piece === "p" && motifs.isCenterControl) {
-        return `✦ ${header} — We seize center board and open line.`;
+        return `✦ ${header} — We seize center board and we open lines.`;
       }
-      return `✦ ${header} — Strong positional move: we improve pieces и increase pressure.`;
+      return `✦ ${header} — Strong positional move: we improve pieces and increase pressure.`;
     }
 
     if (category === "avg") {
       if (m.isTrap && m.trapChance >= 75) {
-        return `🪤 ${header} — Sharp alternative trap (Chance of enemy error: ${m.trapChance}%).`;
+        return `🪤 ${header} — Sharp alternative trap (Chance errors enemy: ${m.trapChance}%).`;
       }
       if (m.promo === "q") {
-        return `❖ ${header} — Promotion to Queen transitioning into a calm won endgame.`;
+        return `❖ ${header} — Promotion in Queen with remove in calm won endgame.`;
       }
       if (m.isEnPassant) {
-        return `❖ ${header} — En passant capture relieving the center.`;
+        return `❖ ${header} — Capture pawns on passant with relieving center.`;
       }
       if (m.bookName) {
         return `❖ ${header} — Quiet theoretical continuation (${m.bookName}).`;
@@ -315,21 +315,21 @@ window.ChessExplainer = (function () {
 
     if (category === "worst") {
       if (m.causesStalemate) {
-        return `✖ ${header} — DANGER STALEMATE! Leaves opponent king without moves and gives away a draw 1/2 in a won position!`;
+        return `✖ ${header} — DANGER STALSTALEMATE! Leaves opponent king without moves and gives a draw 1/2 in won position!`;
       }
       if (m.isRepetitionDrawRisk) {
-        return `✖ ${header} — Position repetition! Leads to threefold repetition and loss of the win.`;
+        return `✖ ${header} — Repetition position! Leads to threefold repetition and loss of victory.`;
       }
       if (m.underDirectAttack) {
-        return `✖ ${header} — Crude blunder! Hangs piece or pawn under attack on ${m.to}.`;
+        return `✖ ${header} — Crude blunder! Hangs piece or pawn under play on ${m.to}.`;
       }
       if (m.ignoredHangingPiece) {
         return `✖ ${header} — Leaves your attacked piece without defense.`;
       }
       if (m.ruinedCastling) {
-        return `✖ ${header} — Deprives the king of castling in a dangerous center.`;
+        return `✖ ${header} — deprives king castling in a safe center.`;
       }
-      return `✖ ${header} — Weak move: loses time and gives away the initiative.`;
+      return `✖ ${header} — Weak move: loses time and gives away initiative.`;
     }
   }
 
@@ -344,16 +344,16 @@ window.ChessExplainer = (function () {
     if (weHaveMateInOne) {
       return {
         emoji: "😱",
-        badgeText: "BLUNDERED FORCED MATE! 😂💀",
+        badgeText: "BLUNDER FORCED MATE! 😂💀",
         text: `😱💀 ${moveStr} — HAHAHA! Dude really blundered forced MATE! Book him a ticket to the lobby!`
       };
     }
 
     if (drop >= 2.0) {
       const blunders = [
-        `💀 ${moveStr} (-${drop.toFixed(1)}) — Firm blunder! Opponent gifted advantage in an equal position.`,
-        `😂 ${moveStr} (-${drop.toFixed(1)}) — Classical boost from opponent, we punish!`,
-        `🤡 ${moveStr} (-${drop.toFixed(1)}) — Collapsed their position with one move.`
+        `💀 ${moveStr} (-${drop.toFixed(1)}) — Hard blunder! Opponent gifted advantage on equal place.`,
+        `😂 ${moveStr} (-${drop.toFixed(1)}) — Classical gift from opponent, we punish!`,
+        `🤡 ${moveStr} (-${drop.toFixed(1)}) — collapsed own position one move.`
       ];
       return {
         emoji: "💀",
@@ -366,15 +366,15 @@ window.ChessExplainer = (function () {
       return {
         emoji: "😂",
         badgeText: `MISTAKE • -${drop.toFixed(1)}`,
-        text: `😂 ${moveStr} (-${drop.toFixed(1)}) — Inaccurate move, we seize initiative!`
+        text: `😂 ${moveStr} (-${drop.toFixed(1)}) — No move, we seize initiative!`
       };
     }
 
     if (oppMove.piece === "p" && (oppMove.to[0] === "a" || oppMove.to[0] === "h")) {
       return {
         emoji: "◈",
-        badgeText: "PASSIVE ON THE EDGE",
-        text: `◈ ${moveStr} — Wastes time on the edge of the board; we take the center.`
+        badgeText: "PASSIVE ON EDGE",
+        text: `◈ ${moveStr} — Wastes time on edge board, we take center.`
       };
     }
 

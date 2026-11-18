@@ -53,7 +53,7 @@ window.ChessFX = (function (existing) {
   }
 
   /**
-   * ТАКТИЧЕСКИЙ АУДИО-RADAR
+   * TACTICAL АУДИО-RADAR
    * @param {"blunder" | "mate_lock" | "trap"} type
    * @param {string} boardKey
    */
@@ -69,7 +69,7 @@ window.ChessFX = (function (existing) {
       const now = ctx.currentTime;
 
       if (type === "mate_lock") {
-        // Звук захвата цели (Cyberpunk Target Lock для Mate в 1-2 move)
+        // Звук seizure of targetи (Cyberpunk Target Lock for mate in 1-2 move)
         const freqs = [880, 1174.66, 1760];
         freqs.forEach((f, idx) => {
           const osc = ctx.createOscillator();
@@ -92,8 +92,8 @@ window.ChessFX = (function (existing) {
       }
 
       if (type === "blunder") {
-        // Тихий криsтальный пинг, когда opponent допуsтил грубый blunder (drop >= 2.0 pawns)
-        const notes = [1318.51, 1975.53]; // E6 -> B6 криsтальный интервал
+        // Тих curvesсталь пинг, when opponent допусл груб blunder (drop >= 2.0 pawns)
+        const notes = [1318.51, 1975.53]; // E6 -> B6 curvesсталь интервал
         notes.forEach((f, idx) => {
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
@@ -114,7 +114,7 @@ window.ChessFX = (function (existing) {
       }
 
       if (type === "trap") {
-        // Короткий импульs обнарalreadyния traps
+        // Core импульс обonрedия traps
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = "sine";
@@ -278,7 +278,7 @@ window.ChessFX = (function (existing) {
       if (overlay) overlay.remove();
       const testBtn = targetShadowRoot.getElementById("cc-test-phonk-btn");
       if (testBtn) {
-        testBtn.textContent = "🔥 TEST BACKGROUND-EDIT (15 SEC)";
+        testBtn.textContent = "🔥 TEST EFFECTS-EDIT (15 SEC)";
       }
     }
     activeShadowRoot = null;
@@ -304,7 +304,7 @@ window.ChessFX = (function (existing) {
 
     const testBtn = shadowRoot.getElementById("cc-test-phonk-btn");
     if (testBtn) {
-      testBtn.textContent = "⏹ STOP BACKGROUND EDIT [ESC]";
+      testBtn.textContent = "⏹ STOP BACKGROUND-EDIT [ESC]";
     }
 
     const overlay = document.createElement("div");
@@ -588,7 +588,7 @@ window.ChessFX = (function (existing) {
               fill="rgba(16, 12, 20, 0.96)" stroke="#ffbe0b" stroke-width="3" />
         <text x="${bannerX}" y="${bannerY + 2}" text-anchor="middle" fill="#ffbe0b"
               font-family="-apple-system, sans-serif" font-weight="900" font-size="16">
-          💀 MATE В 1 MOVE! 😂
+          💀 MATE IN 1 MOVE! 😂
         </text>
       </g>
     `;

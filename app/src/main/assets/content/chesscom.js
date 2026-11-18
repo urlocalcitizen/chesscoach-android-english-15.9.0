@@ -80,15 +80,17 @@
   ]);
   const storageKey = key => `${STORAGE_PREFIX}${key}`;
 
-  // На Chess.com доsтупны only safe профor: "legit" (by default) и "all" (раsширенный legit)
+  // on Chess.com boardтупны only safe aboutфor: "legit" (by default) and "all" (advanced legit)
   let workMode = "legit";
+  let mobilePreferenceUnsubscribe = null;
+  let mobilePreferenceLoad = 0;
   let activeTabId = "analyzer";
   let panelLeft = null;
   let panelTop = null;
   let panelMinimized = false;
   let panelHidden = false;
 
-  // Custom фон из проводника
+  // Custom background from aboutводни
   let customBgDataUrl = "";
   let customBgDim = 0.72;
   let customBgBlur = 4;
@@ -108,7 +110,7 @@
     nearestThreatText: "Waiting for game start on Chess.com..."
   };
 
-  // СТАТИСТИКА FAIR PLAY ANTI-BAN (Контроль T1% matches sо Stockfish)
+  // СТАТИСТИMAP FAIR PLAY ANTI-BANon (Ктроль T1% matches со Stockfish)
   let legitStats = {
     totalMyMoves: 0,
     top1Matches: 0,
@@ -134,12 +136,12 @@
   let heatmapAlwaysOn = false;
   let isAltPressed = false;
 
-  // Settings Беsпалевного Legit-Automove для Chess.com
+  // Settings Stealthго Legit-Automove for Chess.com
   let autoMoveEnabled = false;
   let legitAutoTiming = true;
-  let humanHesitationEnabled = true; // Имитация задумчивоsти в sложных positionх
-  let autoT1LimiterEnabled = true;   // Auto-удержание T1% ниже 68%
-  let maxSafeT1Percent = 66;         // Порог T1%, above которого форsируетsя 2nd line
+  let humanHesitationEnabled = true; // Imitation forдчивос in слож positionх
+  let autoT1LimiterEnabled = true;   // Auto-удержан T1% ни 68%
+  let maxSafeT1Percent = 66;         // Lossог T1%, above кfromоthresholdо форсируется 2nd line
   let autoMoveDelayMs = 540;
   let autoMoveJitterMs = 260;
   let autoMoveTriggerRate = 85;
@@ -155,7 +157,7 @@
   let phonkEditEnabled = false;
   let mateStyle = "phonk_skull";
   let roflMode = true;
-  let safeAntiBanGuard = true;
+  let safeAntiBanGuard = false;
   let welcomeBannerHidden = false;
 
   const DEFAULT_VISUAL_MASK = Object.freeze({
@@ -228,6 +230,8 @@
   let activeNativeMove = null;
   let nativeMoveFailureKey = "";
   let nativeMoveFailures = 0;
+  let nativeMoveBlockedKey = "";
+  let nativeMoveBlockedState = null;
   let moveCooldownUntil = 0;
   let currentTurnDecision = {
     boardKey: "",
@@ -249,6 +253,12 @@
   let contentInstanceHandle = null;
   let mainIntervalId = null;
   let neuralCanvasRafId = null;
+  const mobileSession = window.__CC_ANDROID_GAME_SESSION__ || null;
+  let unregisterMobileCore = null;
+  let mobileAnalysisLease = null;
+  let mobilePollTimer = null;
+  let cycleWakeTimer = null;
+  let engineRecoveryTimer = null;
 
   const StockfishWasmEngine = window.ChessCoachEngine.create({
     isEnabled: () => useStockfishWasm && !extensionInvalidated && isContextValid()
@@ -277,12 +287,13 @@
     if (!isContextValid() || /extension context invalidated/i.test(message)) {
       shutdownOrphanedScript();
     } else {
-      setAutoStatusText("Error accessing Chrome settings", "#ffbe0b");
+      setAutoStatusText("Access error to onsettings Chrome", "#ffbe0b");
     }
     return true;
   }
 
   function handleEngineVisibilityChange(event) {
+    if (mobileSession) return;
     cancelNativeMove("visibility");
     clearAnalysisRetry();
     if (event?.type === "visibilitychange" && !document.hidden) {
@@ -303,6 +314,10 @@
     extensionInvalidated = true;
     cancelNativeMove("shutdown");
     clearAnalysisRetry();
+    if (unregisterMobileCore) { unregisterMobileCore(); unregisterMobileCore = null; }
+    clearTimeout(mobilePollTimer);
+    clearTimeout(cycleWakeTimer);
+    clearTimeout(engineRecoveryTimer);
     try { StockfishWasmEngine.terminate(); } catch (e) {}
     if (mainIntervalId) { clearInterval(mainIntervalId); mainIntervalId = null; }
     if (neuralCanvasRafId) { cancelAnimationFrame(neuralCanvasRafId); neuralCanvasRafId = null; }
@@ -343,6 +358,7 @@
 
   contentInstanceHandle = Object.freeze({
     isAlive: () => !extensionInvalidated && isContextValid(),
+    revive: () => mobileSession?.revive(),
     shutdown: () => shutdownOrphanedScript()
   });
   Object.defineProperty(window, CONTENT_INSTANCE_KEY, { value: contentInstanceHandle, configurable: true });
@@ -374,7 +390,7 @@
       if (!shadowRoot.host.isConnected) document.documentElement.appendChild(shadowRoot.host);
       return shadowRoot;
     }
-    // Полный DOM-stealth: никаких data-атрибутов or ID на хоsт-элементе в оsновном документе Chess.com
+    // byл DOM-stealth: ниasих data-атрибутов or ID on хост-элемgradientе in освн дwindowgradientе Chess.com
     const host = document.createElement("div");
     host.style.cssText = "all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483646;";
     document.documentElement.appendChild(host);
@@ -396,8 +412,15 @@
     return getShadow().getElementById(id);
   }
 
-  function saveSetting(obj) {
+  function saveSetting(obj, recalculate = false) {
     if (extensionInvalidated || !isContextValid()) return;
+    const preferences = window.__CC_MOBILE_PREFERENCES__;
+    if (preferences) {
+      const write = preferences.update("chesscom", obj, { source: "core", recalculate });
+      write.catch(error => handleAsyncStorageError("mobile preferences", error));
+      return write;
+    }
+    if (window.__CC_ANDROID_RUNTIME__) return;
     try {
       if (chrome.storage && chrome.storage.local) {
         const scoped = Object.fromEntries(Object.entries(obj || {}).map(([key, value]) => [storageKey(key), value]));
@@ -487,29 +510,35 @@
       valEl.textContent = `🟢 T1: ${t1Pct}% (${total} move.) • CALIBRATION`;
       valEl.style.color = "#00f5d4";
       fillEl.style.background = "#00f5d4";
-      hintEl.textContent = `Safe T1 corridor on Chess.com: up to ${maxSafeT1Percent}%. Auto-limiter will mix in 2nd line.`;
+      hintEl.textContent = `Withoutdangerous corridor T1 on Chess.com: until ${maxSafeT1Percent}%. Auto-limiter itself will mix game 2-й line.`;
     } else if (t1Pct <= maxSafeT1Percent) {
       valEl.textContent = `🟢 T1: ${t1Pct}% (${legitStats.top1Matches}/${total}) • 100% LEGIT`;
       valEl.style.color = "#38b000";
       fillEl.style.background = "#38b000";
-      hintEl.textContent = `Ideal human statistics! Moves on 2nd line: ${legitStats.secondLineMatches}.`;
+      hintEl.textContent = `Idealonя human statistics! Madeо moves by 2-й lines: ${legitStats.secondLineMatches}.`;
     } else if (t1Pct <= 76) {
       valEl.textContent = `🟡 T1: ${t1Pct}% (${legitStats.top1Matches}/${total}) • ABOVE NORM`;
       valEl.style.color = "#ffbe0b";
       fillEl.style.background = "#ffbe0b";
-      hintEl.textContent = `Accuracy close to detect! Auto-limiter will switch next calm move to 2nd line (yellow arrow).`;
+      hintEl.textContent = `accuracy closefrom to detection! Auto-limiter will switch next сby move on 2-ю line (yellow arrow).`;
     } else {
       valEl.textContent = `🔴 T1: ${t1Pct}% (${legitStats.top1Matches}/${total}) • DANGEROUS T1!`;
       valEl.style.color = "#ff2a85";
       fillEl.style.background = "#ff2a85";
-      hintEl.textContent = `⚠️ Too many moves on Stockfish 1st line! Urgently make 1–2 moves on yellow arrow or by hand.`;
+      hintEl.textContent = `⚠️ Too many moves by 1-й lines Stockfish! Urgently make 1–2 move by yellow arrow or manually.`;
     }
   }
 
   function applyWorkModePreset(mode, triggerSave = true) {
+    if (window.__CC_MOBILE_PREFERENCES__) {
+      if (!["all", "hvh", "legit"].includes(mode)) return;
+      if (triggerSave) saveSetting({ workMode: mode });
+      else { workMode = mode; updateUIValues(); }
+      return;
+    }
     if (mode === "hvh") {
       mode = "legit";
-      setAutoStatusText("🛡️ On Chess.com Slaughter mode (HvH) is disabled for 100% ban protection!", "#ffbe0b");
+      setAutoStatusText("🛡️ on Chess.com mode Slaughter (HvH) fromenabled for 100% defense from on!", "#ffbe0b");
     }
 
     workMode = mode;
@@ -557,7 +586,7 @@
       if (triggerSave) {
         saveSetting({ workMode: "all" });
       }
-      setAutoStatusText("◈ EXTENDED LEGIT-MODE (ALL SETTINGS OPEN)", "#00f5d4");
+      setAutoStatusText("◈ EXTENDED LEGIT-MODE (ALL SETTINGS OPENЫ)", "#00f5d4");
     }
 
     updateUIValues();
@@ -582,9 +611,9 @@
     const hour = new Date().getHours();
     const user = detectPlayerDisplayName();
     if (hour >= 5 && hour < 12) return `☀️ Good morning, ${user}! Stealth-module Chess.com active`;
-    if (hour >= 12 && hour < 18) return `🛡️ Hello, ${user}! Anti-ban Fair Play protection at 100%`;
+    if (hour >= 12 && hour < 18) return `🛡️ Hello, ${user}! Anti-ban defense Fair Play on 100%`;
     if (hour >= 18 && hour < 23) return `🌌 Good evening, ${user}! Legit domination on Chess.com`;
-    return `🌙 Night session, ${user}? Bézier curves and T1-filter guarding the account!`;
+    return `🌙 Nightonя session, ${user}? Crityouе Without and T1-filter on guard account!`;
   }
 
   function initNeuralCanvasBackground(panel) {
@@ -698,11 +727,31 @@
     neuralCanvasRafId = requestAnimationFrame(renderFrame);
   }
 
-  function loadSettings() {
+  function loadSettings(resolvedSettings = null, triggerRecalculate = true) {
     if (!isContextValid()) return;
+    const preferences = window.__CC_MOBILE_PREFERENCES__;
+    if (preferences && resolvedSettings === null) {
+      const generation = ++mobilePreferenceLoad;
+      mobilePreferenceUnsubscribe?.();
+      mobilePreferenceUnsubscribe = null;
+      return preferences.ready.then(() => {
+        if (extensionInvalidated || generation !== mobilePreferenceLoad) return;
+        loadSettings(preferences.get("chesscom"));
+        mobilePreferenceUnsubscribe = preferences.subscribe("chesscom", (settings, meta) => {
+          if (!extensionInvalidated) loadSettings(settings, meta.recalculate === true);
+        });
+      }).catch(error => {
+        handleAsyncStorageError("mobile preferences restore", error);
+        throw error;
+      });
+    }
+    if (window.__CC_ANDROID_RUNTIME__ && !preferences) return;
     try {
       if (chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(
+        const readSettings = preferences
+          ? (_keys, callback) => callback(Object.fromEntries(Object.entries(resolvedSettings).map(([key, value]) => [storageKey(key), value])))
+          : (keys, callback) => chrome.storage.local.get(keys, callback);
+        readSettings(
           [...SETTINGS_KEYS, ...SETTINGS_KEYS.map(storageKey)],
           (res) => {
             const storageFailed = handleAsyncStorageError("chrome.storage.local.get");
@@ -721,7 +770,7 @@
               }
             }
             if (Object.keys(migratedSettings).length > 0) saveSetting(migratedSettings);
-            workMode = res.workMode === "all" ? "all" : "legit";
+            workMode = preferences && ["all", "hvh", "legit"].includes(res.workMode) ? res.workMode : res.workMode === "all" ? "all" : "legit";
             if (res.activeTabId) activeTabId = res.activeTabId;
             if (typeof res.panelLeft === "number") panelLeft = res.panelLeft;
             if (typeof res.panelTop === "number") panelTop = res.panelTop;
@@ -777,7 +826,7 @@
             if (res.autoClickMethod === "bezier_click" || res.autoClickMethod === "bezier_drag") {
               autoClickMethod = res.autoClickMethod;
             }
-            if (engineMaxMode) {
+            if (!preferences && engineMaxMode) {
               useStockfishWasm = true;
               currentElo = 3000;
               currentStyle = "balanced";
@@ -797,7 +846,7 @@
             applyPersistentPanelGeometry();
             switchTab(activeTabId, false);
             updateUIValues();
-            forceRecalculate();
+            if (triggerRecalculate) forceRecalculate();
           }
         );
       }
@@ -892,7 +941,7 @@
       }
       const wasmChip = $("cc-welcome-chip-wasm");
       if (wasmChip) {
-        wasmChip.textContent = useStockfishWasm ? "⚡ SF LOCAL + Bézier: ON" : "⚙ JS Core + Bézier: ON";
+        wasmChip.textContent = useStockfishWasm ? "⚡ SF LOCAL + Without: ON" : "⚙ JS Core + Without: ON";
       }
     }
 
@@ -963,7 +1012,7 @@
     if ($("cc-hesitation-chk")) $("cc-hesitation-chk").checked = humanHesitationEnabled;
     if ($("cc-t1-limiter-chk")) $("cc-t1-limiter-chk").checked = autoT1LimiterEnabled;
     if ($("cc-t1-limit-slider")) $("cc-t1-limit-slider").value = maxSafeT1Percent;
-    if ($("cc-t1-limit-val")) $("cc-t1-limit-val").textContent = `No higher than ${maxSafeT1Percent}%`;
+    if ($("cc-t1-limit-val")) $("cc-t1-limit-val").textContent = `not above ${maxSafeT1Percent}%`;
 
     if ($("cc-auto-delay-slider")) $("cc-auto-delay-slider").value = autoMoveDelayMs;
     if ($("cc-auto-delay-val")) $("cc-auto-delay-val").textContent = `${(autoMoveDelayMs / 1000).toFixed(2)} sec`;
@@ -1029,6 +1078,52 @@
     });
   }
 
+  function getMobileAnalysisConfig() {
+    const effective = mobileSession?.effective();
+    return JSON.stringify([currentElo, currentStyle, useStockfishWasm, engineMaxMode, turnMode, forcedMyColor,
+      showAverageMove, showWorstMove, useAverageMoveSometimes, autoT1LimiterEnabled, trapRadarEnabled, workMode,
+      Boolean(effective?.lowTier)]);
+  }
+
+  function finishCurrentAnalysis(requestId, phase = "complete") {
+    if (requestId !== analysisRequestId) return;
+    activeEngineBoardKey = "";
+    if (mobileAnalysisLease) mobileSession?.finishAnalysis(mobileAnalysisLease, phase);
+  }
+
+  function scheduleEngineRecovery(state) {
+    if (!mobileSession || engineRecoveryTimer || document.hidden || !useStockfishWasm) return;
+    const configKey = getMobileAnalysisConfig();
+    engineRecoveryTimer = setTimeout(async () => {
+      engineRecoveryTimer = null;
+      if (extensionInvalidated || document.hidden || currentPositionKey !== state.positionKey || getMobileAnalysisConfig() !== configKey) return;
+      const ready = await StockfishWasmEngine.initWorker();
+      if (extensionInvalidated || document.hidden || currentPositionKey !== state.positionKey || getMobileAnalysisConfig() !== configKey) return;
+      if (!ready) { scheduleEngineRecovery(state); return; }
+      mobileSession.retryAnalysis();
+      analysisRetryCount = finalEngineRetryCount = 0;
+      committedBoardKey = "";
+      runCycle(false);
+    }, 20000);
+  }
+
+  function suspendMobileCore(reason, releaseSearch) {
+    resetTurnDecision();
+    cancelNativeMove(reason);
+    clearTimeout(cycleWakeTimer);
+    clearTimeout(mobilePollTimer);
+    clearTimeout(engineRecoveryTimer);
+    engineRecoveryTimer = null;
+    cycleWakeTimer = mobilePollTimer = null;
+    if (releaseSearch) {
+      clearAnalysisRetry();
+      committedBoardKey = committedEnemyBoardKey = "";
+      StockfishWasmEngine.terminate();
+    }
+    if (reason !== "settings") hideArrows();
+    try { window.ChessFX?.stopPhonkEdit?.(shadowRoot); } catch (e) {}
+  }
+
   let lastStatusString = "";
   function setAutoStatusText(text, color = "#00f5d4") {
     if (text === lastStatusString) return;
@@ -1050,14 +1145,30 @@
   function cancelNativeMove(reason) {
     if (!activeNativeMove) return;
     const action = activeNativeMove;
+    action.cancelReason = reason;
+    if (action.gestureSent) {
+      nativeMoveBlockedKey = action.failureKey;
+      nativeMoveBlockedState = action.inputState;
+    }
     action.controller.abort();
-    if (action.failureKey === nativeMoveFailureKey && action.attempt === nativeMoveFailures) nativeMoveFailures = Math.max(0, nativeMoveFailures - 1);
-    try { window.__CC_ANDROID_RUNTIME__?.nativeRequest("input.cancel", {}).catch(() => {}); } catch (e) {}
-    activeNativeMove = null;
-    setMoveExecutionState(false, reason);
+  }
+
+  function isNativeAutoBlocked(state) {
+    const blocked = nativeMoveBlockedState;
+    if (!blocked) return false;
+    const changedGame = blocked.url !== location.href || blocked.board !== state.boardElement || blocked.myColor !== state.myColor;
+    const realReply = blocked.lastEnemy !== lastRealEnemyMove || (blocked.sawOpponent && state.actualTurn === state.myColor && state.positionKey !== blocked.positionKey);
+    if (changedGame || realReply) {
+      nativeMoveBlockedState = null;
+      nativeMoveBlockedKey = "";
+      return false;
+    }
+    if (state.actualTurn !== state.myColor) blocked.sawOpponent = true;
+    return true;
   }
 
   function handleMobileMoveLifecycle(event) {
+    if (mobileSession) return;
     const detail = event?.detail;
     if (detail?.cancelPendingMoves === true || detail?.state === "settings") {
       resetTurnDecision();
@@ -1085,6 +1196,7 @@
           positionId !== retry.positionId || currentPositionKey !== retry.positionKey) return;
       // Unlock immediately before the retry, never while the polling interval is still active.
       committedBoardKey = "";
+      mobileSession?.retryAnalysis();
       runCycle(false);
     }, delayMs);
   }
@@ -1135,6 +1247,7 @@
     hideArrows();
     // Piece styling alone must not cancel or restart canonical-position analysis.
     if (reason !== "BOARD_REPLACED" && reason !== "NO_BOARD") return;
+    mobileSession?.invalidate(reason);
     clearAnalysisRetry();
     positionAnalysisId++;
     analysisRequestId++;
@@ -1150,7 +1263,7 @@
       if (currentPositionKey) {
         analysisRequestId++;
         StockfishWasmEngine.cancel?.();
-        clearPositionPresentation("NEW POSITION • ANALYZING...");
+        clearPositionPresentation("NEW POSITION • ANALYSIS...");
       }
       currentPositionKey = state.positionKey;
       positionId++;
@@ -1180,16 +1293,19 @@
       positionKey: state.positionKey,
       analysisKey: state.boardKey,
       elo: currentElo,
-      engineMaxMode
+      engineMaxMode,
+      ...(mobileSession ? { mobileEpoch: mobileSession.epoch, configKey: getMobileAnalysisConfig() } : {})
     };
   }
 
   function isCurrentAnalysisMeta(meta) {
+    if (mobileSession && (!mobileSession.isReady || meta?.mobileEpoch !== mobileSession.epoch)) return false;
     if (boardDirty && meta?.sessionId === analysisSessionId && meta.positionId === positionId && meta.analysisId === positionAnalysisId) {
       const fresh = captureBoardState(true);
       if (!fresh || fresh.animating) {
         committedBoardKey = "";
         activeEngineBoardKey = "";
+        mobileSession?.retryAnalysis();
         return false;
       }
       adoptPositionState(fresh);
@@ -1204,6 +1320,11 @@
   }
 
   function forceRecalculate() {
+    if (mobileSession?.hasAnalysis(currentPositionKey, getMobileAnalysisConfig()) && mobileSession.snapshot().analysis !== "failed") {
+      scheduleAutoMoveIfNeeded();
+      return;
+    }
+    if (mobileSession?.snapshot().analysis === "failed") mobileSession.retryAnalysis();
     cancelNativeMove("recalculate");
     clearAnalysisRetry();
     committedBoardKey = "";
@@ -1438,15 +1559,21 @@
         </div>
       </div>
 
-      <!-- SWITCH MODES CHESS.COM -->
+      <div id="cc-project-strip" role="note" aria-label="Official free project">
+        <span class="cc-free-badge">FREE</span>
+        <a href="https://t.me/chesscoach_dev" target="_blank" rel="noopener noreferrer" title="Официаль channel ChessCoach">@chesscoach_dev</a>
+        <button type="button" id="cc-project-open" class="cc-project-button">About the project</button>
+      </div>
+
+      <!-- ПЕРЕКЛЮЧАТЕЛЬ MODES CHESS.COM -->
       <div id="cc-mode-switcher-bar">
-        <button class="cc-mode-btn" data-mode="hvh" style="opacity:0.35;" title="Mode HvH (Slaughter) blocked on Chess.com for 100% ban protection">
-          🔒 HvH (BLOCKED)
+        <button class="cc-mode-btn" data-mode="hvh" style="opacity:0.35;" title="Mode HvH (Slaughter) blocked on Chess.com for 100% defense from on">
+          🔒 HvH (BLOCK)
         </button>
-        <button class="cc-mode-btn" data-mode="all" title="Extended Legit: opens all fine settings">
-          ◈ ALL LEGIT OPTIONS
+        <button class="cc-mode-btn" data-mode="all" title="Extended Legit: fromopens all fine settings">
+          ◈ ALL LEGIT-OPTIONS
         </button>
-        <button class="cc-mode-btn active" data-mode="legit" title="Maximum stealth: Bézier curves, auto-limiter T1% and live pauses">
+        <button class="cc-mode-btn active" data-mode="legit" title="Maximum stealth: curvesyouе Without, auto-limiter T1% and youе pauses">
           🛡 STEALTH LEGIT
         </button>
       </div>
@@ -1470,7 +1597,7 @@
               <span class="cc-tab-icon">◉</span> RECORDING
             </button>
             <button class="cc-tab-btn" data-tab="misc">
-              <span class="cc-tab-icon">❖</span> DATABASE / CFG
+              <span class="cc-tab-icon">❖</span> BASE / CFG
             </button>
           </div>
 
@@ -1484,8 +1611,8 @@
               <strong id="cc-active-style-stat">Tal</strong>
             </div>
             <div class="cc-mini-stat">
-              <span>MOVE MANUAL</span>
-              <strong style="color:#00f5d4;">[KEY X]</strong>
+              <span>MOVE MANUALLY</span>
+              <strong style="color:#00f5d4;">[KEY. X]</strong>
             </div>
             <div class="cc-mini-stat" style="opacity:0.75;">
               <span>BOARD MAP</span>
@@ -1502,44 +1629,44 @@
                 <button class="cc-welcome-close" id="cc-welcome-close-btn" title="Hide welcome">✕</button>
               </div>
               <div class="cc-welcome-sub">
-                Anticheat-defense: <strong>Curves Bézier</strong>, <strong>Gaussian variance</strong> и <strong>Auto-limiter T1%</strong>. Press the key <strong>[X]</strong> for single legit-move!
+                Anticheat-defense: <strong>Crityouе Without</strong>, <strong>Gaussian variance</strong> and <strong>Auto-limiter T1%</strong>. onpress key <strong>[X]</strong> for single legit-move!
               </div>
               <div class="cc-welcome-chips">
                 <span class="cc-welcome-chip" id="cc-welcome-chip-mode">🛡 Profile: Stealth Legit</span>
                 <span class="cc-welcome-chip" id="cc-welcome-chip-cpu">🎯 T1-Limiter: <= 66%</span>
-                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF LOCAL + Bézier: ON</span>
+                <span class="cc-welcome-chip" id="cc-welcome-chip-wasm">⚡ SF LOCAL + Without: ON</span>
               </div>
             </div>
 
-            <!-- RADAR FAIR PLAY T1% AND ANTI-BAN METRIC -->
+            <!-- RADAR FAIR PLAY T1% И ANTI-BANН МЕТРИMAP -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #38b000; padding: 8px 11px;">
               <div class="cc-section-title" style="margin-bottom:4px;">
-                <span>🛡️ RADAR ANTICHEAT (FAIR PLAY T1% MATCH GUARD)</span>
+                <span>🛡️ RADAR ANTICHEATА (FAIR PLAY T1% MATCH GUARD)</span>
                 <span id="cc-antiban-blur-badge" style="font-size:9.5px; color:#94a3b8; font-family:monospace;">Alt-Tabs: 0</span>
               </div>
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                 <strong id="cc-antiban-t1-val" style="color:#00f5d4; font-family:monospace; font-size:11px;">🟢 T1: 0% • CALIBRATION</strong>
-                <span style="font-size:9.5px; color:#cbd5e1;">GM norm: 52%–68%</span>
+                <span style="font-size:9.5px; color:#cbd5e1;">Norm GM: 52%–68%</span>
               </div>
               <div style="width:100%; height:6px; background:rgba(255,255,255,0.1); border-radius:4px; overflow:hidden; margin-bottom:5px;">
                 <div id="cc-antiban-t1-fill" style="width:0%; height:100%; background:#00f5d4; transition:width 0.3s ease;"></div>
               </div>
               <div id="cc-antiban-t1-hint" style="font-size:10px; color:#cbd5e1; line-height:1.3;">
-                Auto-limiter T1% active: if accuracy on 1st line exceeds threshold, software will choose safe 2nd line.
+                Auto-limiter T1% active: if accuracy by 1-й lines youexceeds bythreshold, software youtakes safe 2-ю line.
               </div>
             </div>
 
-            <!-- LIVE POSITION GAME 24/7 -->
+            <!-- ЖИВОЕ byЛОЖЕНИЕ GAME 24/7 -->
             <div id="cc-live-telemetry-card">
               <div class="cc-tele-header">
-                <span>📡 CURRENT GAME POSITION (LIVE 24/7)</span>
-                <button class="cc-tele-gear-btn" id="cc-tele-gear-btn" title="Configure displayed fields">⚙️ Fields</button>
+                <span>📡 CURRENT GAME STATE (LIVE 24/7)</span>
+                <button class="cc-tele-gear-btn" id="cc-tele-gear-btn" title="Configure displayed fields">⚙️ fields</button>
               </div>
               <div id="cc-tele-settings-drawer">
                 <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-clocks-chk" checked> ⏱️ Player clocks</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-engine-chk" checked> 🛰️ Status & server</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-wdl-chk" checked> 📊 Win chance %</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-threats-chk" checked> 🪤 Traps & mates</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-engine-chk" checked> 🛰️ Status and server</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-wdl-chk" checked> 📊 Win chances %</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-threats-chk" checked> 🪤 Traps and mates</label>
               </div>
               <div class="cc-tele-grid">
                 <div class="cc-tele-box" id="cc-tele-box-clocks">
@@ -1562,34 +1689,34 @@
                   </div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-threats" style="grid-column: span 2;">
-                  <div class="cc-tele-box-title">🪤 NEAREST CALCULATED TRAPS, THREATS & MATES</div>
-                  <div class="cc-tele-box-val" id="cc-tele-threats-val" style="color:#ffbe0b; font-family:inherit;">Waiting for move...</div>
+                  <div class="cc-tele-box-title">🪤 NEAREST CALCULATED TRAPS, THREATS AND MATES</div>
+                  <div class="cc-tele-box-val" id="cc-tele-threats-val" style="color:#ffbe0b; font-family:inherit;">Waiting move...</div>
                 </div>
               </div>
             </div>
 
             <div id="cc-peer-detector-banner" style="display:none; background:linear-gradient(135deg, rgba(255,190,11,0.20), rgba(255,42,133,0.20)); border:1.5px solid #ffbe0b; border-radius:12px; padding:8px 12px; color:#fff;">
               <div id="cc-peer-detector-title" style="font-size:11px; font-weight:900; color:#ffbe0b; display:flex; justify-content:space-between; align-items:center;">
-                <span>🕵️ CHEAT-RADAR: SUSPICION OF SOFTWARE ON OPPONENT!</span>
+                <span>🕵️ CHEAT-RADAR: bySUSPICION on SOFTWARE У OPPONENT!</span>
                 <span style="background:rgba(0,0,0,0.45); padding:1px 6px; border-radius:4px; font-family:monospace;">⚠️ BOT?</span>
               </div>
               <div id="cc-peer-detector-text" style="font-size:11px; color:#f1f5f9; margin-top:2px; font-weight:600; line-height:1.35;">
-                Opponent plays on 1st line without errors.
+                Opponent plays by 1-й lines without errors.
               </div>
             </div>
 
             <div id="cc-enemy-turn-standby">
               <div class="cc-standby-icon">⏳</div>
-              <div class="cc-standby-title" id="cc-standby-title">Move opponent...</div>
+              <div class="cc-standby-title" id="cc-standby-title">Opponent move...</div>
               <div class="cc-standby-sub" id="cc-standby-sub">
-                Blind premoves disabled for 100% legitimacy on Chess.com. Telemetry watches for threats!
+                Blind premoves disabled for 100% legitness on Chess.com. Telemetry watches for threat!
               </div>
             </div>
 
             <div id="cc-my-turn-active" style="display:flex; flex-direction:column; gap:7px; flex:1;">
               <div id="cc-mate-banner">
                 <div class="cc-mate-title">
-                  <span id="cc-mate-banner-title">👑💀 MATE ON BOARD!</span>
+                  <span id="cc-mate-banner-title">👑💀 MATE on BOARD!</span>
                   <span style="font-size:16px;">😱😂</span>
                 </div>
                 <div class="cc-mate-sub" id="cc-mate-banner-text">
@@ -1599,17 +1726,17 @@
 
               <div class="cc-glass-card" id="cc-opening-card" style="border-left: 3.5px solid var(--cc-accent);">
                 <div class="cc-section-title">
-                  <span id="cc-opening-name">◈ READY FOR GAME ON CHESS.COM</span>
+                  <span id="cc-opening-name">◈ READY К GAME on CHESS.COM</span>
                   <span id="cc-turn-indicator" style="color:#94a3b8;">WAITING</span>
                 </div>
                 <div id="cc-opening-plan" style="font-size:11px; color:#cbd5e1; line-height:1.36;">
-                  Open any game or bot-match on Chess.com for instant stealth analysis.
+                  Open any game or бfrom-mateч on Chess.com for instant stealth-analysis.
                 </div>
               </div>
 
               <div id="cc-eval-graph-card">
                 <div class="cc-graph-header">
-                  <span>📈 LIVE EVAL GRAPH</span>
+                  <span>📈 LIVE ADVANTAGE CHART</span>
                   <span class="cc-graph-meta"><span id="cc-eval-mood-label">EQUAL</span><span id="cc-eval-graph-label">0.00</span></span>
                 </div>
                 <canvas id="cc-eval-graph-canvas" width="410" height="42"></canvas>
@@ -1625,10 +1752,10 @@
 
               <div class="cc-roast-banner" id="cc-roast-box">
                 <div class="cc-roast-title">
-                  <span id="cc-roast-badge">⚡ OPPONENT ERROR RADAR</span>
+                  <span id="cc-roast-badge">⚡ RADAR ERRORS OPPONENT</span>
                   <span>💀</span>
                 </div>
-                <div id="cc-roast-text">Waiting for opponent's move...</div>
+                <div id="cc-roast-text">Waiting for opponent move...</div>
               </div>
 
               <div class="cc-move-card" id="cc-best-card" style="border-left-color:#00f5d4;">
@@ -1636,16 +1763,16 @@
                   <span style="color:#00f5d4" id="cc-best-title">✦ BEST MOVE (1ST LINE)</span>
                   <span class="cc-eval" id="cc-best-eval">--</span>
                 </div>
-                <div id="cc-best-desc">Analyzing position...</div>
+                <div id="cc-best-desc">Position analysis...</div>
                 <div id="cc-best-pv" style="margin-top:3px; font-size:10px; color:var(--cc-accent); font-family:monospace; opacity:0.92;"></div>
               </div>
 
               <div class="cc-move-card" id="cc-avg-card" style="border-left-color:#ffbe0b;">
                 <div class="cc-move-header">
-                  <span style="color:#ffbe0b">❖ AVERAGE MOVE (2ND LINE • T1% MIXING)</span>
+                  <span style="color:#ffbe0b">❖ AVERAGE MOVE (2-Я LINE • MIXING T1%)</span>
                   <span class="cc-eval" id="cc-avg-eval">--</span>
                 </div>
-                <div id="cc-avg-desc">Analyzing safe human alternative...</div>
+                <div id="cc-avg-desc">Analysis safely human altonyou...</div>
               </div>
 
               <div class="cc-move-card cc-hide-in-legit" id="cc-worst-card" style="border-left-color:#ff2a85;">
@@ -1658,37 +1785,37 @@
             </div>
 
             <div class="cc-actions-bar">
-              <button class="cc-btn cc-btn-primary" id="cc-play-once" title="Or press the [X] key on the keyboard">⚡ MOVE VIA BÉZIER [X]</button>
+              <button class="cc-btn cc-btn-primary" id="cc-play-once" title="or press key [X] on keyboard">⚡ MOVE by BÉZIER [X]</button>
               <button class="cc-btn" id="cc-toggle-auto">🛡 LEGIT AUTO: OFF</button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-automove">
             <div class="cc-auto-status-box">
-              <span>Stealth-Automove status:</span>
-              <strong id="cc-auto-live-status" style="color:#00f5d4;">Ready (Bézier curves)</strong>
+              <span>Status Stealth-Automove:</span>
+              <strong id="cc-auto-live-status" style="color:#00f5d4;">Ready (Crityouе Without)</strong>
             </div>
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #38b000; background: linear-gradient(135deg, rgba(56,176,0,0.16), rgba(0,245,212,0.08));">
               <div class="cc-section-title" style="color:#70e000;">
-                <span>🛡️ CHESS.COM ANTI-BAN SYSTEM (FAIR PLAY BYPASS)</span>
+                <span>🛡️ SYStheme ANTI-BANon CHESS.COM (FAIR PLAY BYPASS)</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
                 <div>
-                  <span style="font-weight:800; color:#fff;">🎯 Auto-limiter of T1% matches (Anti-Detect)</span>
-                  <div style="font-size:10px; color:#cbd5e1;">If your T1% exceeds the norm, the bot picks a safe 2nd line</div>
+                  <span style="font-weight:800; color:#fff;">🎯 Auto-limiter matches T1% (Anti-Detect)</span>
+                  <div style="font-size:10px; color:#cbd5e1;">If your T1% exceeds the norm, the bot itself picks a safe 2nd line</div>
                 </div>
                 <input type="checkbox" id="cc-t1-limiter-chk" checked>
               </div>
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Maximum allowed T1% in the game:</span>
-                <strong id="cc-t1-limit-val" style="color:#70e000;">No higher than 66%</strong>
+                <span>Maximum allowed T1% in game:</span>
+                <strong id="cc-t1-limit-val" style="color:#70e000;">not above 66%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-t1-limit-slider" min="50" max="80" step="2" value="66" style="accent-color:#38b000;">
 
               <div class="cc-Switch-row" style="margin-top:4px;">
                 <div>
-                  <span style="font-weight:800; color:#fff;">🧠 Thinking imitation in complex tactics</span>
+                  <span style="font-weight:800; color:#fff;">🧠 Imitation of thinking in complex tactics</span>
                   <div style="font-size:10px; color:#cbd5e1;">Adds a live calculation pause (1.5–3.2s) before hard moves</div>
                 </div>
                 <input type="checkbox" id="cc-hesitation-chk" checked>
@@ -1697,7 +1824,7 @@
               <div class="cc-Switch-row">
                 <div>
                   <span style="font-weight:800; color:#fff;">⏱️ Adaptive timing by clock (10+0 / 3+0 / 1+0)</span>
-                  <div style="font-size:10px; color:#cbd5e1;">Floating human rhythm + fast obvious interruptions</div>
+                  <div style="font-size:10px; color:#cbd5e1;">Smoothing human rhythm + fast random interrupts</div>
                 </div>
                 <input type="checkbox" id="cc-legit-timing-chk" checked>
               </div>
@@ -1710,19 +1837,19 @@
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Base delay (if auto-timing off):</span>
+                <span>Base delay (if disabled. auto-timing):</span>
                 <strong id="cc-auto-delay-val" style="color:var(--cc-accent);">0.54 sec</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-delay-slider" min="220" max="2500" step="20" value="540">
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Hand timing variance (Humanizer):</span>
+                <span>Hand-time variance (Humanizer):</span>
                 <strong id="cc-auto-jitter-val" style="color:var(--cc-accent);">±0.26 sec</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-jitter-slider" min="60" max="1000" step="20" value="260">
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Trigger frequency (remaining moves — manual):</span>
+                <span>Trigger frequency (remaining moves — itself):</span>
                 <strong id="cc-auto-rate-val" style="color:var(--cc-accent);">85% moves</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-rate-slider" min="20" max="100" step="5" value="85">
@@ -1735,35 +1862,35 @@
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Base chance of 2nd line:</span>
+                <span>Base chance of 2nd lines:</span>
                 <strong id="cc-auto-avg-freq-val" style="color:#ffbe0b;">30%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-avg-freq-slider" min="10" max="75" step="5" value="30" style="accent-color:#ffbe0b;">
 
               <div class="cc-Switch-row" style="margin-top:4px;">
-                <span>Insurance: only 1st line on Mate and piece saves</span>
+                <span>Insurance: only 1st line on Mate and saving pieces</span>
                 <input type="checkbox" id="cc-auto-protect-chk" checked>
               </div>
 
               <div class="cc-control-row" style="margin-top:5px; margin-bottom:0;">
                 <span>Mouse biometrics:</span>
                 <select class="cc-select" id="cc-auto-method-select" style="width:225px;">
-                  <option value="bezier_click" selected>🎯 Bézier arc + 2-Click (Gaussian)</option>
-                  <option value="bezier_drag">🖐 Bézier arc + Dragging</option>
+                  <option value="bezier_click" selected>🎯 Arc Bézier + 2-Click (Gaussian)</option>
+                  <option value="bezier_drag">🖐 Arc Bézier + Drag</option>
                 </select>
               </div>
             </div>
 
             <div class="cc-actions-bar">
-              <button class="cc-btn cc-btn-primary" id="cc-auto-test-best">⚡ Play 1st line</button>
-              <button class="cc-btn" id="cc-auto-test-avg" style="border-color:#ffbe0b; color:#ffbe0b;">❖ Play 2nd line</button>
+              <button class="cc-btn cc-btn-primary" id="cc-auto-test-best">⚡ Move 1-й line</button>
+              <button class="cc-btn" id="cc-auto-test-avg" style="border-color:#ffbe0b; color:#ffbe0b;">❖ Move 2-й line</button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-rage">
             <div class="cc-glass-card">
               <div class="cc-control-row">
-                <span style="font-weight:800;">TARGET PLAY LEVEL (400 – 3000 ELO)</span>
+                <span style="font-weight:800;">TARGET GAME LEVEL (400 – 3000 ELO)</span>
                 <strong id="cc-elo-val" style="color:var(--cc-accent);">${currentElo} ELO</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-elo-slider" min="400" max="3000" step="100" value="${currentElo}">
@@ -1782,22 +1909,22 @@
                 <input type="checkbox" id="cc-engine-max-chk">
               </div>
               <div class="cc-Switch-row">
-                <span>📡 Position game 24/7 (Clocks, WDL%, Threats)</span>
+                <span>📡 Live game 24/7 (Clocks, WDL%, Threats)</span>
                 <input type="checkbox" id="cc-live-telemetry-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🪤 Radar traps (Highlight tricky moves)</span>
+                <span>🪤 Radar traps (highlight tricky moves)</span>
                 <input type="checkbox" id="cc-trap-radar-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🔊 Tactical audio radar (ping enemy blunders & mate)</span>
+                <span>🔊 Tactical audio radar (ping enemy blunders and mate)</span>
                 <input type="checkbox" id="cc-audio-radar-chk" checked>
               </div>
             </div>
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #00f5d4;">
               <div class="cc-section-title">
-                <span>🚀 LINES ANALYSIS</span>
+                <span>🚀 LINES ANALYSISА</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
                 <span>❖ Show and count Average move (2nd line)</span>
@@ -1815,8 +1942,8 @@
                 <button class="cc-style-btn" data-style="mogging"><span>⚡ Mogging</span><small>DOMINATION</small></button>
                 <button class="cc-style-btn active" data-style="tal"><span>✦ Mikhail Tal</span><small>SACRIFICES</small></button>
                 <button class="cc-style-btn" data-style="alphazero"><span>🧠 AlphaZero</span><small>NEURAL NET</small></button>
-                <button class="cc-style-btn" data-style="morphy"><span>🎭 Paul Morphy</span><small>TEMPO GENIUS</small></button>
-                <button class="cc-style-btn" data-style="hikaru"><span>🚀 Nakamura</span><small>KING BLITZ</small></button>
+                <button class="cc-style-btn" data-style="morphy"><span>🎭 byл Morphy</span><small>TEMPO GENIUS</small></button>
+                <button class="cc-style-btn" data-style="hikaru"><span>🚀 Nakamura</span><small>BLITZ KING</small></button>
                 <button class="cc-style-btn" data-style="kasparov"><span>▲ Kasparov</span><small>ATTACK</small></button>
                 <button class="cc-style-btn" data-style="fischer"><span>◈ Fischer</span><small>ACCURACY</small></button>
                 <button class="cc-style-btn" data-style="carlsen"><span>❖ Carlsen</span><small>TECHNIQUE</small></button>
@@ -1831,20 +1958,20 @@
             <div class="cc-glass-card">
               <div class="cc-section-title"><span>⚙ WORK MODE</span></div>
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>When count:</span>
+                <span>When to count:</span>
                 <select class="cc-select" id="cc-turn-select" style="width:200px;">
-                  <option value="my" selected>Only on my move</option>
+                  <option value="my" selected>only in my move</option>
                   <option value="auto">Always (and for opponent)</option>
-                  <option value="w">Always as White</option>
-                  <option value="b">Always as Black</option>
+                  <option value="w">Always for White</option>
+                  <option value="b">Always for Black</option>
                 </select>
               </div>
               <div class="cc-Switch-row">
-                <span>⚡ Opponent blunder radar and mate special effects</span>
+                <span>⚡ Radar of opponent blunders and mate special effects</span>
                 <input type="checkbox" id="cc-rage-rofl-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🛡 Disable Automove in Rated games (only hints)</span>
+                <span>🛡 Disable Automove in rated games (only hints)</span>
                 <input type="checkbox" id="cc-rage-antiban-chk">
               </div>
             </div>
@@ -1853,7 +1980,7 @@
           <div class="cc-tab-pane" id="cc-pane-visuals">
             <div class="cc-glass-card" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>🖼️ YOUR PHOTO ON BACKGROUND MENU (CHOOSE FROM FILE PICKER)</span>
+                <span>🖼️ OWN PHOTO on BACKGROUND MENU (CHOICE from FILE PICKER)</span>
               </div>
               <div class="cc-actions-bar" style="margin-bottom:7px;">
                 <button class="cc-btn cc-btn-primary" id="cc-upload-bg-btn">📂 CHOOSE PHOTO...</button>
@@ -1861,26 +1988,26 @@
               </div>
               <input type="file" id="cc-bg-file-input" accept="image/*" style="display:none;" />
               <div class="cc-control-row">
-                <span>Dimming photo:</span>
+                <span>Dimming фfromо:</span>
                 <strong id="cc-bg-dim-val" style="color:#c77dff;">72%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-bg-dim-slider" min="0.2" max="0.92" step="0.04" value="0.72" style="accent-color:#c77dff;">
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Background blur (Glass Blur):</span>
+                <span>Blur backgroundа (Glass Blur):</span>
                 <strong id="cc-bg-blur-val" style="color:#c77dff;">4px</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-bg-blur-slider" min="0" max="16" step="1" value="4" style="accent-color:#c77dff;">
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>✦ THEME MENU (11 STYLES VISION GLASS)</span></div>
+              <div class="cc-section-title"><span>✦ theme MENU (11 STYLES VISION GLASS)</span></div>
               <select class="cc-select" id="cc-vis-theme">
-                <option value="cyberpunk">🌌 Liquid Cyan Wave (Neon wave)</option>
-                <option value="minimal">⚪ Pure Minimal (Clean minimalism)</option>
+                <option value="cyberpunk">🌌 Liquid Cyan Wave (notneon waveon)</option>
+                <option value="minimal">⚪ Pure Minimal (Clean minimalfromм)</option>
                 <option value="aurora">🌌 Aurora 3D Glass (Northern lights)</option>
                 <option value="hologram">🔮 Hologram Violet (Hologram)</option>
                 <option value="crimson">🔥 Crimson Rose (Aggressive ruby)</option>
-                <option value="gold">👑 Royal Gold (Royal gold)</option>
+                <option value="gold">👑 Royal Gold (Coreroyal goldfromо)</option>
                 <option value="matrix">🧪 Matrix Toxic (Cyber-Matrix)</option>
                 <option value="titanium">❄️ Vision Pro Titanium (Mate titanium)</option>
                 <option value="obsidian">🌑 Obsidian Stealth (Dark obsidian)</option>
@@ -1890,42 +2017,42 @@
             </div>
 
             <div class="cc-glass-card" style="border-left: 3.5px solid var(--cc-accent);">
-              <div class="cc-section-title"><span>◈ POINTER TYPE MOVES (16 VARIATIONS: SQUARES AND ARROWS)</span></div>
+              <div class="cc-section-title"><span>◈ POINTER TYPE MOVES (16 VARIATIONS: SQUARES И ARROWS)</span></div>
               <select class="cc-select" id="cc-vis-arrow-style" style="margin-bottom:7px;">
-                <optgroup label="🔲 NO ARROWS (SQUARE HIGHLIGHTS MOVES)">
-                  <option value="sq_cyber_frame">🔲 Neon square frames (FROM ➔ TO)</option>
-                  <option value="sq_Step_badges">🎯 Tactical markers [1: START] ➔ [2: TARGET]</option>
-                  <option value="sq_hologram_tiles">💠 Holographic square fill + Crosshair</option>
+                <optgroup label="🔲 WITHOUT ARROWS (HIGHLIGHT SQUARES MOVES)">
+                  <option value="sq_cyber_frame">🔲 neon frames squares (FROM ➔ TO)</option>
+                  <option value="sq_Step_badges">🎯 Tactical labels [1: START] ➔ [2: TARGET]</option>
+                  <option value="sq_hologram_tiles">💠 Holographic fill of squares + on target</option>
                   <option value="sq_minimal_dots">⚫ Stealth-dots Pro (Without arrows)</option>
                 </optgroup>
                 <optgroup label="🏹 VECTOR AND 3D ARROWS (12 STYLES)">
-                  <option value="curved_neon">🌈 Smooth neon arc s with flow</option>
-                  <option value="comet_trail">☄️ Fire comet s gradient tail</option>
+                  <option value="curved_neon">🌈 Smooth neon arc with flow</option>
+                  <option value="comet_trail">☄️ Fire comet with gradient tail</option>
                   <option value="cyber_chevron">⏩ Tactical chevron conveyor (>>>)</option>
-                  <option value="quantum_portal">🌀 Quantum teleport (Portals on squares)</option>
-                  <option value="tube_3d">🧊 3D Volumetric tube s drop shadow</option>
-                  <option value="plasma">⚡ Plasma lightning-zigzag</option>
-                  <option value="sniper_3d">🎯 3D Sniper radar-crosshair</option>
-                  <option value="dna_wave">🧬 Double cyber-DNA wave</option>
+                  <option value="quantum_portal">🌀 Quantum teleport (Loss on squarn squareх)</option>
+                  <option value="tube_3d">🧊 3D Volume tube with drop shadow</option>
+                  <option value="plasma">⚡ Plasmaonя lightning-zigzag</option>
+                  <option value="sniper_3d">🎯 3D Сonhypers radar-ontarget</option>
+                  <option value="dna_wave">🧬 Doubleonя cyber-waveon DNA</option>
                   <option value="chroma_rgb">🌈 Chroma RGB Iridescence</option>
-                  <option value="laser">⚡ Direct cyber-laser</option>
+                  <option value="laser">⚡ Straightmy cyber-laser</option>
                   <option value="classic">♟️ Classical straight</option>
-                  <option value="dotted">✨ Tactical dashed</option>
+                  <option value="dotted">✨ Tactical dotted</option>
                 </optgroup>
               </select>
 
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Style «Mate in 1 move»:</span>
+                <span>Style «mate in 1 move»:</span>
                 <select class="cc-select" id="cc-vis-mate-style" style="width:225px;">
                   <option value="phonk_skull">💀 Phonk Skull Mogging</option>
                   <option value="orbital_laser">🛸 Orbital Cyber-Laser</option>
-                  <option value="royal_exec">👑 Royal Verdict</option>
+                  <option value="royal_exec">👑 Royal onspeech</option>
                   <option value="rofl_classic">😂 Classical Rofl</option>
                 </select>
               </div>
 
               <div class="cc-control-row">
-                <span>Scale arrows and frames:</span>
+                <span>Scale arrows and frameswindow:</span>
                 <strong id="cc-vis-scale-val" style="color:var(--cc-accent);">1.0x</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-vis-scale" min="0.6" max="1.6" step="0.1" value="1.0">
@@ -1939,14 +2066,14 @@
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #ff2a85;">
               <div class="cc-section-title" style="color:#ff4d94;">
-                <span>🔥 CONTROL HEATMAP AND SPECIAL EFFECTS</span>
+                <span>🔥 HEATS MAPRTА CONTROL И SPECIAL EFFECTS</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>🗺️ Permanent heatmap board (Otherwise — squeeze [Alt])</span>
+                <span>🗺️ bypermanentonя heat board board (Иon — squeeze [Alt])</span>
                 <input type="checkbox" id="cc-heatmap-always-chk">
               </div>
               <div class="cc-Switch-row">
-                <span>🔥 Edit Brilliant Move (15 sec Phonk)</span>
+                <span>🔥 Edit Brilliant Moveу (15 sec Phonk)</span>
                 <input type="checkbox" id="cc-vis-phonk-chk">
               </div>
               <div class="cc-Switch-row">
@@ -1954,11 +2081,11 @@
                 <input type="checkbox" id="cc-vis-arrows-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>Side evaluation bar (Eval Bar)</span>
+                <span>Бwindow  eval (Eval Bar)</span>
                 <input type="checkbox" id="cc-vis-eval-chk" checked>
               </div>
               <button class="cc-btn cc-btn-primary" id="cc-test-phonk-btn" style="width:100%; margin-top:6px;">
-                🔥 TEST BACKGROUND-EDIT (15 SEC)
+                🔥 TEST BACKGROUNDК-EDIT (15 SEC)
               </button>
             </div>
           </div>
@@ -1966,22 +2093,22 @@
           <div class="cc-tab-pane" id="cc-pane-privacy">
             <div class="cc-mask-hero">
               <div>
-                <strong>◉ STREAMER MASK // MODE ЗАПИСИ</strong>
-                <span>Реальные данные оsтаютsя в Chess.com и only визуально sкрываютsя на экране.</span>
+                <strong>◉ STREAMER MASK // MODE ПИСИ</strong>
+                <span>Реаль yesн remain in Chess.com and only вfromvisual сются on screenе.</span>
               </div>
-              <span id="cc-mask-status">DISABLED</span>
+              <span id="cc-mask-status">DISABLEDА</span>
             </div>
 
             <div class="cc-glass-card" style="border-left:3.5px solid #67e8f9;">
               <div class="cc-Switch-row" style="padding-top:0;">
                 <div>
-                  <span style="font-weight:900;color:#fff;">Enable маsкировку для запиsи</span>
-                  <div style="font-size:9.5px;color:#94a3b8;">Ctrl + Shift + M — мгновенное enabling/disabledие</div>
+                  <span style="font-weight:900;color:#fff;">Enable маскировку for forписи</span>
+                  <div style="font-size:9.5px;color:#94a3b8;">Ctrl + Shift + M — мгвене enabled/disabled</div>
                 </div>
                 <input type="checkbox" id="cc-mask-enabled-chk">
               </div>
               <div class="cc-control-row" style="margin-top:6px;">
-                <span>Style карточек:</span>
+                <span>Style ртrandomк:</span>
                 <select class="cc-select" id="cc-mask-style-select" style="width:220px;">
                   <option value="broadcast">🌌 Broadcast Neon</option>
                   <option value="royal">♛ Royal Grandmaster</option>
@@ -1991,7 +2118,7 @@
             </div>
 
             <div class="cc-mask-preview" id="cc-mask-preview" data-mask-style="broadcast">
-              <div class="cc-mask-preview-label">ПРЕДПРОСМОТР ТРАНСЛЯЦИИ</div>
+              <div class="cc-mask-preview-label">ПРЕДПРОСМfromР ТРСЛЯЦИИ</div>
               <div class="cc-mask-preview-player opponent">
                 <img class="cc-mask-preview-avatar" id="cc-mask-preview-opponent-avatar" alt="">
                 <div class="cc-mask-preview-identity"><span id="cc-mask-preview-opponent-name">GM Hikaru</span><small id="cc-mask-preview-opponent-flag">🇺🇸</small><strong id="cc-mask-preview-opponent-elo">2802</strong></div>
@@ -2005,7 +2132,7 @@
 
             <div class="cc-mask-editor-grid">
               <div class="cc-glass-card cc-mask-editor-card">
-                <div class="cc-section-title"><span>ВАШ ПРОФИЛЬ / AUTOОПРЕДЕЛЕНИЕ</span></div>
+                <div class="cc-section-title"><span>ВАШ PROFILE / AUTOОПРЕДЕЛЕНИЕ</span></div>
                 <select class="cc-select" id="cc-mask-my-preset">${getPrivacyProfileOptions()}</select>
                 <label class="cc-mask-field">Ник<input class="cc-text-input" id="cc-mask-my-name" maxlength="32" value="HiddenKnight"></label>
                 <div class="cc-mask-field-row">
@@ -2015,7 +2142,7 @@
               </div>
 
               <div class="cc-glass-card cc-mask-editor-card">
-                <div class="cc-section-title"><span>ПРОФИЛЬ СОПЕРНИКА</span></div>
+                <div class="cc-section-title"><span>PROFILE OPPONENT</span></div>
                 <select class="cc-select" id="cc-mask-opponent-preset">${getPrivacyProfileOptions()}</select>
                 <label class="cc-mask-field">Ник<input class="cc-text-input" id="cc-mask-opponent-name" maxlength="32" value="GMHikaru"></label>
                 <div class="cc-mask-field-row">
@@ -2026,36 +2153,36 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-Switch-row" style="padding-top:0;"><span>Подменять аватар, флаг и sкрывать flair</span><input type="checkbox" id="cc-mask-details-chk" checked></div>
-              <div class="cc-Switch-row"><span>Маsкировать заголовок tabs браузера</span><input type="checkbox" id="cc-mask-title-chk" checked></div>
-              <div class="cc-Switch-row"><span>Block hover-карdots реальных профилей</span><input type="checkbox" id="cc-mask-hover-chk" checked></div>
-              <div class="cc-Switch-row"><span>Новый sлучайный GM-opponent on новой game</span><input type="checkbox" id="cc-mask-rotate-chk"></div>
+              <div class="cc-Switch-row" style="padding-top:0;"><span>Underмеь аватар, флаг and с flair</span><input type="checkbox" id="cc-mask-details-chk" checked></div>
+              <div class="cc-Switch-row"><span>Маскирова forголовwindow tabs браузера</span><input type="checkbox" id="cc-mask-title-chk" checked></div>
+              <div class="cc-Switch-row"><span>Block hover-рdots реаль aboutфилей</span><input type="checkbox" id="cc-mask-hover-chk" checked></div>
+              <div class="cc-Switch-row"><span>Но's слуй GM-opponent on вой game</span><input type="checkbox" id="cc-mask-rotate-chk"></div>
             </div>
 
             <div class="cc-actions-bar cc-mask-actions">
               <button class="cc-btn" id="cc-mask-random-btn">🎲 СЛУЧАЙНЫЙ GM</button>
-              <button class="cc-btn" id="cc-mask-swap-btn">⇄ ПОМЕНЯТЬ МЕСТАМИ</button>
-              <button class="cc-btn cc-btn-primary" id="cc-mask-reveal-btn" style="grid-column:span 2;">👁 УДЕРЖИВАТЬ: ПOKАЗАТЬ ОРИГИНАЛ</button>
+              <button class="cc-btn" id="cc-mask-swap-btn">⇄ byМЕНЯТЬ МЕСТАМИ</button>
+              <button class="cc-btn cc-btn-primary" id="cc-mask-reveal-btn" style="grid-column:span 2;">👁 УДЕРЖИВАТЬ: SHOW ОРИГИonЛ</button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-misc">
-            <!-- CONFIG SYSTEM (.CHESS) -->
+            <!-- SYStheme CONFIGS (.CHESS) -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #00f5d4; background: linear-gradient(135deg, rgba(0, 245, 212, 0.12), rgba(199, 125, 255, 0.08));">
               <div class="cc-section-title">
-                <span>⚙️ CONFIG SYSTEM (.CHESS)</span>
+                <span>⚙️ SYStheme CONFIGS (.CHESS)</span>
                 <span id="cc-cfg-status-badge" style="color:#00f5d4; font-size:9.5px;">READY</span>
               </div>
               <div style="font-size:10.5px; color:#cbd5e1; margin-bottom:7px; line-height:1.35;">
-                Save own Legit-settings и обои в file <strong>.chess</strong> or load other configs:
+                Save your Legit-settings and обои in file <strong>.chess</strong> or load other configи:
               </div>
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Config name:</span>
-                <input type="text" id="cc-cfg-name-input" placeholder="For example: ChessCom_Stealth" value="ChessCom_Stealth"
+                <span>onз configа:</span>
+                <input type="text" id="cc-cfg-name-input" placeholder="ononmeasure: ChessCom_Stealth" value="ChessCom_Stealth"
                        style="width:190px; background:rgba(10,13,20,0.95); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:7px; padding:4px 8px; font-size:11px; font-weight:700; outline:none;" />
               </div>
               <div class="cc-Switch-row" style="padding:3px 0 7px 0; border:none;">
-                <span style="font-size:10.5px; color:#e2e8f0;">🖼️ Embed current photo background in .chess file</span>
+                <span style="font-size:10.5px; color:#e2e8f0;">🖼️ Embed current фfromо backgroundа in file .chess</span>
                 <input type="checkbox" id="cc-cfg-include-bg-chk" checked>
               </div>
               <div class="cc-actions-bar">
@@ -2066,7 +2193,7 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>❖ MANUAL BOT TRAINING</span></div>
+              <div class="cc-section-title"><span>❖ MANUAL TRAINING БfromА</span></div>
               <div class="cc-actions-bar">
                 <button class="cc-btn" id="cc-train-good">👍 PIN MOVE</button>
                 <button class="cc-btn cc-btn-danger" id="cc-train-bad">👎 BAN MOVE</button>
@@ -2074,28 +2201,28 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>◈ DATABASE SELF-LEARNING (EXPERIENCE DB)</span></div>
+              <div class="cc-section-title"><span>◈ BASE SELF-LEARNING (EXPERIENCE DB)</span></div>
               <div id="cc-misc-db-summary" style="font-size:11.5px; color:#e2e8f0; margin-bottom:8px;">
                 Positions learned in memory: 0
               </div>
               <div class="cc-actions-bar" style="margin-bottom:7px;">
-                <button class="cc-btn" id="cc-export-db">📥 EXPORT (.JSON)</button>
-                <button class="cc-btn" id="cc-import-db">📤 IMPORT (.JSON)</button>
+                <button class="cc-btn" id="cc-export-db">📥 EXPORTbyRT (.JSON)</button>
+                <button class="cc-btn" id="cc-import-db">📤 IMPORTbyRT (.JSON)</button>
               </div>
               <input type="file" id="cc-import-file-input" accept=".json" style="display:none;" />
               <button class="cc-btn cc-btn-danger" id="cc-clear-db" style="width:100%;">
-                🗑 FULLY CLEAR MEMORY
+                🗑 byFULLY CLEAR MEMORY
               </button>
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>👋 WELCOME SCREEN И RESET POSITION WINDOW</span></div>
+              <div class="cc-section-title"><span>👋 WELCOME SCREEN AND RESET POSITION WINDOW</span></div>
               <div class="cc-actions-bar">
                 <button class="cc-btn" id="cc-restore-welcome-btn">
-                  ✨ Show welcome
+                  ✨ Show onbranchwelcome
                 </button>
                 <button class="cc-btn" id="cc-reset-pos-btn">
-                  📍 Reset position menu
+                  📍 Reset byposition menu
                 </button>
               </div>
             </div>
@@ -2112,6 +2239,11 @@
     if (uiAbortController) uiAbortController.abort();
     uiAbortController = new AbortController();
     const uiSignal = uiAbortController.signal;
+    $("cc-project-open").addEventListener("click", () => {
+      window.__CC_ANDROID_RUNTIME__.nativeRequest("project.open").catch(() => {
+        setAutoStatusText("not yet open page projectа. Aboutв onextension.", "#ffbe0b");
+      });
+    });
     const header = $("chesscoach-header");
     let dragging = false, ox = 0, oy = 0;
     header.addEventListener("mousedown", (e) => {
@@ -2168,12 +2300,12 @@
         const st = captureBoardState(true);
         if (st && !st.animating) renderArrowsOverlay(st, cachedMoves);
       }
-      // Hotkey [X] / [Ч] for single legit-move по кривой Bézier
+      // Hot key [X] / [Ч] for single legit-move by curvesвой Without
       if ((e.key === "x" || e.key === "X" || e.key === "ч" || e.key === "Ч") && !isExecutingMove) {
         const st = captureBoardState(true);
         if (st && !st.animating && cachedMoves.best) {
           const picked = chooseAutoMoveOnce(cachedMoves) || { move: cachedMoves.best, typeLabel: "1ST LINE" };
-          setAutoStatusText(`🎯 Move по [X]: ${picked.move.from}→${picked.move.to} (${picked.typeLabel})`, "#00f5d4");
+          setAutoStatusText(`🎯 Move by [X]: ${picked.move.from}→${picked.move.to} (${picked.typeLabel})`, "#00f5d4");
           executeMoveOnBoard(picked.move, st, true);
         }
       }
@@ -2199,7 +2331,7 @@
       }
     }, { signal: uiSignal });
 
-    // Управление полями Живой телеметрии 24/7
+    // Управлен squares Живой phoneметрии 24/7
     $("cc-tele-gear-btn").addEventListener("click", () => {
       const drawer = $("cc-tele-settings-drawer");
       if (drawer) {
@@ -2233,7 +2365,7 @@
       updateLiveTelemetryUI();
     });
 
-    // Loading каsтомного background из Проводника sо sжатием через Canvas
+    // Loading стго backgroundа from Aboutводни со сжатм through Canvas
     $("cc-upload-bg-btn").addEventListener("click", () => {
       const inp = $("cc-bg-file-input");
       if (inp) inp.click();
@@ -2324,6 +2456,14 @@
     });
 
     const toggleAutoMoveMaster = (newState) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        if (newState) { nativeMoveFailureKey = ""; nativeMoveFailures = 0; }
+        else cancelNativeMove("automation-disabled");
+        resetTurnDecision();
+        saveSetting({ autoMoveEnabled: newState }, newState);
+        setAutoStatusText(newState ? "Automove enabled" : "Automove disabled", newState ? "#38b000" : "#94a3b8");
+        return;
+      }
       autoMoveEnabled = newState;
       if (newState) { nativeMoveFailureKey = ""; nativeMoveFailures = 0; }
       if (!newState) cancelNativeMove("automation-disabled");
@@ -2331,10 +2471,10 @@
       updateUIValues();
       resetTurnDecision();
       if (autoMoveEnabled) {
-        setAutoStatusText("🛡 Stealth-Automove enabled (Curves Bézier + T1 Фильтр)", "#38b000");
+        setAutoStatusText("🛡 Stealth-Automove enabled (Crityouе Without + T1 Фильтр)", "#38b000");
         forceRecalculate();
       } else {
-        setAutoStatusText("Automove disabled (Доsтупен move по клавише [X])", "#94a3b8");
+        setAutoStatusText("Automove disabled (Доступен move by клавише [X])", "#94a3b8");
       }
     };
 
@@ -2406,6 +2546,11 @@
     });
 
     $("cc-sf-wasm-chk").addEventListener("change", (e) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        if (e.target.checked) StockfishWasmEngine.initWorker(); else StockfishWasmEngine.terminate();
+        saveSetting({ useStockfishWasm: e.target.checked }, true);
+        return;
+      }
       useStockfishWasm = e.target.checked;
       if (useStockfishWasm) StockfishWasmEngine.initWorker();
       else StockfishWasmEngine.terminate();
@@ -2414,6 +2559,11 @@
       forceRecalculate();
     });
     $("cc-engine-max-chk").addEventListener("change", (e) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        saveSetting({ engineMaxMode: e.target.checked }, true);
+        setAutoStatusText(e.target.checked ? "ENGINE MAX enabled" : "ENGINE MAX disabled", "#64cdb9");
+        return;
+      }
       engineMaxMode = e.target.checked;
       if (engineMaxMode) {
         currentElo = 3000;
@@ -2473,14 +2623,14 @@
       const state = captureBoardState(true);
       if (state && !state.animating && isCachedAnalysisCurrent(state)) {
         const picked = chooseAutoMoveOnce(cachedMoves) || { move: cachedMoves.best, typeLabel: "1ST LINE" };
-        setAutoStatusText(`🎯 Playing move: ${picked.move.from}→${picked.move.to} [${picked.typeLabel}]`, "#00f5d4");
+        setAutoStatusText(`🎯 Webyplay move: ${picked.move.from}→${picked.move.to} [${picked.typeLabel}]`, "#00f5d4");
         executeMoveOnBoard(picked.move, state, true);
       }
     });
 
     $("cc-auto-test-best").addEventListener("click", () => {
       if (engineMaxMode && !cachedMoves.engineMeta && !cachedMoves.best?.fromSyzygy) {
-        setAutoStatusText("♚ ENGINE MAX: wait for completion primary Stockfish", "#d9ad58");
+        setAutoStatusText("♚ ENGINE MAX: wait for primary Stockfish to finish", "#d9ad58");
         return;
       }
       const state = captureBoardState(true);
@@ -2493,7 +2643,11 @@
     $("cc-auto-test-avg").addEventListener("click", () => {
       if (usesStrictBestMovePolicy()) return;
       const state = captureBoardState(true);
-      const move = cachedMoves.average || cachedMoves.best;
+      const move = cachedMoves.average;
+      if (!move || move.uci === cachedMoves.best?.uci) {
+        setAutoStatusText("Separate average line unavailable: wait for analysis or choose best move.", "#ffbe0b");
+        return;
+      }
       if (state && !state.animating && move && isCachedAnalysisCurrent(state)) {
         setAutoStatusText(`Average move (2nd line): ${move.from}→${move.to}`, "#ffbe0b");
         executeMoveOnBoard(move, state, true);
@@ -2662,7 +2816,7 @@
     const revealButton = $("cc-mask-reveal-btn");
     const setReveal = (revealed) => {
       privacyMaskManager?.setRevealed(revealed);
-      revealButton.textContent = revealed ? "👁 ОРИГИНАЛ ПOKАЗАН" : "👁 УДЕРЖИВАТЬ: ПOKАЗАТЬ ОРИГИНАЛ";
+      revealButton.textContent = revealed ? "👁 ОРИГИonЛ byMAPЗ" : "👁 УДЕРЖИВАТЬ: SHOW ОРИГИonЛ";
       if (!revealed) updatePrivacyMaskStatus();
     };
     revealButton.addEventListener("pointerdown", (e) => { e.preventDefault(); setReveal(true); });
@@ -2742,7 +2896,7 @@
       });
     });
 
-    // EXPORT И IMPORT КОНФИГОВ (.CHESS)
+    // EXPORTbyRT И IMPORTbyRT CONFIGS (.CHESS)
     $("cc-export-cfg-btn").addEventListener("click", () => {
       const rawName = ($("cc-cfg-name-input")?.value || "ChessCom_Stealth").trim();
       const safeFileName = rawName.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, "_") || "ChessCom_Cfg";
@@ -2760,7 +2914,7 @@
 
       const badge = $("cc-cfg-status-badge");
       if (badge) {
-        badge.textContent = `💾 UNLOADED: ${safeFileName}.chess`;
+        badge.textContent = `💾 EXPORTED: ${safeFileName}.chess`;
         badge.style.color = "#00f5d4";
       }
     });
@@ -2790,9 +2944,9 @@
               badge.textContent = `✅ ACTIVE: ${cfgTitle}`;
               badge.style.color = "#38b000";
             }
-            setAutoStatusText(`⚙️ Config loaded: ${cfgTitle}`, "#00f5d4");
+            setAutoStatusText(`⚙️ Loaded config: ${cfgTitle}`, "#00f5d4");
           } else if (badge) {
-            badge.textContent = "❌ ERROR FILE .CHESS";
+            badge.textContent = "❌ ERROR FILEА .CHESS";
             badge.style.color = "#ff2a85";
           }
         } catch (err) {
@@ -2836,12 +2990,12 @@
       }
       if (boardContext.has(node)) continue;
       const text = `${node.textContent || ""} ${node.getAttribute("aria-label") || ""}`.toLowerCase();
-      if (/\b(?:unrated|casual|friendly)\b|without рейтинга|нерейтингов|товарищеsк/.test(text)) casual = true;
-      if (/\brated\b|(?:^|\s)рейтингов(?:ая|ый|ое)(?:\s|$|[.,:])/.test(text)) rated = true;
+      if (/\b(?:unrated|casual|friendly)\b|without рейнга|notрейнгов|товарищеск/.test(text)) casual = true;
+      if (/\brated\b|(?:^|\s)рейнгов(?:ая||ое)(?:\s|$|[.,:])/.test(text)) rated = true;
     }
-    if (rated) return "Automove blocked: rated game vs human. Move manually.";
+    if (rated) return "Automove blocked: rated game against human. Move manually.";
     if (casual) return "";
-    return "Automove suspended: рейтинговый sтатуs game не confirmed. Разрешены only явно нерейтинговые, учебные игры и боты.";
+    return "Automove suspended: рейнго's status game not confirmed. зрешены only explicitly notрейнгоyouе, уб game and бfromы.";
   }
 
   function parseChessComClock(selectors) {
@@ -2925,8 +3079,8 @@
       if ($("cc-time-sniper-text")) {
         $("cc-time-sniper-text").textContent =
           enemySecs < 20
-            ? "У opponent цейтнот — обоsтряйте игру!"
-            : "Ритм moves адаптирован под yourи clock для обmove гиsтограммы Fair Play.";
+            ? "У opponent цейтнfrom — обостряйте game!"
+            : "Ритм moves аyesпрован under yourи clock for обmove гистогframesмы Fair Play.";
       }
     } else {
       banner.style.display = "none";
@@ -2958,7 +3112,7 @@
       : myEval >= 0.75 ? "ahead" : myEval <= -0.75 ? "behind" : "neutral";
     if (panel) panel.dataset.evalMood = mood;
     if (moodLabel) {
-      moodLabel.textContent = mood === "critical" ? "CRITICAL" : mood === "ahead" ? "ADVANTAGE" : mood === "behind" ? "UNDER PRESSURE" : "EQUAL";
+      moodLabel.textContent = mood === "critical" ? "CRITICAL" : mood === "ahead" ? "ADVANTAGE" : mood === "behind" ? "byД YESPRESSUREМ" : "EQUAL";
     }
 
     if (powerBadge) {
@@ -3155,9 +3309,9 @@
   }
 
   /**
-   * УМНЫЙ CHOICE LEGITНОГО MOVES С ФИЛЬТРОМ ANTI-BAN T1%:
-   * If текущий процент matches s 1-й line Stockfish превышает threshold (example, 66%),
-   * а 2nd line withoutопаsна и не loses больше 0.45 pawns — выбираетsя 2nd line.
+   * УМНЫЙ CHOICE LEGITНОГО MOVES С ФИЛЬТРОМ ANTI-BANon T1%:
+   * If текущ aboutцgradient matches with 1-й line Stockfish youexceeds bythreshold (ononmeasure, 66%),
+   * а 2nd line safelyon and not loses больше 0.45 pawns — youpicksся 2nd line.
    */
   function chooseAutoMoveOnce(res) {
     if (!res || !res.best) return null;
@@ -3204,7 +3358,7 @@
       }
       const evalDiff = Math.abs(bestEval - avgEval);
 
-      // 1. Принудительное sнижение T1% on преaboveнии safelyго thresholdа Chess.com
+      // 1. onнудлье снин T1% on aboveнии safelyго bythresholdа Chess.com
       if (
         autoT1LimiterEnabled &&
         legitStats.totalMyMoves >= 4 &&
@@ -3212,13 +3366,13 @@
         bestEval >= avgEval &&
         evalDiff <= 48
       ) {
-        return { move: res.average, typeLabel: `🛡 T1-LIMITER (2ND LINE)`, choiceKind: "average" };
+        return { move: res.average, typeLabel: `🛡 T1-LIMITER (2-Я LINE)`, choiceKind: "average" };
       }
 
-      // 2. Еsтеsтвенное вероятноsтное подмешивание 2nd line
+      // 2. Естеwelcomeене вероятсте underмеши 2-й lines
       if (useAverageMoveSometimes && bestEval >= avgEval && evalDiff <= 38) {
         if (Math.random() * 100 < averageMoveFrequency) {
-          return { move: res.average, typeLabel: "❖ 2ND LINE (HUMAN)", choiceKind: "average" };
+          return { move: res.average, typeLabel: "❖ 2-Я LINE (HUMAN)", choiceKind: "average" };
         }
       }
     }
@@ -3227,9 +3381,9 @@
   }
 
   /**
-   * ГЕНЕРАТОР ЧЕЛОВЕЧЕСКИХ TIMINGОВ ДЛЯ CHESS.COM (ANTI-FLAT HISTOGRAM):
-   * Иsключает плоsкую гиsтограмму time: очевидные взятия делаютsя быsтрее,
-   * а sложные tactical position в миттельшпиле получают еsтеsтвенную паузу размышления.
+   * ГЕНЕРАТОР ЧЕЛSЕЧЕСКИХ TIMINGS ДЛЯ CHESS.COM (ANTI-FLAT HISTOGRAM):
+   * Useклюет плоскую гистогframesму time: randomlook captures делаются быстрее,
+   * а слож такск position in ттельшпиле byлуют естеwelcomeенную pause sizeмышления.
    */
   function computeLegitHumanDelayMs(moveObj, mySecs, isDanger) {
     const isRecapture = Boolean(
@@ -3256,11 +3410,11 @@
       minMs = isRecapture ? 270 : (isBook ? 340 : (isTactical ? 680 : 440));
       maxMs = isRecapture ? 540 : (isBook ? 680 : (isTactical ? 1480 : 960));
     } else if (mySecs > 15) {
-      // Bullet / малый оsтаток time
+      // Bullet / мал оста time
       minMs = isRecapture ? 180 : 230;
       maxMs = isRecapture ? 350 : (isTactical ? 580 : 460);
     } else {
-      // Цейтнот (< 15 sec)
+      // Цейтнfrom (< 15 sec)
       minMs = 130;
       maxMs = 260;
     }
@@ -3269,7 +3423,7 @@
     const r2 = Math.random();
     let baseDelay = Math.round(minMs + (r1 * 0.6 + r2 * 0.4) * (maxMs - minMs));
 
-    // Симуляция глубокой задумчивоsти человека в нетривиальных positionх
+    // Симуляция глубо forдчивос human in noривиаль positionх
     if (humanHesitationEnabled && !isRecapture && !isBook && mySecs > 35 && isTactical && Math.random() < 0.38) {
       baseDelay += Math.round(650 + Math.random() * 1100);
     }
@@ -3279,6 +3433,7 @@
 
   function scheduleAutoMoveIfNeeded() {
     if (!autoMoveEnabled || extensionInvalidated || document.hidden) return;
+    if (mobileSession && !mobileSession.effective().autoMoveEnabled) return;
     if (window.__CC_ANDROID_SETTINGS_OPEN__ === true) {
       setAutoStatusText("Automove paused: settings open", "#ffbe0b");
       return;
@@ -3295,7 +3450,7 @@
     }
     if (boardDirty || state.positionKey !== currentPositionKey || !isCachedAnalysisCurrent(state) || cachedMoves.boardKey !== state.boardKey) return;
     if (cachedMoves.analysisIncomplete && !cachedMoves.engineMeta && !cachedMoves.syzygyActive && !cachedMoves.best?.fromSyzygy) {
-      setAutoStatusText("Automove paused: waiting for completed Stockfish analysis.", "#ffbe0b");
+      setAutoStatusText("Automove paused: waiting for finished Stockfish analysis.", "#ffbe0b");
       return;
     }
     if (usesStrictBestMovePolicy() && !isFinalAutoAnalysis(cachedMoves)) {
@@ -3318,7 +3473,7 @@
           totalDelay: 0,
           attempts: 0
         };
-        setAutoStatusText(`🖐 Automove pause (${autoMoveTriggerRate}%) — move by hand or press [X]`, "#ffbe0b");
+        setAutoStatusText(`🖐 Pause automove (${autoMoveTriggerRate}%) — move manually or press [X]`, "#ffbe0b");
         return;
       }
 
@@ -3343,7 +3498,7 @@
         decided: true,
         skip: false,
         move: picked.move,
-        typeLabel: `${picked.typeLabel} • ${(totalDelay / 1000).toFixed(2)}s`,
+        typeLabel: `${picked.typeLabel} • ${(totalDelay / 1000).toFixed(2)}с`,
         choiceKind: picked.choiceKind || "policy",
         totalDelay,
         attempts: 0
@@ -3461,7 +3616,7 @@
 
   function getPrivacyProfileOptions() {
     const profiles = window.ChessCoachPrivacyMask?.profiles || [
-      { id: "custom", label: "Own profile" },
+      { id: "custom", label: "Custom profile" },
       { id: "anonymous", label: "Anonymous streamer" }
     ];
     return profiles.map(profile => `<option value="${profile.id}">${profile.label}</option>`).join("");
@@ -3472,7 +3627,7 @@
     if (badge) {
       badge.textContent = visualMask.enabled
         ? (privacyMaskFoundPlayers === 2 ? "ACTIVE • 2/2 CARDS" : `SEARCHING CARDS • ${privacyMaskFoundPlayers}/2`)
-        : "DISABLED";
+        : "DISABLEDА";
       badge.style.color = visualMask.enabled && privacyMaskFoundPlayers === 2 ? "#6ee7b7" : (visualMask.enabled ? "#f8d477" : "#94a3b8");
     }
   }
@@ -3632,14 +3787,18 @@
   async function executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece) {
     if (isExecutingMove || document.hidden || extensionInvalidated || (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true)) return;
     const runtime = window.__CC_ANDROID_RUNTIME__;
+    if (!mobileSession?.isReady) { setAutoStatusText("Input snapshot is not ready", "#ffbe0b"); return; }
     const failureKey = `${location.href}|${state.positionId}|${state.positionKey}`;
+    if (!manualClick && (isNativeAutoBlocked(state) || nativeMoveBlockedKey === failureKey)) return;
     if (nativeMoveFailureKey !== failureKey) { nativeMoveFailureKey = failureKey; nativeMoveFailures = 0; }
     if (!manualClick && nativeMoveFailures >= 3) {
       setAutoStatusText("Native input not confirmed after 3 attempts. Move manually.", "#ffbe0b");
       return;
     }
     const attempt = ++nativeMoveFailures;
-    const action = { controller: new AbortController(), failureKey, attempt };
+    const action = { controller: new AbortController(), failureKey, attempt,
+      inputState: { url: location.href, board: state.boardElement, positionKey: state.positionKey,
+        myColor: state.myColor, lastEnemy: lastRealEnemyMove, sawOpponent: false } };
     activeNativeMove = action;
     const pageUrl = location.href;
     const previousMove = lastOurExecutedMove;
@@ -3661,7 +3820,7 @@
     });
     const requireVisibleContext = () => {
       if (activeNativeMove !== action || action.controller.signal.aborted || extensionInvalidated || document.hidden ||
-          location.href !== pageUrl || !boardEl?.isConnected || runtime.disposed || (!manualClick && !autoMoveEnabled)) throw new Error("Move context changed");
+           location.href !== pageUrl || !boardEl?.isConnected || runtime.disposed || (!manualClick && !mobileSession.effective().autoMoveEnabled)) throw new Error("Move context changed");
       if (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true) throw new Error("Automove paused: settings open");
       if (findChessComBoardElement() !== boardEl) throw new Error("Board was replaced");
       const guardReason = !manualClick && safeAntiBanGuard ? getAutoMoveGuardReason() : "";
@@ -3674,7 +3833,7 @@
       if (!fresh || fresh.animating || fresh.boardElement !== boardEl || fresh.positionKey !== state.positionKey ||
           fresh.boardKey !== state.boardKey || fresh.actualTurn !== fresh.myColor || fresh.myColor !== state.myColor ||
           fresh.isBlackOrientation !== state.isBlackOrientation || !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) {
-        throw new Error("Position or move queue changed");
+        throw new Error("Position or queue move changed");
       }
     };
     const pointFor = square => {
@@ -3688,22 +3847,13 @@
     };
     const sendGesture = async (actionType, points, target = boardEl) => {
       requireVisibleContext();
-      for (const point of points) {
-        let hit = document.elementFromPoint(point.x, point.y);
-        const visited = new Set();
-        while (hit?.shadowRoot?.elementFromPoint && !visited.has(hit)) {
-          visited.add(hit);
-          const inner = hit.shadowRoot.elementFromPoint(point.x, point.y);
-          if (!inner || inner === hit) break;
-          hit = inner;
-        }
-        let inside = false;
-        for (let node = hit; node; node = node.parentElement || node.getRootNode?.()?.host) {
-          if (node === target) { inside = true; break; }
-        }
-        if (!inside) throw new Error("Board covered by menu or another element");
-      }
-      const result = await runtime.nativeRequest("input.gesture", { action: actionType, points, durationMs: actionType === "tap" ? 80 : 180 });
+      const targetId = mobileSession.registerTarget(target);
+      const snapshot = runtime.captureInputSnapshot({ points, targetId });
+      if (!snapshot || !snapshot.hit || snapshot.animating) throw new Error("Input target is obscured or moving");
+      action.gestureSent = true;
+      const result = await runtime.nativeRequest("input.gesture", {
+        action: actionType, points, durationMs: actionType === "tap" ? 80 : 180, targetId, snapshot
+      }, { signal: action.controller.signal });
       if (result?.ok !== true || result?.dispatched !== true) throw new Error("Android did not confirm touch send");
     };
     const moveConfirmed = fresh => Boolean(fresh && fresh.boardElement === boardEl && fresh.boardKey !== state.boardKey &&
@@ -3735,7 +3885,7 @@
           if (moveConfirmed(fresh)) break;
           if (fresh && fresh.boardKey !== state.boardKey &&
               !(fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === movingPiece)) {
-            throw new Error("Position changed before promotion choice");
+            throw new Error("Position changed until promotion choice");
           }
           const color = state.myColor === "b" ? "b" : "w";
           const selector = `.promotion-window .promotion-piece.${color}${promoPiece}, .promotion-menu [data-piece='${color}${promoPiece}'], .promotion-piece.${color}${promoPiece}`;
@@ -3759,11 +3909,16 @@
         }
         await wait(75);
       }
-      if (!completed) throw new Error(promoPiece ? "Promotion not confirmed on board" : "Touches sent, but move on board not confirmed");
+      if (!completed) throw new Error(promoPiece ? "promotion not confirmed on board" : "Touches sent, but move not confirmed on the board");
       lastOurExecutedMove = moveObj;
       setAutoStatusText(`Move confirmed: ${moveObj.from} -> ${moveObj.to}`, "#38b000");
     } catch (error) {
       if (activeNativeMove === action) {
+        if (action.gestureSent) {
+          nativeMoveBlockedKey = failureKey;
+          nativeMoveBlockedState = action.inputState;
+        }
+        mobileSession.reportError(error);
         lastOurExecutedMove = previousMove;
         setAutoStatusText(`Native input: ${error.message || "error"}${error.code ? ` [${error.code}]` : ""}`, "#ffbe0b");
       }
@@ -3772,8 +3927,9 @@
       action.controller.abort();
       if (activeNativeMove === action) {
         activeNativeMove = null;
+        if (completed) { nativeMoveBlockedKey = ""; nativeMoveBlockedState = null; }
         moveCooldownUntil = Date.now() + (completed ? 180 : 350);
-        setMoveExecutionState(false, completed ? "confirmed" : "failed");
+        setMoveExecutionState(false, completed ? "confirmed" : action.cancelReason || "failed");
         triggerDebouncedCycle();
       }
     }
@@ -3828,7 +3984,7 @@
     const cellH = r.height / 8;
     const isBlack = state.isBlackOrientation;
 
-    // Нормальное раsпределение вокруг center клетки (±22% от ширины поля)
+    // Normлье limitен вwindowруг centerа squareки (±22% from ширины squares)
     const gaussianShift = () => ((Math.random() + Math.random() + Math.random()) / 3 - 0.5) * 0.44;
 
     const sqToHumanPoint = (sq) => {
@@ -3908,13 +4064,13 @@
       target.dispatchEvent(new MouseEvent(type, evInit));
     };
 
-    // Раsчет time движения мыши между клетками по Закону Фиттsа
+    // ст time двиния mouse between square by Заку Фиттса
     const distCells = Math.hypot(p2.col - p1.col, p2.row - p1.row);
     const travelMs = Math.round(135 + distCells * 42 + Math.random() * 85);
     const hold1Ms = Math.round(68 + Math.random() * 58);
     const hold2Ms = Math.round(72 + Math.random() * 64);
 
-    // Контрольная точка для дуги Bézier (еsтеsтвенный изгиб киsти руки)
+    // Ктрольonя точ for дуги Without (естеwelcomeен fromгиб кис hand)
     const midX = (p1.x + p2.x) / 2 + (Math.random() - 0.5) * 48;
     const midY = (p1.y + p2.y) / 2 + (Math.random() - 0.5) * 48;
 
@@ -3994,12 +4150,12 @@
       setTimeout(findAndSelectPromotion, 95);
     };
 
-    // Наведение на sтартовую piece и нажатие
+    // onведен on стартовую piece and onжат
     firePointerAndMouse("mousemove", p1.x - 4, p1.y - 3, 0);
     firePointerAndMouse("mousedown", p1.x, p1.y, 1);
 
     if (autoClickMethod === "bezier_drag") {
-      // Variation 1: Плавное перетаsкивание pieces по кривой Bézier
+      // Variation 1: Smoothе перетаски pieces by curvesвой Without
       setTimeout(() => {
         animateBezierCurve(7, travelMs, 1, () => {
           const slipX = p2.x + (Math.random() > 0.5 ? 1 : -1);
@@ -4009,7 +4165,7 @@
         });
       }, 35);
     } else {
-      // Variation 2: Биометричеsкий 2-Клик s полетом курsора по дуге Bézier
+      // Variation 2: Биетрис 2-Click with squareт курсора by дуге Without
       setTimeout(() => {
         firePointerAndMouse("mouseup", p1.x + (Math.random() > 0.5 ? 1 : -1), p1.y, 0);
         animateBezierCurve(6, travelMs, 0, () => {
@@ -4322,7 +4478,7 @@
 
   /**
    * ПАРСЕР СОСТОЯНИЯ BOARD CHESS.COM (<wc-chess-board>):
-   * Считывает клаssы вида "piece wp square-54", ориентацию .flipped и чей sейчаs move.
+   * Сcheatывает классы виyes "piece wp square-54", орнтацию .flipped and й сейс move.
    */
   function captureBoardState(allowCachedDuringAnim = false) {
     const boardEl = findChessComBoardElement();
@@ -4404,7 +4560,7 @@
       }
     }
 
-    // Определение очередноsти move на Chess.com
+    // Оlimitен randomредness move on Chess.com
     const startFenBoard = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
     const trustedHistoryTurn = gameStartedFromInitial ? (uciHistoryList.length % 2 === 0 ? "w" : "b") : null;
     const highlightedTurn = detectTurnFromLastMoveHighlights(boardEl, grid);
@@ -4529,6 +4685,7 @@
   }
 
   function renderArrowsOverlay(state, res) {
+    mobileSession?.applyVisualPolicy(getShadow());
     const tokenMismatch = currentPositionKey && (boardDirty || (res.positionId !== undefined && res.positionId !== positionId) || state?.positionKey !== currentPositionKey);
     if (!state || !res || tokenMismatch) {
       hideArrows();
@@ -4640,7 +4797,7 @@
       }
 
       if (arrowStyle === "sq_Step_badges") {
-        const tag = isBest ? "BEST" : (roleLabel === "avg" ? "2ND LINE" : "BLUNDER");
+        const tag = isBest ? "BEST" : (roleLabel === "avg" ? "2-Я LINE" : "BLUNDER");
         return `
           <rect x="${p1.x - 44}" y="${p1.y - 44}" width="88" height="88" rx="14"
                 fill="none" stroke="${solidColor}" stroke-width="${sw * 0.75}" stroke-dasharray="12 6" stroke-opacity="${op * 0.85}" />
@@ -4964,9 +5121,9 @@
     if (!modalEl) return;
     const text = (modalEl.innerText || "").toLowerCase();
 
-    const whiteWon = text.includes("white won") || text.includes("White won");
-    const blackWon = text.includes("black won") || text.includes("Black won");
-    const youWon = text.includes("you won") || text.includes("you won");
+    const whiteWon = text.includes("white won") || text.includes("white bytroubleor");
+    const blackWon = text.includes("black won") || text.includes("black bytroubleor");
+    const youWon = text.includes("you won") || text.includes("you bytroubleor");
     const isDraw = text.includes("draw") || text.includes("draw") || text.includes("stalemate") || text.includes("stalemate");
 
     if (!whiteWon && !blackWon && !youWon && !isDraw) return;
@@ -4985,7 +5142,7 @@
             $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
           }
           $("cc-opening-name").textContent =
-            outcome === "win" ? "👑 WIN SAVED TO DATABASE" : "◈ GAME ERRORS STUDIED";
+            outcome === "win" ? "👑 WIN SAVED TO DATABASE" : "◈ GAME ERRORS LEARNED";
         }
       }
     );
@@ -5006,7 +5163,7 @@
     if (banner && suspectEngineStreak >= 5) {
       banner.style.display = "block";
       $("cc-peer-detector-text").textContent =
-        `Opponent played ${suspectEngineStreak} moves in a row on 1st line without eval loss (0.00 CP Loss). High chance of software!`;
+        `Opponent played ${suspectEngineStreak} moves in a row by 1st lines without eval loss (0.00 CP Loss). High probability software!`;
     }
   }
 
@@ -5239,8 +5396,8 @@
           nearestThreatText: isMateIn1
             ? `👑 MATE IN 1 MOVE: ${updatedBest.from}→${updatedBest.to}#`
             : (isMateIn2
-                ? `👑 FORCED MATE IN 2 MOVES: ${updatedBest.from}→${updatedBest.to}+`
-                : `SF LOCAL plan: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
+                ? `👑 FORCE. MATE IN 2 MOVES: ${updatedBest.from}→${updatedBest.to}+`
+                : `Plan SF LOCAL: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
         }
       : null;
 
@@ -5266,6 +5423,7 @@
 
   function applyAnalysisResult(state, res, isDeepPass = false, prevBestUci = "") {
     if (!res || res.error) return;
+    if (res.average && res.average.uci === res.best?.uci) res = { ...res, average: null };
     if (isNegativeMateMove(res.average)) res = { ...res, average: null };
     const resultMeta = res.meta || null;
     if (resultMeta && !isCurrentAnalysisMeta(resultMeta)) return;
@@ -5277,13 +5435,13 @@
       return;
     }
     const qualityRank = res.best?.fromSyzygy ? 60 : res.engineMeta ? 50 : isDeepPass ? 30 : 10;
-    if (cachedMoves?.positionId === positionId && Number(cachedMoves.qualityRank || 0) > qualityRank) return;
+    if (cachedMoves?.positionId === positionId && cachedMoves.meta?.analysisId === positionAnalysisId && Number(cachedMoves.qualityRank || 0) > qualityRank) return;
     if (!isDeepPass && res.lastOpponentMove) {
       updateBehavioralCheatDetector(res);
     }
     cachedMoves = { ...res, meta: resultMeta, sessionId: analysisSessionId, positionId, positionKey: currentPositionKey, qualityRank };
 
-    // Запоминаем лучший и average move на наш move, чтобы отsлеживать T1% даже on ручной игре мышкой
+    // Заbyonем best and average move on onш move, to fromслева T1% yes on руч игре мыш
     if (state.actualTurn === state.myColor) {
       legitStats.lastBestUciOnMyTurn = res.best?.uci || "";
       legitStats.lastAvgUciOnMyTurn = res.average?.uci || "";
@@ -5300,7 +5458,7 @@
       recordEvalPoint(state.boardKey, res.best.whitePerspectiveEval ?? res.best.evalPawns, res.opponentEvalDropPawns);
     }
 
-    if (audioRadarEnabled && window.ChessFX && state.actualTurn === state.myColor) {
+    if (audioRadarEnabled && (!mobileSession || mobileSession.effective().audioRadarEnabled) && window.ChessFX && state.actualTurn === state.myColor) {
       const dropVal = parseFloat(res.opponentEvalDropPawns) || 0;
       if (res.best && (res.best.isMateInOne || res.best.isForcedMateInTwo || res.best.isCheckmate)) {
         window.ChessFX.playTacticalAudioPing("mate_lock", state.boardKey);
@@ -5320,7 +5478,7 @@
       if (finalPick?.move) {
         currentTurnDecision.move = finalPick.move;
         currentTurnDecision.choiceKind = finalPick.choiceKind || "policy";
-        currentTurnDecision.typeLabel = `${finalPick.typeLabel} • ${(currentTurnDecision.totalDelay / 1000).toFixed(2)}s`;
+        currentTurnDecision.typeLabel = `${finalPick.typeLabel} • ${(currentTurnDecision.totalDelay / 1000).toFixed(2)}с`;
       }
     }
 
@@ -5335,12 +5493,12 @@
         const mateTitleEl = $("cc-mate-banner-title");
         if (mateTitleEl) {
           mateTitleEl.textContent = res.best.isMateInOne
-            ? "👑💀 MATE IN 1 MOVE ON BOARD!"
+            ? "👑💀 MATE IN 1 MOVE on BOARD!"
             : "👑⚡ FORCED MATE IN 2 MOVES!";
         }
         $("cc-mate-banner-text").textContent = res.best.isMateInOne
-          ? `Move ${res.best.from} → ${res.best.to}# delivers clean mate in 1 move!`
-          : `Move ${res.best.from} → ${res.best.to}+ delivers forced mate in 2 moves!`;
+          ? `Move ${res.best.from} → ${res.best.to}# delivers pure mate in 1 move!`
+          : `Move ${res.best.from} → ${res.best.to}+ delivers forced mate in 2 move!`;
       } else {
         mateBanner.style.display = "none";
       }
@@ -5385,7 +5543,7 @@
         $("cc-best-title").innerHTML = `✦ BEST MOVE (1ST LINE) • ${styleLabel}${badgesHtml}`;
       }
 
-      if ((isDeepPass || res.best.isMateInOne) && isBrilliant && phonkEditEnabled && state.actualTurn === state.myColor && window.ChessFX) {
+      if ((isDeepPass || res.best.isMateInOne) && isBrilliant && phonkEditEnabled && (!mobileSession || mobileSession.effective().mobileVisualEffects) && state.actualTurn === state.myColor && window.ChessFX) {
         window.ChessFX.triggerBrilliantPhonkEdit(getShadow(), res.best, state, 15000, false);
       }
 
@@ -5394,23 +5552,23 @@
       $("cc-best-eval").textContent = `${evalPrefix}${res.best.evalPawns}`;
       $("cc-best-desc").textContent =
         (improvedByDeep ? "✦ [IMPROVED BY DEPTH] " : "") + explainWithModule(res.best, "best", state.fen);
-      $("cc-best-pv").textContent = res.best.pvLine ? `◈ Line: ${res.best.pvLine}` : "";
+      $("cc-best-pv").textContent = res.best.pvLine ? `◈ Variation: ${res.best.pvLine}` : "";
 
       const openingCard = $("cc-opening-card");
       const detectedOpening = window.ChessOpenings ? window.ChessOpenings.detect(uciHistoryList) : null;
 
       if (res.syzygyActive && res.best.fromSyzygy) {
         if (openingCard) openingCard.style.borderLeftColor = "#c77dff";
-        $("cc-opening-name").textContent = `🔮 SYZYGY TABLEBASE (${res.pieceCount} PIECES ON BOARD)`;
-        $("cc-opening-plan").textContent = `${res.best.syzygyBadge || "100% endgame accuracy"}.`;
+        $("cc-opening-name").textContent = `🔮 TABLE SYZYGY (${res.pieceCount} PIECES ON BOARD)`;
+        $("cc-opening-plan").textContent = `${res.best.syzygyBadge || "100% accuracy endgame"}.`;
       } else if (res.isDangerPosition && !res.best.isMateInOne) {
         if (openingCard) openingCard.style.borderLeftColor = "#ff2a85";
-        $("cc-opening-name").textContent = `🛡 ANTI-MATE RADAR: ${res.dangerReason || "KING THREAT"}!`;
-        $("cc-opening-plan").textContent = `Threat to your king detected — recommend defense ${res.best.from} → ${res.best.to}.`;
+        $("cc-opening-name").textContent = `🛡 ANTI-MATE RADAR: ${res.dangerReason || "THREAT KING"}!`;
+        $("cc-opening-plan").textContent = `Aboutonрalreadyon threat yourhim king — recommend defenseу ${res.best.from} → ${res.best.to}.`;
       } else if (res.hangingSquare && !res.best.isMateInOne) {
         if (openingCard) openingCard.style.borderLeftColor = "#ffbe0b";
-        $("cc-opening-name").textContent = `⚠️ WARNING: SQUARE ${res.hangingSquare.toUpperCase()} UNDER ATTACK!`;
-        $("cc-opening-plan").textContent = `Piece on ${res.hangingSquare} is attacked — defend or move it!`;
+        $("cc-opening-name").textContent = `⚠️ WARNING: square ${res.hangingSquare.toUpperCase()} UNDER ATTACK!`;
+        $("cc-opening-plan").textContent = `Piece on ${res.hangingSquare} attacked — defense or move away its!`;
       } else {
         if (openingCard) openingCard.style.borderLeftColor = "var(--cc-accent)";
         if (res.best.bookName) {
@@ -5434,7 +5592,7 @@
           !res.best.fromSyzygy
         );
         if (!isDeepPass && needsDeepVerification && !isExtremePanicTime) {
-          setAutoStatusText(`🛡 Deep check of tactical threats...`, "#ffbe0b");
+          setAutoStatusText(`🛡 Deep aboutcheck tactical threats...`, "#ffbe0b");
         } else {
           scheduleAutoMoveIfNeeded();
         }
@@ -5492,7 +5650,8 @@
       shutdownOrphanedScript();
       return;
     }
-    if (document.hidden) return;
+    if (document.hidden || (mobileSession && !mobileSession.isReady)) return;
+    if (mobileSession && window.__CC_ANDROID_SETTINGS_OPEN__ === true && !showArrows && !showEvalBar) return;
     if (forceByButton) clearAnalysisRetry();
 
     ensurePanel();
@@ -5514,6 +5673,12 @@
     }
     if (state.animating) return;
     adoptPositionState(state);
+    const mobileConfigKey = mobileSession ? getMobileAnalysisConfig() : "";
+    mobileSession?.observe(state, mobileConfigKey);
+    if (mobileSession && isNativeAutoBlocked(state) && state.actualTurn === state.myColor && !forceByButton) {
+      StockfishWasmEngine.terminate();
+      return;
+    }
     if (pendingAnalysisRetry && (pendingAnalysisRetry.url !== location.href || pendingAnalysisRetry.positionKey !== state.positionKey)) clearAnalysisRetry();
     if (!forceByButton && (isExecutingMove || Date.now() < moveCooldownUntil)) return;
     if (!forceByButton && pendingAnalysisRetry &&
@@ -5535,19 +5700,20 @@
       if (deepBadge) deepBadge.style.display = "none";
       if (standbyBox) {
         standbyBox.style.display = "flex";
-        const mySideText = state.myColor === "w" ? "you are White ⚪" : "you are Black ⚫";
-        $("cc-standby-title").textContent = `Move opponent (${mySideText})`;
+        const mySideText = state.myColor === "w" ? "you for White ⚪" : "you for Black ⚫";
+        $("cc-standby-title").textContent = `Opponent move (${mySideText})`;
       }
       if (activeBox) activeBox.style.display = "none";
       if (autoMoveEnabled) {
-        setAutoStatusText("Waiting for opponent reply on Chess.com...", "#94a3b8");
+        setAutoStatusText("Waiting reply opponent on Chess.com...", "#94a3b8");
       }
       committedBoardKey = "";
+      if (mobileSession) StockfishWasmEngine.terminate();
 
       if (committedEnemyBoardKey !== state.boardKey) {
         committedEnemyBoardKey = state.boardKey;
         hideArrows();
-        if (isAltPressed || heatmapAlwaysOn) {
+        if (isAltPressed || (heatmapAlwaysOn && (!mobileSession || mobileSession.effective().heatmapAlwaysOn))) {
           safeSendMessage({ type: "GET_BOARD_HEATMAP", fen: state.fen, myColor: state.myColor }, (hmRes) => {
             if (hmRes && Array.isArray(hmRes.heatmap)) {
               const fresh = captureBoardState(true);
@@ -5567,6 +5733,11 @@
 
     if (standbyBox) standbyBox.style.display = "none";
     if (activeBox) activeBox.style.display = "flex";
+    if (mobileSession && !mobileSession.canAnalyze(state, forceByButton)) return;
+    if (mobileSession?.hasAnalysis(state.positionKey, mobileConfigKey)) {
+      if (cachedMoves.best && isCachedAnalysisCurrent(state)) scheduleAutoMoveIfNeeded();
+      return;
+    }
 
     if (!forceByButton && state.boardKey === committedBoardKey) {
       if (
@@ -5583,6 +5754,9 @@
       return;
     }
 
+    const lease = mobileSession?.beginAnalysis(state, mobileConfigKey);
+    if (mobileSession && !lease) return;
+    mobileAnalysisLease = lease || null;
     committedBoardKey = state.boardKey;
     committedEnemyBoardKey = "";
     resetTurnDecision();
@@ -5598,7 +5772,7 @@
     const mySecs = getMyRemainingSeconds();
     const enemySecs = getEnemyRemainingSeconds();
     const strictBestPolicy = usesStrictBestMovePolicy();
-    const needAvg = Boolean(!strictBestPolicy && (showAverageMove || useAverageMoveSometimes || autoT1LimiterEnabled));
+    const needAvg = Boolean(!engineMaxMode && (showAverageMove || (!strictBestPolicy && (useAverageMoveSometimes || autoT1LimiterEnabled))));
     const needWorst = Boolean(!strictBestPolicy && showWorstMove && workMode === "all");
     const historyTrustedForState = Boolean(gameStartedFromInitial && state.sideToAnalyze === state.actualTurn);
 
@@ -5623,11 +5797,11 @@
         historyTrusted: historyTrustedForState,
         meta: fastMeta
       },
-      (fastRes) => {
+      async (fastRes) => {
         const responseMeta = fastRes?.meta || fastMeta;
         if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
         if (!fastRes || !fastRes.best || fastRes.error) {
-          activeEngineBoardKey = "";
+          finishCurrentAnalysis(myReqId, "failed");
           clearPositionPresentation(fastRes?.error ? "ANALYSIS ERROR • RETRY..." : "MATE / STALEMATE • NO MOVES");
           committedBoardKey = state.boardKey;
           boardDirty = false;
@@ -5646,7 +5820,7 @@
 
         if (fastCanFinalize) {
           if (deepBadge) deepBadge.style.display = "none";
-          if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+          finishCurrentAnalysis(myReqId);
           return;
         }
 
@@ -5663,6 +5837,12 @@
         const wasmPromise = shouldRunWasm
           ? StockfishWasmEngine.analyze(state.fen, wasmMovetime, needAvg ? 3 : 1, uciHistoryList, historyTrustedForState, { ...deepMeta, engineMaxMode, isDangerPosition: Boolean(fastRes.isDangerPosition || fastRes.hangingSquare), needAverage: needAvg })
           : Promise.resolve(null);
+        if (shouldRunWasm && window.__CC_ANDROID_RUNTIME__) {
+          const dispatch = await StockfishWasmEngine.whenDispatched();
+          if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(deepMeta)) return;
+          deepMeta.ownedEngineRequestId = dispatch?.requestId || "";
+          deepMeta.annotationOnly = true;
+        }
 
         safeSendMessage(
           {
@@ -5705,17 +5885,17 @@
             const requiresFinalEngine = usesStrictBestMovePolicy() || Boolean(finalDeep?.analysisIncomplete);
             if (!backgroundDeepOk && !wasmApplied && !requiresFinalEngine) {
               if (deepBadge) deepBadge.style.display = "none";
-              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              finishCurrentAnalysis(myReqId);
               return;
             }
 
             const hasFinalEngine = Boolean(finalDeep?.engineMeta || finalDeep?.syzygyActive || finalDeep?.best?.fromSyzygy);
             if (requiresFinalEngine && !hasFinalEngine) {
-              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              finishCurrentAnalysis(myReqId, "failed");
               if (!useStockfishWasm) {
                 if (deepBadge) deepBadge.style.display = "none";
                 committedBoardKey = state.boardKey;
-                setAutoStatusText(usesStrictBestMovePolicy() ? "2000+ ELO requires STOCKFISH LOCAL enabled" : "Analysis incomplete: enable Stockfish or move manually.", "#ffbe0b");
+                setAutoStatusText(usesStrictBestMovePolicy() ? "2000+ ELO requires enabled STOCKFISH LOCAL" : "Analysis not finished: enable Stockfish or move manually.", "#ffbe0b");
                 return;
               }
               if (finalEngineRetryCount < 3) {
@@ -5730,6 +5910,7 @@
                 if (deepBadge) deepBadge.style.display = "none";
                 committedBoardKey = state.boardKey;
                 setAutoStatusText("STOCKFISH unavailable • automove blocked", "#ff2a85");
+                scheduleEngineRecovery(state);
               }
               return;
             }
@@ -5741,7 +5922,7 @@
             finalDeep.analysisFinalized = true;
             finalDeep.analysisSource = finalDeep.best?.fromSyzygy ? "syzygy" : (wasmApplied ? "stockfish" : "deep");
             applyAnalysisResult(state, finalDeep, true, firstBestUci);
-            if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+            finishCurrentAnalysis(myReqId);
           }
         );
       }
@@ -5750,7 +5931,14 @@
 
   let rafPending = false;
   function triggerDebouncedCycle() {
-    if (extensionInvalidated || rafPending || isExecutingMove || Date.now() < moveCooldownUntil) return;
+    if (extensionInvalidated || document.hidden || (mobileSession && !mobileSession.isReady) || rafPending || isExecutingMove) return;
+    if (Date.now() < moveCooldownUntil) {
+      if (mobileSession && !cycleWakeTimer) cycleWakeTimer = setTimeout(() => {
+        cycleWakeTimer = null;
+        triggerDebouncedCycle();
+      }, Math.max(16, moveCooldownUntil - Date.now()));
+      return;
+    }
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
@@ -5760,6 +5948,7 @@
 
   let observedBoardNode = null;
   let observedBoardRoots = [];
+  let boardObserversAttached = false;
   const domObserver = new MutationObserver((mutations) => {
     const boardStructureChanged = mutations.some(mutation =>
       mutation.type === "childList" &&
@@ -5767,7 +5956,7 @@
         node?.matches?.(CHESSCOM_BOARD_SELECTOR) || node?.querySelector?.(CHESSCOM_BOARD_SELECTOR)
       )
     );
-    if (mutations.some(mutation => mutation.type === "childList")) cachedChessComRoots = [];
+    if (boardStructureChanged) cachedChessComRoots = [];
     if (boardStructureChanged) cachedChessComBoardElement = null;
     const touchesPiece = mutations.some(mutation => {
       const target = mutation.target;
@@ -5776,8 +5965,10 @@
         node?.matches?.(".piece, piece") || node?.querySelector?.(".piece, piece")
       );
     });
-    if (touchesPiece) markBoardDirty("MOVE");
-    syncVisualPosition();
+    const touchesTurn = mutations.some(mutation => mutation.target?.matches?.("wc-chess-board, chess-board, .clock-player-turn, .clock-running, .clock-bottom, .clock-top"));
+    if (mobileSession && !touchesPiece && !boardStructureChanged && !touchesTurn) return;
+    if (touchesPiece || touchesTurn || boardStructureChanged) markBoardDirty("MOVE");
+    if (!mobileSession) syncVisualPosition();
     triggerDebouncedCycle();
   });
   const boardResizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => syncVisualPosition()) : null;
@@ -5786,7 +5977,7 @@
     if (extensionInvalidated || !isContextValid()) return;
     const boardEl = findChessComBoardElement();
     const roots = boardEl ? getChessComBoardRoots(boardEl) : [];
-    if (boardEl !== observedBoardNode || roots.length !== observedBoardRoots.length || roots.some((root, i) => root !== observedBoardRoots[i])) {
+    if (!boardObserversAttached || boardEl !== observedBoardNode || roots.length !== observedBoardRoots.length || roots.some((root, i) => root !== observedBoardRoots[i])) {
       domObserver.disconnect();
       if (boardResizeObserver) boardResizeObserver.disconnect();
       if (boardEl !== observedBoardNode) {
@@ -5794,17 +5985,18 @@
       }
       observedBoardNode = boardEl;
       observedBoardRoots = roots;
+      boardObserversAttached = true;
       domObserver.observe(document.documentElement, { childList: true, subtree: true });
       for (const root of roots) {
         domObserver.observe(root, {
           childList: true,
           subtree: true,
           attributes: true,
-          attributeFilter: ["class", "style", "orientation"]
+          attributeFilter: ["class", "style", "orientation", "turn", "data-turn", "side-to-move"]
         });
       }
       if (boardEl && boardResizeObserver) boardResizeObserver.observe(boardEl);
-      syncVisualPosition();
+      if (!mobileSession) syncVisualPosition();
       triggerDebouncedCycle();
     }
   }
@@ -5831,11 +6023,53 @@
   };
 
   try { chrome.storage?.onChanged?.addListener(handleStorageChanges); } catch (e) {}
-  loadSettings();
-  ensureObserversAttached();
+  function scheduleMobilePoll() {
+    clearTimeout(mobilePollTimer);
+    if (extensionInvalidated || document.hidden || !mobileSession?.isReady) return;
+    mobilePollTimer = setTimeout(() => {
+      mobilePollTimer = null;
+      if (extensionInvalidated || document.hidden) return;
+      ensureObserversAttached();
+      if (!isExecutingMove && Date.now() >= moveCooldownUntil) runCycle(false);
+      scheduleMobilePoll();
+    }, 1600);
+  }
+
+  const settingsReady = loadSettings();
+  if (mobileSession) {
+    Promise.all([settingsReady, mobileSession.ready]).then(() => {
+      if (extensionInvalidated) return;
+      unregisterMobileCore = mobileSession.registerCore("chesscom", {
+        captureState: () => captureBoardState(true),
+        isAnimating: board => Boolean(queryChessComBoard(board, ".piece.dragging, .piece.animating").length),
+        viewState: () => ({ executing: isExecutingMove, bestUci: cachedMoves.best?.uci || null,
+          finalAnalysis: Boolean(cachedMoves.engineMeta || cachedMoves.syzygyActive), retryPending: Boolean(pendingAnalysisRetry), nativeInputBlocked: Boolean(nativeMoveBlockedState) }),
+        cancelSearch() {
+          analysisRequestId++;
+          positionAnalysisId++;
+          activeEngineBoardKey = "";
+          mobileAnalysisLease = null;
+          StockfishWasmEngine.cancel();
+          clearAnalysisRetry();
+        },
+        suspend: suspendMobileCore,
+        resume() {
+          boardDirty = true;
+          ensureObserversAttached();
+          triggerDebouncedCycle();
+          scheduleMobilePoll();
+        },
+        refreshVisuals() { mobileSession.applyVisualPolicy(shadowRoot); triggerDebouncedCycle(); }
+      });
+      mobileSession.applyVisualPolicy(shadowRoot);
+      ensureObserversAttached();
+      triggerDebouncedCycle();
+      scheduleMobilePoll();
+    }).catch(error => mobileSession.reportError(error));
+  } else ensureObserversAttached();
 
   let lastIdleBoardPollAt = 0;
-  mainIntervalId = setInterval(() => {
+  if (!mobileSession) mainIntervalId = setInterval(() => {
     if (extensionInvalidated || !isContextValid()) {
       shutdownOrphanedScript();
       return;

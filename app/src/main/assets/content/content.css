@@ -106,7 +106,7 @@
   text-rendering: optimizeLegibility;
 }
 
-/* CUSTOM BACKGROUND MENU FROM FILE PICKER */
+/* MAPСТОМНЫЙ BACKGROUND MENU from FILE PICKER */
 #cc-custom-bg-layer {
   position: absolute;
   inset: 0;
@@ -227,12 +227,35 @@
 }
 
 #chesscoach-panel.cc-minimized {
-  width: 350px;
-  min-height: 50px;
-  height: 50px;
+  width: min(350px, calc(100vw - 16px));
+  min-height: 86px;
+  height: auto;
 }
 
-/* ФИЛЬТРАЦИЯ ЭЛЕМЕНТОВ ПО MODEАМ HvH / ALL / LEGIT */
+#cc-project-strip {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--cc-border-soft);
+  background: rgba(7, 9, 15, 0.88);
+  font-size: 10.5px;
+}
+.cc-free-badge { color: var(--cc-accent); font-size: 9px; font-weight: 800; letter-spacing: .05em; }
+#cc-project-strip a { flex: 1; min-width: 0; color: var(--cc-text-primary); text-decoration: none; user-select: text; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cc-project-strip a:hover { color: var(--cc-accent); text-decoration: underline; }
+.cc-project-button { min-height: 30px; padding: 4px 8px; border: 1px solid var(--cc-border-strong); border-radius: 7px; background: transparent; color: var(--cc-text-strong); font-family: inherit; font-size: 10.5px; font-weight: 600; line-height: 1.4; cursor: pointer; white-space: nowrap; }
+#cc-project-strip :is(a, button):focus-visible { outline: 2px solid var(--cc-accent); outline-offset: 2px; }
+@media (pointer: coarse) {
+  #cc-project-strip { min-height: 44px; }
+  #cc-project-strip :is(a, button) { min-height: 44px; display: flex; align-items: center; }
+}
+
+/* ФИЛЬТРATION ЭЛЕМЕНТS by MODEАМ HvH / ALL / LEGIT */
 #chesscoach-panel[data-work-mode="hvh"] .cc-hide-in-hvh {
   display: none !important;
 }
@@ -315,7 +338,7 @@
   transform: translateY(-1px);
 }
 
-/* TRIPLE SWITCH MODES: HvH — ALL — LEGIT */
+/* ТРОЙНОЙ ПЕРЕКЛЮЧАТЕЛЬ MODES: HvH — ALL — LEGIT */
 #cc-mode-switcher-bar {
   position: relative;
   z-index: 3;
@@ -436,7 +459,7 @@
   border-color: var(--cc-accent);
 }
 
-/* ЖИВАЯ TELEMETRY GAME 24/7 (WORKS И В OPPONENT'S TURN) */
+/* ЖИВ TELEMETRY GAME 24/7 (РАБfromАЕТ И В MOVE OPPONENT) */
 #cc-live-telemetry-card {
   background: linear-gradient(145deg, rgba(12, 17, 28, 0.90), rgba(18, 12, 30, 0.88));
   border: 1px solid rgba(0, 245, 212, 0.28);

@@ -46,7 +46,7 @@
 
   const PREMOVE_RISK_LABELS = {
     1: "🛡 Lv. 1: 100% Force (Honest interrupt / 1 move)",
-    2: "⚡ Lv. 2: Force + Reliable theory",
+    2: "⚡ Lv. 2: Force + reliable theory",
     3: "🎯 Lv. 3: Smart Blitz (Multi-branch SEE)",
     4: "🔥 Lv. 4: Slaughter 1+0 (Maximum premoves)"
   };
@@ -94,20 +94,22 @@
   ]);
   const storageKey = key => `${STORAGE_PREFIX}${key}`;
 
-  // Mode работы menu: "all" | "hvh" | "legit"
+  // Mode workfromы menu: "all" | "hvh" | "legit"
   let workMode = "all";
+  let mobilePreferenceUnsubscribe = null;
+  let mobilePreferenceLoad = 0;
   let activeTabId = "analyzer";
   let panelLeft = null;
   let panelTop = null;
   let panelMinimized = false;
   let panelHidden = false;
 
-  // Custom фон из проводника
+  // Custom background from aboutводни
   let customBgDataUrl = "";
   let customBgDim = 0.72;
   let customBgBlur = 4;
 
-  // Live telemetry 24/7 (работает даже в move opponent)
+  // Live telemetry 24/7 (workfromает yes in move opponent)
   let liveTelemetryEnabled = true;
   let teleShowClocks = true;
   let teleShowEngine = true;
@@ -162,7 +164,7 @@
   let phonkEditEnabled = true;
   let mateStyle = "phonk_skull";
   let roflMode = true;
-  let safeAntiBanGuard = true;
+  let safeAntiBanGuard = false;
   let welcomeBannerHidden = false;
 
   let castlingRights = { K: true, Q: true, k: true, q: true };
@@ -222,6 +224,8 @@
   let activeNativeMove = null;
   let nativeMoveFailureKey = "";
   let nativeMoveFailures = 0;
+  let nativeMoveBlockedKey = "";
+  let nativeMoveBlockedState = null;
   let moveCooldownUntil = 0;
   let currentTurnDecision = {
     boardKey: "",
@@ -247,6 +251,15 @@
   let mainIntervalId = null;
   let neuralCanvasRafId = null;
   let uiAbortController = null;
+  const mobileSession = window.__CC_ANDROID_GAME_SESSION__ || null;
+  let unregisterMobileCore = null;
+  let mobileAnalysisLease = null;
+  let mobilePollTimer = null;
+  let cycleWakeTimer = null;
+  let engineRecoveryTimer = null;
+  let boardMutationTimer = null;
+  let deferredRecalculate = false;
+  let nativeBlockEngineReleasedKey = "";
 
   const StockfishWasmEngine = window.ChessCoachEngine.create({
     isEnabled: () => useStockfishWasm && !extensionInvalidated && isContextValid()
@@ -261,6 +274,7 @@
   }
 
   function handleEngineVisibilityChange(event) {
+    if (mobileSession) return;
     cancelNativeMove("visibility");
     clearAnalysisRetry();
     analysisRequestId++;
@@ -281,6 +295,11 @@
     extensionInvalidated = true;
     cancelNativeMove("shutdown");
     clearAnalysisRetry();
+    if (unregisterMobileCore) { unregisterMobileCore(); unregisterMobileCore = null; }
+    clearTimeout(mobilePollTimer);
+    clearTimeout(cycleWakeTimer);
+    clearTimeout(engineRecoveryTimer);
+    clearTimeout(boardMutationTimer);
     try { StockfishWasmEngine.terminate(); } catch (e) {}
     if (mainIntervalId) { clearInterval(mainIntervalId); mainIntervalId = null; }
     if (neuralCanvasRafId) { cancelAnimationFrame(neuralCanvasRafId); neuralCanvasRafId = null; }
@@ -307,6 +326,7 @@
     window.removeEventListener("cc-mobile-lifecycle", handleMobileMoveLifecycle);
     try {
       if (domObserver) domObserver.disconnect();
+      if (boardDiscoveryObserver) boardDiscoveryObserver.disconnect();
     } catch (e) {}
     if (shadowRoot?.host?.isConnected) shadowRoot.host.remove();
     shadowRoot = null;
@@ -317,9 +337,43 @@
 
   contentInstanceHandle = Object.freeze({
     isAlive: () => !extensionInvalidated && isContextValid(),
+    revive: () => mobileSession?.revive(),
     shutdown: () => shutdownOrphanedScript()
   });
   Object.defineProperty(window, CONTENT_INSTANCE_KEY, { value: contentInstanceHandle, configurable: true });
+
+  function isOrphanedContextError(error) {
+    if (!isContextValid() || window.__CC_ANDROID_RUNTIME__?.disposed) return true;
+    const code = String(error?.code || "");
+    const message = String(error?.message || error || "");
+    return code === "CONTEXT_INVALIDATED" || /(?:extension context invalidated|android runtime is disposed)/i.test(message);
+  }
+
+  function handleMessageCallbackFailure(error) {
+    console.error("[ChessCoach] Lichess response callback failed:", error);
+    if (isOrphanedContextError(error)) {
+      shutdownOrphanedScript();
+      return;
+    }
+    mobileSession?.reportError(error);
+    if (mobileAnalysisLease) {
+      mobileSession?.finishAnalysis(mobileAnalysisLease, "failed");
+      mobileAnalysisLease = null;
+      activeEngineBoardKey = "";
+      committedBoardKey = "";
+    }
+    setAutoStatusText(`Error Lichess: ${String(error?.message || error || "unknown error").slice(0, 120)}`, "#ffbe0b");
+  }
+
+  function invokeMessageCallback(callback, value) {
+    if (typeof callback !== "function") return;
+    try {
+      const result = callback(value);
+      if (result && typeof result.then === "function") result.catch(handleMessageCallbackFailure);
+    } catch (error) {
+      handleMessageCallbackFailure(error);
+    }
+  }
 
   function safeSendMessage(payload, callback) {
     if (extensionInvalidated || !isContextValid()) {
@@ -330,16 +384,17 @@
       chrome.runtime.sendMessage(payload, (res) => {
         try {
           if (chrome.runtime.lastError) {
-            if (callback) callback({ error: chrome.runtime.lastError.message, status: "error", meta: payload.meta || null });
+            invokeMessageCallback(callback, { error: chrome.runtime.lastError.message, status: "error", meta: payload.meta || null });
             return;
           }
-          if (callback) callback(res);
+          invokeMessageCallback(callback, res);
         } catch (err) {
-          shutdownOrphanedScript();
+          handleMessageCallbackFailure(err);
         }
       });
     } catch (err) {
-      if (callback) callback({ error: String(err?.message || err), status: "error", meta: payload.meta || null });
+      if (isOrphanedContextError(err)) shutdownOrphanedScript();
+      else invokeMessageCallback(callback, { error: String(err?.message || err), status: "error", meta: payload.meta || null });
     }
   }
 
@@ -367,8 +422,15 @@
     return getShadow().getElementById(id);
   }
 
-  function saveSetting(obj) {
+  function saveSetting(obj, recalculate = false) {
     if (extensionInvalidated || !isContextValid()) return;
+    const preferences = window.__CC_MOBILE_PREFERENCES__;
+    if (preferences) {
+      const write = preferences.update("lichess", obj, { source: "core", recalculate });
+      write.catch(error => console.warn("[ChessCoach] Settings were not saved:", error?.message || error));
+      return write;
+    }
+    if (window.__CC_ANDROID_RUNTIME__) return;
     try {
       if (chrome.storage && chrome.storage.local) {
         const scoped = Object.fromEntries(Object.entries(obj || {}).map(([key, value]) => [storageKey(key), value]));
@@ -471,6 +533,12 @@
   }
 
   function applyWorkModePreset(mode, triggerSave = true) {
+    if (window.__CC_MOBILE_PREFERENCES__) {
+      if (!["all", "hvh", "legit"].includes(mode)) return;
+      if (triggerSave) saveSetting({ workMode: mode });
+      else { workMode = mode; updateUIValues(); }
+      return;
+    }
     workMode = mode;
     const panel = $("chesscoach-panel");
     if (panel) {
@@ -585,10 +653,10 @@
   function getDynamicGreetingText() {
     const hour = new Date().getHours();
     const user = detectPlayerDisplayName();
-    if (hour >= 5 && hour < 12) return `☀️ Good morning, ${user}! Ready to dominate Lichess?`;
-    if (hour >= 12 && hour < 18) return `⚡ Hello, ${user}! Tactical radar charged at 100%`;
-    if (hour >= 18 && hour < 23) return `🌌 Good evening, ${user}! Time for hard domination`;
-    return `🌙 Night session, ${user}? Engine at maximum focus!`;
+    if (hour >= 5 && hour < 12) return `☀️ Good morning, ${user}! Ready to crush Lichess?`;
+    if (hour >= 12 && hour < 18) return `⚡ Hello, ${user}! Tactical radar charged on 100%`;
+    if (hour >= 18 && hour < 23) return `🌌 Good evening, ${user}! Time hard domination`;
+    return `🌙 Nightonя session, ${user}? Engine in maximum focus!`;
   }
 
   function initNeuralCanvasBackground(panel) {
@@ -702,11 +770,31 @@
     neuralCanvasRafId = requestAnimationFrame(renderFrame);
   }
 
-  function loadSettings() {
+  function loadSettings(resolvedSettings = null, triggerRecalculate = true) {
     if (!isContextValid()) return;
+    const preferences = window.__CC_MOBILE_PREFERENCES__;
+    if (preferences && resolvedSettings === null) {
+      const generation = ++mobilePreferenceLoad;
+      mobilePreferenceUnsubscribe?.();
+      mobilePreferenceUnsubscribe = null;
+      return preferences.ready.then(() => {
+        if (extensionInvalidated || generation !== mobilePreferenceLoad) return;
+        loadSettings(preferences.get("lichess"));
+        mobilePreferenceUnsubscribe = preferences.subscribe("lichess", (settings, meta) => {
+          if (!extensionInvalidated) loadSettings(settings, meta.recalculate === true);
+        });
+      }).catch(error => {
+        console.warn("[ChessCoach] Settings were not restored:", error?.message || error);
+        throw error;
+      });
+    }
+    if (window.__CC_ANDROID_RUNTIME__ && !preferences) return;
     try {
       if (chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(
+        const readSettings = preferences
+          ? (_keys, callback) => callback(Object.fromEntries(Object.entries(resolvedSettings).map(([key, value]) => [storageKey(key), value])))
+          : (keys, callback) => chrome.storage.local.get(keys, callback);
+        readSettings(
           [...SETTINGS_KEYS, ...SETTINGS_KEYS.map(storageKey)],
           (res) => {
             if (!isContextValid() || !res) return;
@@ -785,8 +873,8 @@
             if (res.premoveOpeningMode !== undefined) premoveOpeningMode = res.premoveOpeningMode;
             if (typeof res.showPremoveArrows === "boolean") showPremoveArrows = res.showPremoveArrows;
 
-            if (workMode === "hvh" && typeof res.engineMaxMode !== "boolean") engineMaxMode = true;
-            if (engineMaxMode) {
+            if (!preferences && workMode === "hvh" && typeof res.engineMaxMode !== "boolean") engineMaxMode = true;
+            if (!preferences && engineMaxMode) {
               useStockfishWasm = true;
               currentElo = 3000;
               currentStyle = "balanced";
@@ -804,7 +892,7 @@
             applyPersistentPanelGeometry();
             switchTab(activeTabId, false);
             updateUIValues();
-            forceRecalculate();
+            if (triggerRecalculate) forceRecalculate();
           }
         );
       }
@@ -815,8 +903,8 @@
 
   function buildOpeningOptionsHTML() {
     let html = `
-      <option value="auto">🤖 Auto-recognition (Reliable theory 2000+ ELO)</option>
-      <option value="off">⛔ No book premoves (tactics/force only)</option>
+      <option value="auto">🤖 Auto-byзon (reliable theory 2000+ ELO)</option>
+      <option value="off">⛔ Without book premoves (only tactics/force)</option>
     `;
     if (window.ChessOpenings && Array.isArray(window.ChessOpenings.database)) {
       window.ChessOpenings.database.forEach((op, idx) => {
@@ -910,7 +998,7 @@
       const cpuChip = $("cc-welcome-chip-cpu");
       if (cpuChip) {
         const lightCpu = !showAverageMove && !showWorstMove;
-        cpuChip.textContent = lightCpu ? "🚀 CPU: Turbo (1st line)" : "🧠 CPU: Multi-analysis";
+        cpuChip.textContent = lightCpu ? "🚀 CPU: Turbo (1-я line)" : "🧠 CPU: Multi-analysis";
       }
       const wasmChip = $("cc-welcome-chip-wasm");
       if (wasmChip) {
@@ -1029,6 +1117,61 @@
     });
   }
 
+  function getMobileAnalysisConfig() {
+    const effective = mobileSession?.effective();
+    return JSON.stringify([currentElo, currentStyle, useStockfishWasm, engineMaxMode, turnMode, forcedMyColor,
+      showAverageMove, showWorstMove, useAverageMoveSometimes, trapRadarEnabled, workMode,
+      Boolean(effective?.lowTier), Boolean(effective?.bulletTurboMode), Boolean(effective?.premoveEnabled)]);
+  }
+
+  function finishCurrentAnalysis(requestId, phase = "complete") {
+    if (requestId !== analysisRequestId) return;
+    activeEngineBoardKey = "";
+    if (mobileAnalysisLease) mobileSession?.finishAnalysis(mobileAnalysisLease, phase);
+  }
+
+  function scheduleEngineRecovery(state) {
+    if (!mobileSession || engineRecoveryTimer || document.hidden || !useStockfishWasm) return;
+    const configKey = getMobileAnalysisConfig();
+    engineRecoveryTimer = setTimeout(async () => {
+      engineRecoveryTimer = null;
+      if (extensionInvalidated || document.hidden || currentPositionKey !== state.positionKey || getMobileAnalysisConfig() !== configKey) return;
+      const ready = await StockfishWasmEngine.initWorker();
+      if (extensionInvalidated || document.hidden || currentPositionKey !== state.positionKey || getMobileAnalysisConfig() !== configKey) return;
+      if (!ready) { scheduleEngineRecovery(state); return; }
+      mobileSession.retryAnalysis();
+      analysisRetryCount = finalEngineRetryCount = 0;
+      committedBoardKey = "";
+      runCycle(false);
+    }, 20000);
+  }
+
+  function suspendMobileCore(reason, releaseSearch) {
+    resetTurnDecision();
+    cancelNativeMove(reason);
+    clearTimeout(cycleWakeTimer);
+    clearTimeout(mobilePollTimer);
+    clearTimeout(engineRecoveryTimer);
+    clearTimeout(boardMutationTimer);
+    boardMutationTimer = null;
+    engineRecoveryTimer = null;
+    cycleWakeTimer = mobilePollTimer = null;
+    if (releaseSearch || reason === "settings") {
+      if (reason === "settings" && !releaseSearch) {
+        analysisRequestId++;
+        positionAnalysisId++;
+        activeEngineBoardKey = "";
+        mobileAnalysisLease = null;
+      }
+      clearAnalysisRetry();
+      committedBoardKey = committedEnemyBoardKey = "";
+      mobileSession?.retryAnalysis();
+      StockfishWasmEngine.terminate();
+    }
+    if (reason !== "settings") hideArrows();
+    try { window.ChessFX?.stopPhonkEdit?.(shadowRoot); } catch (e) {}
+  }
+
   let lastStatusString = "";
   function setAutoStatusText(text, color = "#00f5d4") {
     if (text === lastStatusString) return;
@@ -1050,14 +1193,38 @@
   function cancelNativeMove(reason) {
     if (!activeNativeMove) return;
     const action = activeNativeMove;
+    action.cancelReason = reason;
+    if (action.gestureSent) {
+      nativeMoveBlockedKey = action.failureKey;
+      nativeMoveBlockedState = action.inputState;
+    }
     action.controller.abort();
-    if (action.failureKey === nativeMoveFailureKey && action.attempt === nativeMoveFailures) nativeMoveFailures = Math.max(0, nativeMoveFailures - 1);
-    try { window.__CC_ANDROID_RUNTIME__?.nativeRequest("input.cancel", {}).catch(() => {}); } catch (e) {}
-    activeNativeMove = null;
-    setMoveExecutionState(false, reason);
+  }
+
+  function isNativeAutoBlocked(state) {
+    const blocked = nativeMoveBlockedState;
+    if (!blocked) return false;
+    const ply = getLichessRoundPly(state.boardElement);
+    const changedGame = blocked.url !== location.href || blocked.board !== state.boardElement || blocked.myColor !== state.myColor;
+    const realProgress = Number.isInteger(blocked.ply) && Number.isInteger(ply) && ply !== blocked.ply;
+    const realReply = blocked.lastEnemy !== lastRealEnemyMove || (blocked.sawOpponent && state.actualTurn === state.myColor && state.positionKey !== blocked.positionKey);
+    if (changedGame || realProgress || realReply) {
+      nativeMoveBlockedState = null;
+      nativeMoveBlockedKey = "";
+      nativeBlockEngineReleasedKey = "";
+      nativeMoveFailureKey = "";
+      nativeMoveFailures = 0;
+      if (deferredRecalculate && window.__CC_ANDROID_SETTINGS_OPEN__ !== true) {
+        setTimeout(flushDeferredRecalculate, 0);
+      }
+      return false;
+    }
+    if (state.actualTurn !== state.myColor) blocked.sawOpponent = true;
+    return true;
   }
 
   function handleMobileMoveLifecycle(event) {
+    if (mobileSession) return;
     const detail = event?.detail;
     if (detail?.cancelPendingMoves === true || detail?.state === "settings") {
       resetTurnDecision();
@@ -1085,6 +1252,7 @@
           positionId !== retry.positionId || currentPositionKey !== retry.positionKey) return;
       // Only the owned retry timer may unlock this position; polling must not consume retries.
       committedBoardKey = "";
+      mobileSession?.retryAnalysis();
       runCycle(false);
     }, delayMs);
   }
@@ -1151,6 +1319,7 @@
     hideArrows();
     // Style/clock mutations require recapturing, not another engine search.
     if (reason !== "BOARD_REPLACED" && reason !== "NO_BOARD") return;
+    mobileSession?.invalidate(reason);
     clearAnalysisRetry();
     positionAnalysisId++;
     analysisRequestId++;
@@ -1166,7 +1335,7 @@
       if (currentPositionKey) {
         analysisRequestId++;
         StockfishWasmEngine.cancel?.();
-        clearPositionPresentation("NEW POSITION • ANALYZING...");
+        clearPositionPresentation("NEW POSITION • ANALYSIS...");
       }
       currentPositionKey = state.positionKey;
       positionId++;
@@ -1196,17 +1365,21 @@
       positionKey: state.positionKey,
       analysisKey: state.boardKey,
       elo: currentElo,
-      engineMaxMode
+      engineMaxMode,
+      ...(mobileSession ? { mobileEpoch: mobileSession.epoch, configKey: getMobileAnalysisConfig(),
+        needPremove: Boolean(mobileSession.effective().premoveEnabled || mobileSession.effective().bulletTurboMode) } : {})
     };
   }
 
   function isCurrentAnalysisMeta(meta) {
+    if (mobileSession && (!mobileSession.isReady || meta?.mobileEpoch !== mobileSession.epoch)) return false;
     if (boardDirty && meta?.sessionId === analysisSessionId && meta.positionId === positionId && meta.analysisId === positionAnalysisId) {
       const fresh = captureBoardState(true);
       if (!fresh || fresh.animating) {
         // A discarded animation-time response must not strand an empty committed cache.
         committedBoardKey = "";
         activeEngineBoardKey = "";
+        mobileSession?.retryAnalysis();
         return false;
       }
       adoptPositionState(fresh);
@@ -1221,6 +1394,16 @@
   }
 
   function forceRecalculate() {
+    if (mobileSession && (window.__CC_ANDROID_SETTINGS_OPEN__ === true || nativeMoveBlockedState)) {
+      deferredRecalculate = true;
+      return;
+    }
+    deferredRecalculate = false;
+    if (mobileSession?.hasAnalysis(currentPositionKey, getMobileAnalysisConfig()) && mobileSession.snapshot().analysis !== "failed") {
+      scheduleAutoMoveIfNeeded();
+      return;
+    }
+    if (mobileSession?.snapshot().analysis === "failed") mobileSession.retryAnalysis();
     cancelNativeMove("recalculate");
     clearAnalysisRetry();
     committedBoardKey = "";
@@ -1231,6 +1414,24 @@
     positionAnalysisId++;
     resetTurnDecision();
     runCycle(true);
+  }
+
+  function flushDeferredRecalculate() {
+    if (!deferredRecalculate || window.__CC_ANDROID_SETTINGS_OPEN__ === true || nativeMoveBlockedState) return false;
+    forceRecalculate();
+    return true;
+  }
+
+  function releaseEngineForNativeBlock() {
+    if (!mobileSession || !nativeMoveBlockedKey || nativeBlockEngineReleasedKey === nativeMoveBlockedKey) return;
+    nativeBlockEngineReleasedKey = nativeMoveBlockedKey;
+    clearAnalysisRetry();
+    analysisRequestId++;
+    activeEngineBoardKey = "";
+    committedBoardKey = committedEnemyBoardKey = "";
+    mobileAnalysisLease = null;
+    mobileSession.retryAnalysis();
+    StockfishWasmEngine.terminate();
   }
 
   function switchTab(tabId, saveToStorage = true) {
@@ -1453,15 +1654,21 @@
         </div>
       </div>
 
-      <!-- TRIPLE SWITCH MODES: HvH — ALL — LEGIT -->
+      <div id="cc-project-strip" role="note" aria-label="Official free project">
+        <span class="cc-free-badge">FREE</span>
+        <a href="https://t.me/chesscoach_dev" target="_blank" rel="noopener noreferrer" title="Официаль channel ChessCoach">@chesscoach_dev</a>
+        <button type="button" id="cc-project-open" class="cc-project-button">About the project</button>
+      </div>
+
+      <!-- ТРОЙНОЙ ПЕРЕКЛЮЧАТЕЛЬ MODES: HvH — ALL — LEGIT -->
       <div id="cc-mode-switcher-bar">
-        <button class="cc-mode-btn" data-mode="hvh" title="Profile HvH: 3000 ELO, Stockfish + Syzygy, Slaughter 1+0, average/worst moves disabled">
+        <button class="cc-mode-btn" data-mode="hvh" title="Profile HvH: 3000 ELO, Stockfish + Syzygy, Slaughter 1+0, disabled average/worst moves">
           ⚡ HvH (SLAUGHTER)
         </button>
         <button class="cc-mode-btn active" data-mode="all" title="Show absolutely all settings and tabs">
           ◈ ALL FEATURES
         </button>
-        <button class="cc-mode-btn" data-mode="legit" title="Profile Legit: 3000 ELO, Tal style, no Slaughter, smart live jitter under clock time">
+        <button class="cc-mode-btn" data-mode="legit" title="Profile Legit: 3000 ELO, style Tal, without Slaughter,  live jitter under time clock">
           🛡 LEGIT (STEALTH)
         </button>
       </div>
@@ -1482,7 +1689,7 @@
               <span class="cc-tab-icon">✦</span> VISUAL
             </button>
             <button class="cc-tab-btn" data-tab="misc">
-              <span class="cc-tab-icon">❖</span> DATABASE / EXPERIENCE
+              <span class="cc-tab-icon">❖</span> BASE / XP
             </button>
           </div>
 
@@ -1514,7 +1721,7 @@
                 <button class="cc-welcome-close" id="cc-welcome-close-btn" title="Hide welcome">✕</button>
               </div>
               <div class="cc-welcome-sub">
-                Switch <strong>HvH / All / Legit</strong> at the top. Position menu and visibility are saved automatically!
+                Switch <strong>HvH / All / Legit</strong> above. Position menu and hide are saved automatically!
               </div>
               <div class="cc-welcome-chips">
                 <span class="cc-welcome-chip" id="cc-welcome-chip-mode">◈ Mode: All features</span>
@@ -1523,17 +1730,17 @@
               </div>
             </div>
 
-            <!-- LIVE POSITION GAME 24/7 (WORKS EVEN ON OPPONENT'S TURN) -->
+            <!-- ЖИВОЕ byЛОЖЕНИЕ GAME 24/7 (РАБfromАЕТ YESЖЕ В MOVE OPPONENT) -->
             <div id="cc-live-telemetry-card">
               <div class="cc-tele-header">
-                <span>📡 CURRENT GAME POSITION (LIVE 24/7)</span>
-                <button class="cc-tele-gear-btn" id="cc-tele-gear-btn" title="Configure displayed fields">⚙️ Fields</button>
+                <span>📡 CURRENT GAME STATE (LIVE 24/7)</span>
+                <button class="cc-tele-gear-btn" id="cc-tele-gear-btn" title="Configure displayed fields">⚙️ fields</button>
               </div>
               <div id="cc-tele-settings-drawer">
                 <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-clocks-chk" checked> ⏱️ Player clocks</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-engine-chk" checked> 🛰️ Status & server</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-wdl-chk" checked> 📊 Win chance %</label>
-                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-threats-chk" checked> 🪤 Traps & mates</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-engine-chk" checked> 🛰️ Status and server</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-wdl-chk" checked> 📊 Win chances %</label>
+                <label class="cc-tele-chk-label"><input type="checkbox" id="cc-tele-threats-chk" checked> 🪤 Traps and mates</label>
               </div>
               <div class="cc-tele-grid">
                 <div class="cc-tele-box" id="cc-tele-box-clocks">
@@ -1556,54 +1763,54 @@
                   </div>
                 </div>
                 <div class="cc-tele-box" id="cc-tele-box-threats" style="grid-column: span 2;">
-                  <div class="cc-tele-box-title">🪤 NEAREST CALCULATED TRAPS, THREATS & MATES</div>
-                  <div class="cc-tele-box-val" id="cc-tele-threats-val" style="color:#ffbe0b; font-family:inherit;">Waiting for move...</div>
+                  <div class="cc-tele-box-title">🪤 NEAREST CALCULATED TRAPS, THREATS AND MATES</div>
+                  <div class="cc-tele-box-val" id="cc-tele-threats-val" style="color:#ffbe0b; font-family:inherit;">Waiting move...</div>
                 </div>
               </div>
             </div>
 
             <div id="cc-peer-detector-banner" style="display:none; background:linear-gradient(135deg, rgba(0,245,212,0.20), rgba(199,125,255,0.24)); border:1.5px solid #00f5d4; border-radius:12px; padding:8px 12px; color:#fff; box-shadow:0 0 20px rgba(0,245,212,0.28);">
               <div id="cc-peer-detector-title" style="font-size:11px; font-weight:900; color:#00f5d4; display:flex; justify-content:space-between; align-items:center;">
-                <span>👁️ RADAR OWN: DETECTED CHESSCOACH!</span>
+                <span>👁️ RADAR OWN: onDETECTED CHESSCOACH!</span>
                 <span style="background:rgba(0,0,0,0.45); padding:1px 6px; border-radius:4px; font-family:monospace;">⚡ HVH</span>
               </div>
               <div id="cc-peer-detector-text" style="font-size:11px; color:#f1f5f9; margin-top:2px; font-weight:600; line-height:1.35;">
-                Your opponent has the same extension!
+                У yourhis opponent set this  extension!
               </div>
             </div>
 
             <div id="cc-enemy-turn-standby">
               <div class="cc-standby-icon">⏳</div>
-              <div class="cc-standby-title" id="cc-standby-title">Move opponent...</div>
+              <div class="cc-standby-title" id="cc-standby-title">Opponent move...</div>
               <div class="cc-standby-sub" id="cc-standby-sub">
-                Old markers cleared. Live telemetry above continues watching clocks and threats!
+                Old labels cleared. Live telemetry above aboutcontinues watch for itselfи and threat!
               </div>
             </div>
 
             <div id="cc-my-turn-active" style="display:flex; flex-direction:column; gap:7px; flex:1;">
               <div id="cc-mate-banner">
                 <div class="cc-mate-title">
-                  <span id="cc-mate-banner-title">👑💀 HAHAHA! MATE ON BOARD!</span>
+                  <span id="cc-mate-banner-title">👑💀 HAHAHA! MATE on BOARD!</span>
                   <span style="font-size:16px;">😱😂</span>
                 </div>
                 <div class="cc-mate-sub" id="cc-mate-banner-text">
-                  Opponent blundered a direct fatality! Hit «Make move» and send him to the lobby!
+                  Opponent blundered direct fatality! Press «Make move» and fromsend his in lobby!
                 </div>
               </div>
 
               <div class="cc-glass-card" id="cc-opening-card" style="border-left: 3.5px solid var(--cc-accent);">
                 <div class="cc-section-title">
-                  <span id="cc-opening-name">◈ READY FOR GAME</span>
+                  <span id="cc-opening-name">◈ READY К GAME</span>
                   <span id="cc-turn-indicator" style="color:#94a3b8;">WAITING</span>
                 </div>
                 <div id="cc-opening-plan" style="font-size:11px; color:#cbd5e1; line-height:1.36;">
-                  Make a move on the Lichess board for instant calculation.
+                  Make a move on board Lichess for instant calculation.
                 </div>
               </div>
 
               <div id="cc-eval-graph-card">
                 <div class="cc-graph-header">
-                  <span>📈 LIVE EVAL GRAPH</span>
+                  <span>📈 LIVE ADVANTAGE CHART</span>
                   <span class="cc-graph-meta"><span id="cc-eval-mood-label">EQUAL</span><span id="cc-eval-graph-label">0.00</span></span>
                 </div>
                 <canvas id="cc-eval-graph-canvas" width="410" height="42"></canvas>
@@ -1619,10 +1826,10 @@
 
               <div class="cc-roast-banner" id="cc-roast-box">
                 <div class="cc-roast-title">
-                  <span id="cc-roast-badge">⚡ OPPONENT ERROR RADAR</span>
+                  <span id="cc-roast-badge">⚡ RADAR ERRORS OPPONENT</span>
                   <span>💀</span>
                 </div>
-                <div id="cc-roast-text">Waiting for opponent's move...</div>
+                <div id="cc-roast-text">Waiting for opponent move...</div>
               </div>
 
               <div class="cc-move-card" id="cc-best-card" style="border-left-color:#00f5d4;">
@@ -1630,16 +1837,16 @@
                   <span style="color:#00f5d4" id="cc-best-title">✦ BEST MOVE</span>
                   <span class="cc-eval" id="cc-best-eval">--</span>
                 </div>
-                <div id="cc-best-desc">Analyzing position...</div>
+                <div id="cc-best-desc">Position analysis...</div>
                 <div id="cc-best-pv" style="margin-top:3px; font-size:10px; color:var(--cc-accent); font-family:monospace; opacity:0.92;"></div>
               </div>
 
               <div class="cc-move-card cc-hide-in-hvh" id="cc-avg-card" style="border-left-color:#ffbe0b;">
                 <div class="cc-move-header">
-                  <span style="color:#ffbe0b">❖ AVERAGE MOVE (2ND LINE)</span>
+                  <span style="color:#ffbe0b">❖ AVERAGE MOVE (2-Я LINE)</span>
                   <span class="cc-eval" id="cc-avg-eval">--</span>
                 </div>
-                <div id="cc-avg-desc">Analysis alternatives...</div>
+                <div id="cc-avg-desc">Analysis altonyou...</div>
               </div>
 
               <div class="cc-move-card cc-hide-in-hvh cc-hide-in-legit" id="cc-worst-card" style="border-left-color:#ff2a85;">
@@ -1660,7 +1867,7 @@
           <div class="cc-tab-pane" id="cc-pane-automove">
             <div class="cc-auto-status-box">
               <span>Status Automove v2:</span>
-              <strong id="cc-auto-live-status" style="color:#00f5d4;">Ready to work</strong>
+              <strong id="cc-auto-live-status" style="color:#00f5d4;">Ready to workfromе</strong>
             </div>
 
             <div class="cc-glass-card cc-hide-in-legit" style="border-left: 3.5px solid #ff2a85; background: linear-gradient(135deg, rgba(255,42,133,0.14), rgba(199,125,255,0.10));">
@@ -1668,7 +1875,7 @@
                 <div>
                   <span style="font-weight:900; color:#ff4d94; font-size:11.5px;">🔥 MODE SLAUGHTER 1+0 (BULLET TURBO)</span>
                   <div style="font-size:10px; color:#cbd5e1; margin-top:2px;">
-                    Instant moves in 35 ms + smart SEE-premoves without stalemates and hangs
+                    Instant moves for 35 ms +  SEE-premoves without stalemates and underset
                   </div>
                 </div>
                 <input type="checkbox" id="cc-bullet-turbo-chk">
@@ -1678,9 +1885,9 @@
             <div class="cc-glass-card cc-hide-in-hvh" style="border-left: 3.5px solid #38b000; background: linear-gradient(135deg, rgba(56,176,0,0.14), rgba(0,245,212,0.08));">
               <div class="cc-Switch-row" style="padding:0; border:none;">
                 <div>
-                  <span style="font-weight:900; color:#70e000; font-size:11.5px;">🛡 ADAPTIVE LEGIT-TIMING (AUTO-JITTER BY CLOCK)</span>
+                  <span style="font-weight:900; color:#70e000; font-size:11.5px;">🛡 АYESADAPTIVE LEGIT-TIMING (AUTO-JITTER by CLOCK)</span>
                   <div style="font-size:10px; color:#cbd5e1; margin-top:2px;">
-                    Itself reads control time (10+0 / 3+0 / 1+0) и smoothly changes delay move s live variance, excluding risky minimal timings
+                    itself reads control time (10+0 / 3+0 / 1+0) and smoothly changes delay move with youм variance, searchexcluding risky minimal timingи
                   </div>
                 </div>
                 <input type="checkbox" id="cc-legit-timing-chk" checked>
@@ -1689,37 +1896,37 @@
 
             <div class="cc-glass-card cc-hide-in-legit" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>⚡ SMART PREMOVES ON BOARD (SEE PREMOVE v2)</span>
-                <span id="cc-premove-book-status" style="font-size:10px; color:#00f5d4;">📖 THEORY ACTIVE</span>
+                <span>⚡ SMART PREMOVES on BOARD (SEE PREMOVE v2)</span>
+                <span id="cc-premove-book-status" style="font-size:10px; color:#00f5d4;">📖 THEORY ACTIVEon</span>
               </div>
 
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span style="font-weight:800; color:#fff;">🔮 Place premoves on the Lichess board</span>
+                <span style="font-weight:800; color:#fff;">🔮 Place premoves on board Lichess</span>
                 <input type="checkbox" id="cc-premove-chk">
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Strength and frequency of premoves:</span>
+                <span>Strength and frequency premoves:</span>
                 <strong id="cc-premove-risk-val" style="color:#c77dff; font-size:10.5px;">🎯 Lv. 3: Smart Blitz</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-premove-risk-slider" min="1" max="4" step="1" value="3" style="accent-color:#c77dff;">
 
               <div class="cc-control-row" style="margin-top:6px;">
-                <span>Opening line premoves:</span>
+                <span>Openingonя line premoves:</span>
               </div>
               <select class="cc-select" id="cc-premove-opening-select">
                 ${buildOpeningOptionsHTML()}
               </select>
 
               <div class="cc-Switch-row" style="margin-top:4px;">
-                <span>Show forecast premove on enemy move</span>
+                <span>Show aboutcast premove in move enemy</span>
                 <input type="checkbox" id="cc-premove-arrows-chk" checked>
               </div>
             </div>
 
             <div class="cc-glass-card">
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span style="font-weight:800; color:#fff;">🤖 Enable automatic move</span>
+                <span style="font-weight:800; color:#fff;">🤖 Enable automaticallyй move</span>
                 <input type="checkbox" id="cc-auto-master-chk">
               </div>
 
@@ -1736,7 +1943,7 @@
               <input type="range" class="cc-slider" id="cc-auto-jitter-slider" min="0" max="1000" step="20" value="60">
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Frequency trigger automove:</span>
+                <span>Freqfromа trigger automove:</span>
                 <strong id="cc-auto-rate-val" style="color:var(--cc-accent);">100% moves</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-rate-slider" min="10" max="100" step="10" value="100">
@@ -1744,40 +1951,40 @@
 
             <div class="cc-glass-card cc-hide-in-hvh" style="border-left: 3.5px solid #ffbe0b;">
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>Sometimes play Average move (2nd line)</span>
+                <span>Sometimesyes play Average move (2nd line)</span>
                 <input type="checkbox" id="cc-auto-avg-chk">
               </div>
 
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Chance Average move:</span>
+                <span>Chance Averagehis move:</span>
                 <strong id="cc-auto-avg-freq-val" style="color:#ffbe0b;">20%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-auto-avg-freq-slider" min="0" max="100" step="5" value="20" style="accent-color:#ffbe0b;">
 
               <div class="cc-Switch-row" style="margin-top:4px;">
-                <span>Insurance: only Best move on Mate in 1 and threats</span>
+                <span>Insurance: only Best move on Mateе in 1 and threatх</span>
                 <input type="checkbox" id="cc-auto-protect-chk" checked>
               </div>
 
               <div class="cc-control-row" style="margin-top:5px; margin-bottom:0;">
-                <span>Send channel:</span>
+                <span>Whichonл fromsend:</span>
                 <select class="cc-select" id="cc-auto-method-select" style="width:210px;">
-                  <option value="twoclick" selected>🎯 Safe 2-Click on board</option>
-                  <option value="drag">🖐 Dragging (Drag & Drop)</option>
+                  <option value="twoclick" selected>🎯 Withoutdangerous 2-Click by board</option>
+                  <option value="drag">🖐 Drag (Drag & Drop)</option>
                 </select>
               </div>
             </div>
 
             <div class="cc-actions-bar">
-              <button class="cc-btn cc-btn-primary" id="cc-auto-test-best">⚡ Play Best</button>
-              <button class="cc-btn cc-hide-in-hvh" id="cc-auto-test-avg" style="border-color:#ffbe0b; color:#ffbe0b;">❖ Play Average</button>
+              <button class="cc-btn cc-btn-primary" id="cc-auto-test-best">⚡ Move Best</button>
+              <button class="cc-btn cc-hide-in-hvh" id="cc-auto-test-avg" style="border-color:#ffbe0b; color:#ffbe0b;">❖ Move Average</button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-rage">
             <div class="cc-glass-card">
               <div class="cc-control-row">
-                <span style="font-weight:800;">STRENGTH ENGINE (400 – 3000 ELO)</span>
+                <span style="font-weight:800;">strength ENGINE (400 – 3000 ELO)</span>
                 <strong id="cc-elo-val" style="color:var(--cc-accent);">${currentElo} ELO</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-elo-slider" min="400" max="3000" step="100" value="${currentElo}">
@@ -1792,26 +1999,26 @@
                 <input type="checkbox" id="cc-sf-wasm-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>♚ ENGINE MAX: wait primary SF, without average and turbo</span>
+                <span>♚ ENGINE MAX: жyes primary SF, without average and turbo</span>
                 <input type="checkbox" id="cc-engine-max-chk">
               </div>
               <div class="cc-Switch-row">
-                <span>📡 Game position 24/7 (Clocks, WDL%, Server on enemy move)</span>
+                <span>📡 byextension game 24/7 (Clocks, WDL%, Server in move enemy)</span>
                 <input type="checkbox" id="cc-live-telemetry-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🪤 Radar traps (Highlight moves s chance of enemy error)</span>
+                <span>🪤 yesр traps (Underhighlight moves with chance errors enemy)</span>
                 <input type="checkbox" id="cc-trap-radar-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🔊 Tactical audio radar (ping enemy blunders & mate)</span>
+                <span>🔊 Tactical audio radar (ping enemy blunders and mate)</span>
                 <input type="checkbox" id="cc-audio-radar-chk" checked>
               </div>
             </div>
 
             <div class="cc-glass-card cc-hide-in-hvh" style="border-left: 3.5px solid #00f5d4;">
               <div class="cc-section-title">
-                <span>🚀 OFFLOAD ENGINE (OPTIMIZATION CPU)</span>
+                <span>🚀 OFFLOAD ENGINE (OPTIMfromATION CPU)</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
                 <span>❖ Show and count Average move (2nd line)</span>
@@ -1829,8 +2036,8 @@
                 <button class="cc-style-btn" data-style="mogging"><span>⚡ Mogging</span><small>DOMINATION</small></button>
                 <button class="cc-style-btn active" data-style="tal"><span>✦ Mikhail Tal</span><small>SACRIFICES</small></button>
                 <button class="cc-style-btn" data-style="alphazero"><span>🧠 AlphaZero</span><small>NEURAL NET</small></button>
-                <button class="cc-style-btn" data-style="morphy"><span>🎭 Paul Morphy</span><small>TEMPO GENIUS</small></button>
-                <button class="cc-style-btn" data-style="hikaru"><span>🚀 Nakamura</span><small>KING BULLET</small></button>
+                <button class="cc-style-btn" data-style="morphy"><span>🎭 byл Morphy</span><small>TEMPO GENIUS</small></button>
+                <button class="cc-style-btn" data-style="hikaru"><span>🚀 Nakamura</span><small>king BULLET</small></button>
                 <button class="cc-style-btn" data-style="kasparov"><span>▲ Kasparov</span><small>ATTACK</small></button>
                 <button class="cc-style-btn" data-style="fischer"><span>◈ Fischer</span><small>ACCURACY</small></button>
                 <button class="cc-style-btn" data-style="carlsen"><span>❖ Carlsen</span><small>TECHNIQUE</small></button>
@@ -1845,33 +2052,33 @@
             <div class="cc-glass-card">
               <div class="cc-section-title"><span>⚙ WORK MODE</span></div>
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>When count:</span>
+                <span>When to count:</span>
                 <select class="cc-select" id="cc-turn-select" style="width:200px;">
-                  <option value="my" selected>Only on my move (+ Premove)</option>
+                  <option value="my" selected>only in my move (+ Premove)</option>
                   <option value="auto">Always (and for opponent)</option>
-                  <option value="w">Always as White</option>
-                  <option value="b">Always as Black</option>
+                  <option value="w">Always for White</option>
+                  <option value="b">Always for Black</option>
                 </select>
               </div>
               <div class="cc-Switch-row">
-                <span>⚡ Opponent blunder radar and mate special effects</span>
+                <span>⚡ Radar of opponent blunders and mate special effects</span>
                 <input type="checkbox" id="cc-rage-rofl-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>🛡 Block Automove in Rated games</span>
+                <span>🛡 Block Automove in Rated-games</span>
                 <input type="checkbox" id="cc-rage-antiban-chk">
               </div>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-visuals">
-            <!-- CUSTOM BACKGROUND MENU FROM FILE PICKER -->
+            <!-- MAPСТОМНЫЙ BACKGROUND MENU from FILE PICKER -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #c77dff;">
               <div class="cc-section-title" style="color:#c77dff;">
-                <span>🖼️ YOUR PHOTO ON BACKGROUND MENU (CHOOSE FROM FILE PICKER)</span>
+                <span>🖼️ OWN PHOTO on BACKGROUND MENU (CHOICE from FILE PICKER)</span>
               </div>
               <div style="font-size:10.5px; color:#cbd5e1; margin-bottom:7px; line-height:1.35;">
-                Choose any photo s computer — extension itself will resize it to window size (900×800) и will save в memory:
+                Choose any фfromо with computer — extension itselfо will resize his under sizemeasure windowon (900×800) and will save in memory:
               </div>
               <div class="cc-actions-bar" style="margin-bottom:7px;">
                 <button class="cc-btn cc-btn-primary" id="cc-upload-bg-btn">📂 CHOOSE PHOTO...</button>
@@ -1879,26 +2086,26 @@
               </div>
               <input type="file" id="cc-bg-file-input" accept="image/*" style="display:none;" />
               <div class="cc-control-row">
-                <span>Dimming photo (readability text):</span>
+                <span>Dimming фfromо (readability text):</span>
                 <strong id="cc-bg-dim-val" style="color:#c77dff;">72%</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-bg-dim-slider" min="0.2" max="0.92" step="0.04" value="0.72" style="accent-color:#c77dff;">
               <div class="cc-control-row" style="margin-top:5px;">
-                <span>Background blur (Glass Blur):</span>
+                <span>Blur backgroundа (Glass Blur):</span>
                 <strong id="cc-bg-blur-val" style="color:#c77dff;">4px</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-bg-blur-slider" min="0" max="16" step="1" value="4" style="accent-color:#c77dff;">
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>✦ THEME MENU (11 STYLES VISION GLASS)</span></div>
+              <div class="cc-section-title"><span>✦ theme MENU (11 STYLES VISION GLASS)</span></div>
               <select class="cc-select" id="cc-vis-theme">
-                <option value="cyberpunk">🌌 Liquid Cyan Wave (Neon wave)</option>
-                <option value="minimal">⚪ Pure Minimal (Clean minimalism)</option>
+                <option value="cyberpunk">🌌 Liquid Cyan Wave (notneon waveon)</option>
+                <option value="minimal">⚪ Pure Minimal (Clean minimalfromм)</option>
                 <option value="aurora">🌌 Aurora 3D Glass (Northern lights)</option>
                 <option value="hologram">🔮 Hologram Violet (Hologram)</option>
                 <option value="crimson">🔥 Crimson Rose (Aggressive ruby)</option>
-                <option value="gold">👑 Royal Gold (Royal gold)</option>
+                <option value="gold">👑 Royal Gold (Coreroyal goldfromо)</option>
                 <option value="matrix">🧪 Matrix Toxic (Cyber-Matrix)</option>
                 <option value="titanium">❄️ Vision Pro Titanium (Mate titanium)</option>
                 <option value="obsidian">🌑 Obsidian Stealth (Dark obsidian)</option>
@@ -1908,42 +2115,42 @@
             </div>
 
             <div class="cc-glass-card" style="border-left: 3.5px solid var(--cc-accent);">
-              <div class="cc-section-title"><span>◈ POINTER TYPE MOVES (16 VARIATIONS: SQUARES AND ARROWS)</span></div>
+              <div class="cc-section-title"><span>◈ POINTER TYPE MOVES (16 VARIATIONS: SQUARES И ARROWS)</span></div>
               <select class="cc-select" id="cc-vis-arrow-style" style="margin-bottom:7px;">
-                <optgroup label="🔲 NO ARROWS (SQUARE HIGHLIGHTS MOVES)">
-                  <option value="sq_cyber_frame">🔲 Neon square frames (FROM ➔ TO)</option>
-                  <option value="sq_Step_badges">🎯 Tactical markers [1: START] ➔ [2: TARGET]</option>
-                  <option value="sq_hologram_tiles">💠 Holographic square fill + Crosshair</option>
+                <optgroup label="🔲 WITHOUT ARROWS (HIGHLIGHT SQUARES MOVES)">
+                  <option value="sq_cyber_frame">🔲 neon frames squares (FROM ➔ TO)</option>
+                  <option value="sq_Step_badges">🎯 Tactical labels [1: START] ➔ [2: TARGET]</option>
+                  <option value="sq_hologram_tiles">💠 Holographic fill of squares + on target</option>
                   <option value="sq_minimal_dots">⚫ Stealth-dots Lichess Pro (Without arrows)</option>
                 </optgroup>
                 <optgroup label="🏹 VECTOR AND 3D ARROWS (12 STYLES)">
-                  <option value="curved_neon">🌈 Smooth neon arc s with flow</option>
-                  <option value="comet_trail">☄️ Fire comet s gradient tail</option>
+                  <option value="curved_neon">🌈 Smooth neon arc with flow</option>
+                  <option value="comet_trail">☄️ Fire comet with gradient tail</option>
                   <option value="cyber_chevron">⏩ Tactical chevron conveyor (>>>)</option>
-                  <option value="quantum_portal">🌀 Quantum teleport (Portals on squares)</option>
-                  <option value="tube_3d">🧊 3D Volumetric tube s drop shadow</option>
-                  <option value="plasma">⚡ Plasma lightning-zigzag</option>
-                  <option value="sniper_3d">🎯 3D Sniper radar-crosshair</option>
-                  <option value="dna_wave">🧬 Double cyber-DNA wave</option>
+                  <option value="quantum_portal">🌀 Quantum teleport (Loss on squarn squareх)</option>
+                  <option value="tube_3d">🧊 3D Volume tube with drop shadow</option>
+                  <option value="plasma">⚡ Plasmaonя lightning-zigzag</option>
+                  <option value="sniper_3d">🎯 3D Сonhypers radar-ontarget</option>
+                  <option value="dna_wave">🧬 Doubleonя cyber-waveon DNA</option>
                   <option value="chroma_rgb">🌈 Chroma RGB Iridescence</option>
-                  <option value="laser">⚡ Direct cyber-laser</option>
+                  <option value="laser">⚡ Straightmy cyber-laser</option>
                   <option value="classic">♟️ Classical straight</option>
-                  <option value="dotted">✨ Tactical dashed</option>
+                  <option value="dotted">✨ Tactical dotted</option>
                 </optgroup>
               </select>
 
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Style «Mate in 1 move»:</span>
+                <span>Style «mate in 1 move»:</span>
                 <select class="cc-select" id="cc-vis-mate-style" style="width:225px;">
                   <option value="phonk_skull">💀 Phonk Skull Mogging</option>
                   <option value="orbital_laser">🛸 Orbital Cyber-Laser</option>
-                  <option value="royal_exec">👑 Royal Verdict</option>
+                  <option value="royal_exec">👑 Royal onspeech</option>
                   <option value="rofl_classic">😂 Classical Rofl</option>
                 </select>
               </div>
 
               <div class="cc-control-row">
-                <span>Scale arrows and frames:</span>
+                <span>Scale arrows and frameswindow:</span>
                 <strong id="cc-vis-scale-val" style="color:var(--cc-accent);">1.0x</strong>
               </div>
               <input type="range" class="cc-slider" id="cc-vis-scale" min="0.6" max="1.6" step="0.1" value="1.0">
@@ -1957,14 +2164,14 @@
 
             <div class="cc-glass-card" style="border-left: 3.5px solid #ff2a85;">
               <div class="cc-section-title" style="color:#ff4d94;">
-                <span>🔥 CONTROL HEATMAP AND SPECIAL EFFECTS</span>
+                <span>🔥 HEATS MAPRTА CONTROL И SPECIAL EFFECTS</span>
               </div>
               <div class="cc-Switch-row" style="padding-top:0;">
-                <span>🗺️ Permanent heatmap board (Otherwise — squeeze [Alt])</span>
+                <span>🗺️ bypermanentonя heat board board (Иon — squeeze [Alt])</span>
                 <input type="checkbox" id="cc-heatmap-always-chk">
               </div>
               <div class="cc-Switch-row">
-                <span>🔥 Edit Brilliant Move (15 sec Phonk + Mogging)</span>
+                <span>🔥 Edit Brilliant Moveу (15 sec Phonk + Mogging)</span>
                 <input type="checkbox" id="cc-vis-phonk-chk" checked>
               </div>
               <div class="cc-Switch-row">
@@ -1972,36 +2179,36 @@
                 <input type="checkbox" id="cc-vis-arrows-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>Side evaluation bar (Eval Bar)</span>
+                <span>Бwindow  eval (Eval Bar)</span>
                 <input type="checkbox" id="cc-vis-eval-chk" checked>
               </div>
               <div class="cc-Switch-row">
-                <span>Volumetric 3D-shadows under pieces and board</span>
+                <span>Volume 3D-shadows under piece and board</span>
                 <input type="checkbox" id="cc-vis-shadow-chk" checked>
               </div>
               <button class="cc-btn cc-btn-primary" id="cc-test-phonk-btn" style="width:100%; margin-top:6px;">
-                🔥 TEST BACKGROUND-EDIT (15 SEC)
+                🔥 TEST BACKGROUNDК-EDIT (15 SEC)
               </button>
             </div>
           </div>
 
           <div class="cc-tab-pane" id="cc-pane-misc">
-            <!-- CONFIG SYSTEM (.CHESS) -->
+            <!-- SYStheme CONFIGS (.CHESS) -->
             <div class="cc-glass-card" style="border-left: 3.5px solid #00f5d4; background: linear-gradient(135deg, rgba(0, 245, 212, 0.12), rgba(199, 125, 255, 0.08));">
               <div class="cc-section-title">
-                <span>⚙️ CONFIG SYSTEM (.CHESS)</span>
+                <span>⚙️ SYStheme CONFIGS (.CHESS)</span>
                 <span id="cc-cfg-status-badge" style="color:#00f5d4; font-size:9.5px;">READY</span>
               </div>
               <div style="font-size:10.5px; color:#cbd5e1; margin-bottom:7px; line-height:1.35;">
-                Save own settings engine, automove, arrows и wallpapers menu в file <strong>.chess</strong> or load other configs в 1 click:
+                Save your settings engine, automove, arrows and wallpapers menu in file <strong>.chess</strong> or load other configи in 1 click:
               </div>
               <div class="cc-control-row" style="margin-bottom:6px;">
-                <span>Config name:</span>
-                <input type="text" id="cc-cfg-name-input" placeholder="For example: Legit_Tal_3000" value="My_ChessCoach"
+                <span>onз configа:</span>
+                <input type="text" id="cc-cfg-name-input" placeholder="ononmeasure: Legit_Tal_3000" value="My_ChessCoach"
                        style="width:190px; background:rgba(10,13,20,0.95); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:7px; padding:4px 8px; font-size:11px; font-weight:700; outline:none;" />
               </div>
               <div class="cc-Switch-row" style="padding:3px 0 7px 0; border:none;">
-                <span style="font-size:10.5px; color:#e2e8f0;">🖼️ Embed current photo background in .chess file</span>
+                <span style="font-size:10.5px; color:#e2e8f0;">🖼️ Embed current фfromо backgroundа in file .chess</span>
                 <input type="checkbox" id="cc-cfg-include-bg-chk" checked>
               </div>
               <div class="cc-actions-bar">
@@ -2012,9 +2219,9 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>❖ MANUAL BOT TRAINING</span></div>
+              <div class="cc-section-title"><span>❖ MANUAL TRAINING БfromА</span></div>
               <div style="font-size:11px; color:#cbd5e1; margin-bottom:8px; line-height:1.38;">
-                Pin the best move as favorite template or ban it, so the engine immediately finds another variation:
+                Pin best move as favorite templateclose or forban his, to engine immediately onfound another variation:
               </div>
               <div class="cc-actions-bar">
                 <button class="cc-btn" id="cc-train-good">👍 PIN MOVE</button>
@@ -2023,28 +2230,28 @@
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>◈ DATABASE SELF-LEARNING (EXPERIENCE DB)</span></div>
+              <div class="cc-section-title"><span>◈ BASE SELF-LEARNING (EXPERIENCE DB)</span></div>
               <div id="cc-misc-db-summary" style="font-size:11.5px; color:#e2e8f0; margin-bottom:8px;">
                 Positions learned in memory: 0
               </div>
               <div class="cc-actions-bar" style="margin-bottom:7px;">
-                <button class="cc-btn" id="cc-export-db">📥 EXPORT (.JSON)</button>
-                <button class="cc-btn" id="cc-import-db">📤 IMPORT (.JSON)</button>
+                <button class="cc-btn" id="cc-export-db">📥 EXPORTbyRT (.JSON)</button>
+                <button class="cc-btn" id="cc-import-db">📤 IMPORTbyRT (.JSON)</button>
               </div>
               <input type="file" id="cc-import-file-input" accept=".json" style="display:none;" />
               <button class="cc-btn cc-btn-danger" id="cc-clear-db" style="width:100%;">
-                🗑 FULLY CLEAR MEMORY
+                🗑 byFULLY CLEAR MEMORY
               </button>
             </div>
 
             <div class="cc-glass-card">
-              <div class="cc-section-title"><span>👋 WELCOME SCREEN И RESET POSITION WINDOW</span></div>
+              <div class="cc-section-title"><span>👋 WELCOME SCREEN AND RESET POSITION WINDOW</span></div>
               <div class="cc-actions-bar">
                 <button class="cc-btn" id="cc-restore-welcome-btn">
-                  ✨ Show welcome
+                  ✨ Show onbranchwelcome
                 </button>
                 <button class="cc-btn" id="cc-reset-pos-btn">
-                  📍 Reset position menu
+                  📍 Reset byposition menu
                 </button>
               </div>
             </div>
@@ -2061,6 +2268,12 @@
     if (uiAbortController) uiAbortController.abort();
     uiAbortController = new AbortController();
     const uiSignal = uiAbortController.signal;
+
+    $("cc-project-open").addEventListener("click", () => {
+      window.__CC_ANDROID_RUNTIME__.nativeRequest("project.open").catch(() => {
+        setAutoStatusText("not yet open page projectа. Aboutв onextension.", "#ffbe0b");
+      });
+    });
 
     const header = $("chesscoach-header");
     let dragging = false, ox = 0, oy = 0;
@@ -2133,7 +2346,7 @@
       }
     }, { signal: uiSignal });
 
-    // Управление полями Живой телеметрии 24/7
+    // Управлен squares Живой phoneметрии 24/7
     $("cc-tele-gear-btn").addEventListener("click", () => {
       const drawer = $("cc-tele-settings-drawer");
       if (drawer) {
@@ -2167,7 +2380,7 @@
       updateLiveTelemetryUI();
     });
 
-    // Loading каsтомного background из Проводника sо sжатием через Canvas
+    // Loading стго backgroundа from Aboutводни со сжатм through Canvas
     $("cc-upload-bg-btn").addEventListener("click", () => {
       const inp = $("cc-bg-file-input");
       if (inp) inp.click();
@@ -2258,6 +2471,14 @@
     });
 
     const toggleAutoMoveMaster = (newState) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        if (newState) { nativeMoveFailureKey = ""; nativeMoveFailures = 0; }
+        else cancelNativeMove("automation-disabled");
+        resetTurnDecision();
+        saveSetting({ autoMoveEnabled: newState }, newState);
+        setAutoStatusText(newState ? "Automove enabled" : "Automove disabled", newState ? "#00f5d4" : "#94a3b8");
+        return;
+      }
       autoMoveEnabled = newState;
       if (newState) { nativeMoveFailureKey = ""; nativeMoveFailures = 0; }
       if (!newState) {
@@ -2279,6 +2500,15 @@
     $("cc-auto-master-chk").addEventListener("change", (e) => toggleAutoMoveMaster(e.target.checked));
 
     $("cc-bullet-turbo-chk").addEventListener("change", (e) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        const enabled = e.target.checked;
+        resetTurnDecision();
+        saveSetting({ bulletTurboMode: enabled, ...(enabled ? {
+          autoMoveEnabled: true, premoveEnabled: true, showPremoveArrows: true, premoveRiskLevel: 3
+        } : {}) }, true);
+        setAutoStatusText(enabled ? "Mode slaughter 1+0 enabled" : "Mode slaughter 1+0 disabled", enabled ? "#ff4d94" : "#00f5d4");
+        return;
+      }
       bulletTurboMode = e.target.checked;
       if (bulletTurboMode) {
         autoMoveEnabled = true;
@@ -2296,7 +2526,7 @@
           autoMoveDelayMs: 45,
           autoMoveJitterMs: 15
         });
-        setAutoStatusText("🔥 MODE SLAUGHTER 1+0 ACTIVATED", "#ff4d94");
+        setAutoStatusText("🔥 MODE SLAUGHTER 1+0 ACTIVES", "#ff4d94");
       } else {
         premoveEnabled = false;
         showPremoveArrows = false;
@@ -2312,7 +2542,7 @@
           autoMoveDelayMs: 180,
           autoMoveJitterMs: 60
         });
-        setAutoStatusText("Mode Slaughter 1+0 disabled — standard mode", "#00f5d4");
+        setAutoStatusText("Mode Slaughter 1+0 disabled — force mode", "#00f5d4");
       }
       applySafeBoardDepth();
       updateUIValues();
@@ -2326,6 +2556,11 @@
     });
 
     $("cc-premove-chk").addEventListener("change", (e) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        if (!e.target.checked) preparedLookahead = null;
+        saveSetting({ premoveEnabled: e.target.checked, ...(e.target.checked ? { showPremoveArrows: true } : {}) }, true);
+        return;
+      }
       premoveEnabled = e.target.checked;
       if (premoveEnabled) {
         showPremoveArrows = true;
@@ -2399,6 +2634,11 @@
     });
 
     $("cc-sf-wasm-chk").addEventListener("change", (e) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        if (e.target.checked) StockfishWasmEngine.initWorker(); else StockfishWasmEngine.terminate();
+        saveSetting({ useStockfishWasm: e.target.checked }, true);
+        return;
+      }
       useStockfishWasm = e.target.checked;
       if (useStockfishWasm) StockfishWasmEngine.initWorker();
       else StockfishWasmEngine.terminate();
@@ -2407,6 +2647,11 @@
       forceRecalculate();
     });
     $("cc-engine-max-chk").addEventListener("change", (e) => {
+      if (window.__CC_MOBILE_PREFERENCES__) {
+        saveSetting({ engineMaxMode: e.target.checked }, true);
+        setAutoStatusText(e.target.checked ? "ENGINE MAX enabled" : "ENGINE MAX disabled", "#64cdb9");
+        return;
+      }
       engineMaxMode = e.target.checked;
       if (engineMaxMode) {
         currentElo = 3000;
@@ -2466,14 +2711,14 @@
     $("cc-play-once").addEventListener("click", () => {
       const state = captureBoardState(true);
       if (state && !state.animating && isCachedAnalysisCurrent(state)) {
-        setAutoStatusText(`Playing move: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
+        setAutoStatusText(`Webyplay move: ${cachedMoves.best.from}→${cachedMoves.best.to}`, "#00f5d4");
         executeMoveOnBoard(cachedMoves.best, state, true, false);
       }
     });
 
     $("cc-auto-test-best").addEventListener("click", () => {
       if (engineMaxMode && !cachedMoves.engineMeta && !cachedMoves.best?.fromSyzygy) {
-        setAutoStatusText("♚ ENGINE MAX: wait for completion primary Stockfish", "#d9ad58");
+        setAutoStatusText("♚ ENGINE MAX: wait for primary Stockfish to finish", "#d9ad58");
         return;
       }
       const state = captureBoardState(true);
@@ -2486,7 +2731,11 @@
     $("cc-auto-test-avg").addEventListener("click", () => {
       if (engineMaxMode) return;
       const state = captureBoardState(true);
-      const move = cachedMoves.average || cachedMoves.best;
+      const move = cachedMoves.average;
+      if (!move || move.uci === cachedMoves.best?.uci) {
+        setAutoStatusText("Separate average line unavailable: wait for analysis or choose best move.", "#ffbe0b");
+        return;
+      }
       if (state && !state.animating && move && isCachedAnalysisCurrent(state)) {
         setAutoStatusText(`Average move: ${move.from}→${move.to}`, "#ffbe0b");
         executeMoveOnBoard(move, state, true, false);
@@ -2678,7 +2927,7 @@
       });
     });
 
-    // EXPORT И IMPORT КОНФИГОВ (.CHESS) ВНУТРИ ensurePanel()
+    // EXPORTbyRT И IMPORTbyRT CONFIGS (.CHESS) ВНУТРИ ensurePanel()
     $("cc-export-cfg-btn").addEventListener("click", () => {
       const rawName = ($("cc-cfg-name-input")?.value || "My_ChessCoach").trim();
       const safeFileName = rawName.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, "_") || "ChessCoach_Cfg";
@@ -2696,7 +2945,7 @@
 
       const badge = $("cc-cfg-status-badge");
       if (badge) {
-        badge.textContent = `💾 UNLOADED: ${safeFileName}.chess`;
+        badge.textContent = `💾 EXPORTED: ${safeFileName}.chess`;
         badge.style.color = "#00f5d4";
       }
     });
@@ -2726,9 +2975,9 @@
               badge.textContent = `✅ ACTIVE: ${cfgTitle}`;
               badge.style.color = "#38b000";
             }
-            setAutoStatusText(`⚙️ Config loaded: ${cfgTitle}`, "#00f5d4");
+            setAutoStatusText(`⚙️ Loaded config: ${cfgTitle}`, "#00f5d4");
           } else if (badge) {
-            badge.textContent = "❌ ERROR FILE .CHESS";
+            badge.textContent = "❌ ERROR FILEА .CHESS";
             badge.style.color = "#ff2a85";
           }
         } catch (err) {
@@ -2818,8 +3067,8 @@
       if ($("cc-time-sniper-text")) {
         $("cc-time-sniper-text").textContent =
           enemySecs < 20
-            ? "У opponent few time — prepare sharp tactical jabs!"
-            : "Clocks under control. In time trouble enemy (< 10s) will turn on mode hunting flag.";
+            ? "Opponent has little time — prepare sharp tactical jabs!"
+            : "Clocks under control. In enemy time trouble (< 10s) flag-hunt mode enables.";
       }
     } else {
       banner.style.display = "none";
@@ -2852,7 +3101,7 @@
       : myEval >= 0.75 ? "ahead" : myEval <= -0.75 ? "behind" : "neutral";
     if (panel) panel.dataset.evalMood = mood;
     if (moodLabel) {
-      moodLabel.textContent = mood === "critical" ? "CRITICAL" : mood === "ahead" ? "ADVANTAGE" : mood === "behind" ? "UNDER PRESSURE" : "EQUAL";
+      moodLabel.textContent = mood === "critical" ? "CRITICAL" : mood === "ahead" ? "ADVANTAGE" : mood === "behind" ? "byД YESPRESSUREМ" : "EQUAL";
     }
 
     if (powerBadge) {
@@ -3238,7 +3487,7 @@
         bulletTurboMode
       ) {
         const label = res.isDangerPosition
-          ? "🛡 DEFENSE FROM MATE"
+          ? "🛡 DEFENSE from MATE"
           : (res.best.fromSyzygy ? "🔮 SYZYGY GOD" : (bulletTurboMode ? "🔥 SLAUGHTER 1+0" : "BEST"));
         return { move: res.best, typeLabel: label, choiceKind: "best" };
       }
@@ -3247,7 +3496,7 @@
     if (useAverageMoveSometimes && canUseAverageAutoMove(res)) {
       const roll = Math.random() * 100;
       if (roll < averageMoveFrequency) {
-        return { move: res.average, typeLabel: "AVERAGE (2ND LINE)", choiceKind: "average" };
+        return { move: res.average, typeLabel: "AVERAGE (2-Я LINE)", choiceKind: "average" };
       }
     }
 
@@ -3293,6 +3542,7 @@
 
   function scheduleAutoMoveIfNeeded() {
     if (!autoMoveEnabled || extensionInvalidated || document.hidden) return;
+    if (mobileSession && !mobileSession.effective().autoMoveEnabled) return;
     if (window.__CC_ANDROID_SETTINGS_OPEN__ === true) {
       setAutoStatusText("Automove paused: settings open", "#ffbe0b");
       return;
@@ -3303,12 +3553,12 @@
     const state = captureBoardState(false);
     if (!state || state.animating || state.actualTurn !== state.myColor) return;
     if (safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Automove blocked: rated game vs human. Move manually.", "#ffbe0b");
+      setAutoStatusText("Automove blocked: rated game against human. Move manually.", "#ffbe0b");
       return;
     }
     if (boardDirty || state.positionKey !== currentPositionKey || !isCachedAnalysisCurrent(state) || cachedMoves.boardKey !== state.boardKey) return;
     if (cachedMoves.analysisIncomplete && !hasFinalAutoAnalysis(cachedMoves)) {
-      setAutoStatusText("Automove paused: waiting for completed Stockfish analysis.", "#ffbe0b");
+      setAutoStatusText("Automove paused: waiting for finished Stockfish analysis.", "#ffbe0b");
       return;
     }
     if ((engineMaxMode || currentElo >= 2000) && !hasFinalAutoAnalysis(cachedMoves)) {
@@ -3353,7 +3603,7 @@
         modeLabel = "🔥 TURBO 1+0";
       } else if (workMode === "legit" || legitAutoTiming) {
         totalDelay = computeLegitHumanDelayMs(picked.move, mySecs, cachedMoves.isDangerPosition);
-        modeLabel = `🛡 LEGIT (${(totalDelay / 1000).toFixed(2)}s)`;
+        modeLabel = `🛡 LEGIT (${(totalDelay / 1000).toFixed(2)}с)`;
       } else {
         const jitter = autoMoveJitterMs > 0 ? Math.round((Math.random() * 2 - 1) * autoMoveJitterMs) : 0;
         const dangerExtraDelay = cachedMoves.isDangerPosition ? 220 : 0;
@@ -3376,7 +3626,7 @@
 
     if (currentTurnDecision.skip) return;
     if (currentTurnDecision.attempts >= 3) {
-      setAutoStatusText("Could not click the board — make the move manually", "#ff2a85");
+      setAutoStatusText("not yet clicked on board — make move manually", "#ff2a85");
       return;
     }
 
@@ -3429,10 +3679,11 @@
   }
 
   function executeVisualPremoveOnBoard(premoveObj, state) {
+    if (mobileSession && !(mobileSession.effective().premoveEnabled || mobileSession.effective().bulletTurboMode)) return;
     if (!premoveObj || !/^[a-h][1-8]$/.test(premoveObj.from || "") || !/^[a-h][1-8]$/.test(premoveObj.to || "") ||
         premoveObj.from === premoveObj.to || !state || !state.grid || document.hidden || window.__CC_ANDROID_SETTINGS_OPEN__ === true) return;
     if (safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Premove blocked: rated game vs human.", "#ffbe0b");
+      setAutoStatusText("Premove blocked: rated game against human.", "#ffbe0b");
       return;
     }
 
@@ -3551,14 +3802,18 @@
   async function executeAndroidMoveOnBoard(moveObj, state, manualClick, promoPiece, isPremove = false) {
     if (isExecutingMove || document.hidden || extensionInvalidated || (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true)) return;
     const runtime = window.__CC_ANDROID_RUNTIME__;
+    if (!mobileSession?.isReady) { setAutoStatusText("Input snapshot is not ready", "#ffbe0b"); return; }
     const failureKey = `${location.href}|${state.positionId}|${state.positionKey}|${isPremove ? "premove" : "move"}`;
+    if (!manualClick && (isNativeAutoBlocked(state) || nativeMoveBlockedKey === failureKey)) return;
     if (nativeMoveFailureKey !== failureKey) { nativeMoveFailureKey = failureKey; nativeMoveFailures = 0; }
     if (!manualClick && nativeMoveFailures >= 3) {
       setAutoStatusText("Native input not confirmed after 3 attempts. Move manually.", "#ffbe0b");
       return;
     }
     const attempt = ++nativeMoveFailures;
-    const action = { controller: new AbortController(), failureKey, attempt };
+    const action = { controller: new AbortController(), failureKey, attempt,
+      inputState: { url: location.href, board: state.boardElement, positionKey: state.positionKey,
+        myColor: state.myColor, ply: getLichessRoundPly(state.boardElement), lastEnemy: lastRealEnemyMove, sawOpponent: false } };
     activeNativeMove = action;
     const pageUrl = location.href;
     const previousMove = lastOurExecutedMove;
@@ -3582,9 +3837,9 @@
       if (activeNativeMove !== action || action.controller.signal.aborted || extensionInvalidated || document.hidden ||
           location.href !== pageUrl || !boardEl?.isConnected || runtime.disposed ||
           (!manualClick && window.__CC_ANDROID_SETTINGS_OPEN__ === true) ||
-          (!manualClick && !(isPremove ? premoveEnabled || bulletTurboMode : autoMoveEnabled))) throw new Error("Move context changed");
+           (!manualClick && !(isPremove ? mobileSession.effective().premoveEnabled || mobileSession.effective().bulletTurboMode : mobileSession.effective().autoMoveEnabled))) throw new Error("Move context changed");
       if ((document.querySelector(".main-board cg-board") || document.querySelector("cg-board")) !== boardEl) throw new Error("Board was replaced");
-      if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) throw new Error("Rated game vs human: automove blocked");
+      if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) throw new Error("Rated game against human: automove blocked");
     };
     const requireCurrentPosition = () => {
       requireVisibleContext();
@@ -3593,7 +3848,7 @@
       if (!fresh || fresh.animating || fresh.positionKey !== state.positionKey || fresh.boardKey !== state.boardKey ||
           fresh.myColor !== state.myColor || fresh.isBlackOrientation !== state.isBlackOrientation ||
           (isPremove ? fresh.actualTurn === fresh.myColor : fresh.actualTurn !== fresh.myColor) ||
-          !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) throw new Error("Position or move queue changed");
+          !hasMyPieceOnSquare(fresh.grid, state.myColor, moveObj.from)) throw new Error("Position or queue move changed");
       return fresh;
     };
     const pointFor = square => {
@@ -3605,17 +3860,23 @@
       const row = state.isBlackOrientation ? rank : 7 - rank;
       return { x: rect.left + (col + 0.5) * rect.width / 8, y: rect.top + (row + 0.5) * rect.height / 8 };
     };
-    const sendGesture = async (actionType, points, target = boardEl) => {
+    const inputPreflightError = (code, message, phase) => Object.assign(new Error(message), { code, phase });
+    const sendGesture = async (actionType, points, target = boardEl, phase = `${actionType}-preflight`) => {
       requireVisibleContext();
-      for (const point of points) {
-        const hit = document.elementFromPoint(point.x, point.y);
-        if (!hit || (hit !== target && !target.contains(hit))) throw new Error("Board covered by menu or another element");
-      }
-      const result = await runtime.nativeRequest("input.gesture", { action: actionType, points, durationMs: actionType === "tap" ? 80 : 180 });
+      const targetId = mobileSession.registerTarget(target);
+      const snapshot = runtime.captureInputSnapshot({ points, targetId });
+      if (!snapshot) throw inputPreflightError("INPUT_SNAPSHOT_UNAVAILABLE", "Input snapshot is unavailable", phase);
+      if (!snapshot.hit) throw inputPreflightError("INPUT_TARGET_BLOCKED", "Input target is obscured", phase);
+      if (snapshot.animating) throw inputPreflightError("INPUT_POSITION_ANIMATING", "Board redraw is still active", phase);
+      action.gestureSent = true;
+      const result = await runtime.nativeRequest("input.gesture", {
+        action: actionType, points, durationMs: actionType === "tap" ? 80 : 180, targetId, snapshot
+      }, { signal: action.controller.signal });
       if (result?.ok !== true || result?.dispatched !== true) throw new Error("Android did not confirm touch send");
     };
     const moveConfirmed = fresh => Boolean(fresh && fresh.boardKey !== state.boardKey &&
       fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === expectedPiece);
+    const confirmationError = (code, message) => Object.assign(new Error(message), { code });
     setMoveExecutionState(true, isPremove ? "premove-start" : "move-start");
     setAutoStatusText(`Native input: ${moveObj.from} -> ${moveObj.to}...`, "#00f5d4");
     try {
@@ -3625,21 +3886,20 @@
       await Promise.race([layout, wait(400).then(() => { throw new Error("Menu did not free the board in time"); })]);
       boardEl = document.querySelector(".main-board cg-board") || document.querySelector("cg-board");
       requireCurrentPosition();
-      const selected = boardEl.querySelector("square.selected:not(.current-premove)");
-      if (selected) {
-        const rect = selected.getBoundingClientRect();
-        await sendGesture("tap", [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }]);
-        requireCurrentPosition();
+      const round = boardEl.closest("main.round .round__app");
+      const startPly = getLichessRoundPly(boardEl);
+      const moveQuestion = () => {
+        const label = window.i18n?.site?.confirmMove;
+        const question = round?.querySelector(".rcontrols .question");
+        return typeof label === "string" && question?.querySelector("p")?.textContent.trim() === label.trim() ? question : null;
+      };
+      if (!isPremove && moveQuestion()) {
+        throw confirmationError("MOVE_CONFIRMATION_PENDING", "A previously staged move is awaiting confirmation");
       }
       const p1 = pointFor(moveObj.from);
       const p2 = pointFor(moveObj.to);
-      if (isPremove || autoClickMethod === "drag" || attempt > 1) {
-        await sendGesture("drag", [p1, { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, p2]);
-      } else {
-        await sendGesture("tap", [p1]);
-        requireCurrentPosition();
-        await sendGesture("tap", [pointFor(moveObj.to)]);
-      }
+      // One Android gesture avoids Chessground's deferred `piece.dragging` cleanup between two taps.
+      await sendGesture("drag", [p1, { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, p2], boardEl, isPremove ? "premove-preflight" : "move-preflight");
       if (promoPiece) {
         const chooserDeadline = Date.now() + 900;
         while (Date.now() < chooserDeadline) {
@@ -3648,7 +3908,7 @@
           if (moveConfirmed(fresh)) break;
           if (fresh && fresh.boardKey !== state.boardKey &&
               !(fresh.grid?.[fromRow]?.[fromCol] !== movingPiece && fresh.grid?.[toRow]?.[toCol] === movingPiece)) {
-            throw new Error("Position changed before promotion choice");
+            throw new Error("Position changed until promotion choice");
           }
           const promotionClass = { q: "queen", r: "rook", b: "bishop", n: "knight" }[promoPiece];
           const root = document.querySelector("#promotion-choice, .promotion-choice");
@@ -3662,18 +3922,56 @@
         }
       }
       const deadline = Date.now() + 1500;
+      let confirmationTapped = false;
+      let stagedMoveSeen = false;
       while (Date.now() < deadline) {
         requireVisibleContext();
         const fresh = captureBoardState(true);
+        const displayed = moveConfirmed(fresh);
+        const question = !isPremove && moveQuestion();
+        const serverPly = getLichessRoundPly(boardEl);
+        if (question && !confirmationTapped) {
+          const staged = fresh && detectRealMoveBetweenGrids(state.grid, fresh.grid);
+          if (!displayed || staged?.uci !== `${moveObj.from}${moveObj.to}${promoPiece || ""}` || staged.color !== state.myColor ||
+              fresh.myColor !== state.myColor || fresh.isBlackOrientation !== state.isBlackOrientation ||
+              (startPly !== null && serverPly !== startPly)) {
+            throw confirmationError("MOVE_CONFIRMATION_CHANGED", "The pending confirmation does not belong to the requested move");
+          }
+          const button = question.querySelector("a.yes");
+          const rect = button?.getBoundingClientRect();
+          let visible = Boolean(button);
+          for (let node = button; node && node !== round.parentElement; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (style.display === "none" || style.visibility !== "visible" || style.opacity === "0") { visible = false; break; }
+          }
+          if (!question.isConnected || !button?.isConnected || !round.contains(button) || button.matches(":disabled, [aria-disabled='true']") ||
+              button.closest("[hidden], [aria-hidden='true']") || !rect || rect.width <= 0 || rect.height <= 0 ||
+              !visible) {
+            throw confirmationError("MOVE_CONFIRMATION_UNAVAILABLE", "The move confirmation control is not visible and enabled");
+          }
+          // Round questions also accept draws/takebacks. Only this move's localized prompt may be tapped, once.
+          confirmationTapped = true;
+          stagedMoveSeen = true;
+          await sendGesture("tap", [{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }], button);
+          continue;
+        }
+        if (displayed) stagedMoveSeen = true;
+        const opponentClock = state.myColor === (state.isBlackOrientation ? "b" : "w") ? "top" : "bottom";
+        const submitted = startPly !== null ? serverPly !== null && serverPly > startPly :
+          !confirmationTapped || Boolean(round?.querySelector(`.rclock-${opponentClock}.running, .rclock-${opponentClock}.rclock-turn .rclock-turn__text`));
+        const acceptedMove = displayed || (confirmationTapped && stagedMoveSeen && startPly !== null && serverPly > startPly + 1);
         if (isPremove ? fresh?.positionKey === state.positionKey && boardEl.querySelector("square.current-premove") :
-            moveConfirmed(fresh) && !boardEl.querySelector("piece.anim, piece.dragging")) {
+            !question && acceptedMove && submitted && !boardEl.querySelector("piece.anim, piece.dragging")) {
           completed = true;
           break;
         }
-        if (isPremove && fresh?.positionKey !== state.positionKey) throw new Error("Position changed before premove confirmation");
+        if (isPremove && fresh?.positionKey !== state.positionKey) throw new Error("Position changed until underconfirmation premove");
         await wait(75);
       }
-      if (!completed) throw new Error(promoPiece ? "Promotion not confirmed on board" : "Touches sent, but move on board not confirmed");
+      if (!completed && confirmationTapped) {
+        throw confirmationError("MOVE_CONFIRMATION_TIMEOUT", "The confirmation tap was sent, but the move was not submitted");
+      }
+      if (!completed) throw new Error(promoPiece ? "promotion not confirmed on board" : "Touches sent, but move not confirmed on the board");
       if (!isPremove) {
         lastOurExecutedMove = moveObj;
         preparedLookahead = (premoveEnabled || bulletTurboMode) && moveObj.nextPremove?.canPremove ? moveObj.nextPremove : null;
@@ -3681,6 +3979,12 @@
       setAutoStatusText(`${isPremove ? "Premove set" : "Move confirmed"}: ${moveObj.from} -> ${moveObj.to}`, "#00f5d4");
     } catch (error) {
       if (activeNativeMove === action) {
+        if (action.gestureSent) {
+          nativeMoveBlockedKey = failureKey;
+          nativeMoveBlockedState = action.inputState;
+          releaseEngineForNativeBlock();
+        }
+        mobileSession.reportError(error);
         lastOurExecutedMove = previousMove;
         setAutoStatusText(`Native input: ${error.message || "error"}${error.code ? ` [${error.code}]` : ""}`, "#ffbe0b");
       }
@@ -3689,8 +3993,9 @@
       action.controller.abort();
       if (activeNativeMove === action) {
         activeNativeMove = null;
+        if (completed) { nativeMoveBlockedKey = ""; nativeMoveBlockedState = null; }
         moveCooldownUntil = Date.now() + (completed ? 180 : 350);
-        setMoveExecutionState(false, completed ? "confirmed" : "failed");
+        setMoveExecutionState(false, completed ? "confirmed" : action.cancelReason || "failed");
         triggerDebouncedCycle();
       }
     }
@@ -3705,7 +4010,7 @@
     if (!moveObj || !/^[a-h][1-8]$/.test(moveObj.from || "") || !/^[a-h][1-8]$/.test(moveObj.to || "") || moveObj.from === moveObj.to) return;
 
     if (!manualClick && safeAntiBanGuard && isRatedGameAgainstHuman()) {
-      setAutoStatusText("Automove blocked: rated game vs human. Move manually.", "#ffbe0b");
+      setAutoStatusText("Automove blocked: rated game against human. Move manually.", "#ffbe0b");
       return;
     }
 
@@ -3722,7 +4027,7 @@
     const isPromotion = movingPiece === "p" && (toSq[1] === "8" || toSq[1] === "1");
     const promoPiece = isPromotion ? String(moveObj.promo || moveObj.uci?.[4] || "q").toLowerCase() : null;
     if (isPromotion && !["q", "r", "b", "n"].includes(promoPiece)) {
-      setAutoStatusText(`Automove cancelled: unknown promotion «${promoPiece}»`, "#ff2a85");
+      setAutoStatusText(`Automove cancelled: notfromunknownе promotion «${promoPiece}»`, "#ff2a85");
       return;
     }
 
@@ -3786,7 +4091,7 @@
         setMoveExecutionState(false, completed ? "dispatched" : "failed");
         if (!completed) {
           setAutoStatusText(
-            promoPiece ? `Automove cancelled: could not safely choose promotion ${promoPiece.toUpperCase()}` : "Move cancelled: position already changed",
+            promoPiece ? `Automove cancelled: not yet safely chose promotion ${promoPiece.toUpperCase()}` : "Move cancelled: position already changed",
             "#d9ad58"
           );
           return;
@@ -3910,6 +4215,14 @@
     const myColor = isBlackOrientation ? "b" : "w";
     const enemyColor = myColor === "w" ? "b" : "w";
 
+    if (boardPart === "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR") return "w";
+    const roundPly = getLichessRoundPly(cgBoard);
+    if (roundPly !== null) return roundPly % 2 === 0 ? "w" : "b";
+    const round = cgBoard.closest("main.round .round__app");
+    const bottomClock = round?.querySelector(".rclock-bottom.running, .rclock-bottom.rclock-turn .rclock-turn__text");
+    const topClock = round?.querySelector(".rclock-top.running, .rclock-top.rclock-turn .rclock-turn__text");
+    if (Boolean(bottomClock) !== Boolean(topClock)) return bottomClock ? myColor : enemyColor;
+
     const cellW = boardRect.width / 8;
     const cellH = boardRect.height / 8;
     const lastMoveSquares = cgBoard.querySelectorAll("square.last-move");
@@ -3934,20 +4247,40 @@
       }
     }
 
-    if (boardPart === "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR") {
-      return "w";
-    }
-
-    if (document.querySelector(".rclock-bottom.rclock-turn, .rclock-bottom.running")) return myColor;
-    if (document.querySelector(".rclock-top.rclock-turn, .rclock-top.running")) return enemyColor;
-
     const observedPly = getObservedPlyIndex();
     if (observedPly !== null) return observedPly % 2 === 0 ? "w" : "b";
 
     return "w";
   }
 
+  function getLichessRoundPly(cgBoard) {
+    const round = cgBoard?.closest("main.round .round__app");
+    if (!round) return null;
+    const plyOf = button => {
+      const value = button?.getAttribute("data-ply");
+      return /^-?\d+$/.test(value || "") && Number.isSafeInteger(Number(value)) ? Number(value) : null;
+    };
+    // Replay controls use ctrl.ply, unlike the move list, which includes an optimistic pendingStep.
+    const mobile = Array.from(round.querySelectorAll(".col1-moves > button.fbt[data-ply]"));
+    if (mobile.length === 2) {
+      const previous = plyOf(mobile[0]);
+      const next = plyOf(mobile[1]);
+      if (previous !== null && next === previous + 2 && previous >= -1) return previous + 1;
+    }
+    const replay = Array.from(round.querySelectorAll("button.fbt.repeatable[data-ply]"));
+    if (replay.length === 4) {
+      const previous = plyOf(replay[1]);
+      const next = plyOf(replay[2]);
+      if (!replay[1].disabled && previous !== null && previous >= 0) return previous + 1;
+      if (!replay[2].disabled && next !== null && next >= 1) return next - 1;
+      if (gameStartedFromInitial && uciHistoryList.length === 0 && replay.every(button => button.disabled && button.getAttribute("data-ply") === "-")) return 0;
+    }
+    return null;
+  }
+
   function getObservedPlyIndex() {
+    const roundPly = getLichessRoundPly(document.querySelector(".main-board cg-board") || document.querySelector("cg-board"));
+    if (roundPly !== null) return roundPly;
     const moveNodes = Array.from(document.querySelectorAll("l4x > kwdb, rm6 > kwdb, .tview2 > move")).filter(
       (el) => !el.closest("interrupt")
     );
@@ -4161,6 +4494,9 @@
       }
     }
 
+    const roundPly = getLichessRoundPly(document.querySelector(".main-board cg-board") || document.querySelector("cg-board"));
+    if (diffCount > 0 && roundPly !== null && roundPly === lastObservedPly) return;
+
     const observedHistoryJump = diffCount > 0 && Number.isInteger(lastObservedPly) && Number.isInteger(observedPly) && (
       observedPly < lastObservedPly || observedPly > lastObservedPly + 1
     );
@@ -4332,6 +4668,7 @@
       positionKey: `${boardPart} ${actualTurn} ${castlingStr} ${currentEpSquare}`,
       sessionId: analysisSessionId,
       positionId,
+      boardElement: cgBoard,
       boardRect,
       isBlackOrientation,
       myColor,
@@ -4433,6 +4770,7 @@
   }
 
   function renderPremovePreviewOverlay(state, premovePlan) {
+    mobileSession?.applyVisualPolicy(getShadow());
     let svg = $("chesscoach-screen-svg");
     if (!svg) {
       svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -4533,6 +4871,7 @@
   }
 
   function renderArrowsOverlay(state, res) {
+    mobileSession?.applyVisualPolicy(getShadow());
     const tokenMismatch = currentPositionKey && (boardDirty || (res.positionId !== undefined && res.positionId !== positionId) || state?.positionKey !== currentPositionKey);
     if (!state || !res || tokenMismatch) {
       hideArrows();
@@ -4630,7 +4969,7 @@
       }
 
       if (arrowStyle === "sq_Step_badges") {
-        const tag = isBest ? "BEST" : (roleLabel === "avg" ? "2ND LINE" : "BLUNDER");
+        const tag = isBest ? "BEST" : (roleLabel === "avg" ? "2-Я LINE" : "BLUNDER");
         return `
           <rect x="${p1.x - 44}" y="${p1.y - 44}" width="88" height="88" rx="14"
                 fill="none" stroke="${solidColor}" stroke-width="${sw * 0.75}" stroke-dasharray="12 6" stroke-opacity="${op * 0.85}" />
@@ -4952,8 +5291,8 @@
     if (!statusEl) return;
     const statusText = statusEl.innerText || "";
 
-    const whiteWon = statusText.includes("White is victorious") || statusText.includes("White wins");
-    const blackWon = statusText.includes("Black is victorious") || statusText.includes("Black wins");
+    const whiteWon = statusText.includes("White is victorious") || statusText.includes("White won");
+    const blackWon = statusText.includes("Black is victorious") || statusText.includes("Winеyes black");
     const isDraw = statusText.includes("Stalemate") || statusText.includes("Draw") || statusText.includes("Draw");
 
     if (!whiteWon && !blackWon && !isDraw) return;
@@ -4972,7 +5311,7 @@
             $("cc-misc-db-summary").textContent = `Positions learned in memory: ${res.positionsCount}`;
           }
           $("cc-opening-name").textContent =
-            outcome === "win" ? "👑 WIN SAVED TO DATABASE" : "◈ GAME ERRORS STUDIED";
+            outcome === "win" ? "👑 WIN SAVED TO DATABASE" : "◈ GAME ERRORS LEARNED";
         }
       }
     );
@@ -5022,15 +5361,15 @@
         if (res && res.detected) {
           peerExtensionDetected = true;
           const stName = ALL_STYLE_NAMES[res.enemyStyle] || res.enemyStyle;
-          const autoTag = res.enemyAuto ? "🤖 Automove: ON" : "🖐 Moves himself";
+          const autoTag = res.enemyAuto ? "🤖 Automove: ON" : "🖐 Moves itself";
           banner.style.display = "block";
           banner.style.borderColor = "#00f5d4";
           $("cc-peer-detector-title").innerHTML = `
-            <span>👁️ RADAR OWN: DETECTED CHESSCOACH!</span>
+            <span>👁️ RADAR OWN: onDETECTED CHESSCOACH!</span>
             <span style="background:rgba(0,0,0,0.45); padding:1px 6px; border-radius:4px; font-family:monospace;">⚡ HVH</span>
           `;
           $("cc-peer-detector-text").textContent =
-            `Opponent is running ChessCoach REWORK! His profile: ${stName} (${res.enemyElo} ELO • ${autoTag})`;
+            `Opponent plays with ChessCoach REWORK! His profile: ${stName} (${res.enemyElo} ELO • ${autoTag})`;
         }
       }
     );
@@ -5052,11 +5391,11 @@
       banner.style.display = "block";
       banner.style.borderColor = "#ffbe0b";
       $("cc-peer-detector-title").innerHTML = `
-        <span style="color:#ffbe0b;">🕵️ CHEAT RADAR: SUSPICION OF ENGINE!</span>
+        <span style="color:#ffbe0b;">🕵️ CHEAT-RADAR: bySUSPICION on ENGINE!</span>
         <span style="background:rgba(0,0,0,0.45); color:#ffbe0b; padding:1px 6px; border-radius:4px; font-family:monospace;">⚠️ BOT?</span>
       `;
       $("cc-peer-detector-text").textContent =
-        `Opponent played ${suspectEngineStreak} moves in a row on 1st line without eval loss (0.00 CP Loss). High chance of software!`;
+        `Opponent played ${suspectEngineStreak} moves in a row by 1st lines without eval loss (0.00 CP Loss). High probability software!`;
     }
   }
 
@@ -5228,7 +5567,7 @@
     let updatedAvg = baseRes.average;
     const averageLine = [1, 2, 3]
       .map(index => wasmOut.lines[index])
-      .find(line => line && line.uci !== updatedBest.uci && !(line.isMate && Number(line.mateIn) < 0) && (!safeSet || safeSet.has(line.uci)));
+      .find(line => line && line.uci !== updatedBest.uci && !(line.isMate && Number(line.mateIn) < 0) && (!legalSet || legalSet.has(line.uci)) && !hardRejectedSet?.has(line.uci) && (!safeSet || safeSet.has(line.uci)));
     if (averageLine) {
       const l2 = averageLine;
       if (!safeSet || safeSet.has(l2.uci)) {
@@ -5286,8 +5625,8 @@
           nearestThreatText: isMateIn1
             ? `👑 MATE IN 1 MOVE: ${updatedBest.from}→${updatedBest.to}#`
             : (isMateIn2
-                ? `👑 FORCED MATE IN 2 MOVES: ${updatedBest.from}→${updatedBest.to}+`
-                : `SF LOCAL plan: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
+                ? `👑 FORCE. MATE IN 2 MOVES: ${updatedBest.from}→${updatedBest.to}+`
+                : `Plan SF LOCAL: ${updatedBest.from}→${updatedBest.to} (${evalPawnsStr})`)
         }
       : null;
 
@@ -5313,6 +5652,7 @@
 
   function applyAnalysisResult(state, res, isDeepPass = false, prevBestUci = "") {
     if (!res || res.error) return;
+    if (res.average && res.average.uci === res.best?.uci) res = { ...res, average: null };
     const resultMeta = res.meta || null;
     if (resultMeta && !isCurrentAnalysisMeta(resultMeta)) return;
     const requiresFinalDisplay = engineMaxMode || currentElo >= 2000;
@@ -5324,7 +5664,7 @@
       return;
     }
     const qualityRank = res.best?.fromSyzygy ? 60 : res.engineMeta ? 50 : isDeepPass ? 30 : 10;
-    if (cachedMoves?.positionId === positionId && Number(cachedMoves.qualityRank || 0) > qualityRank) return;
+    if (cachedMoves?.positionId === positionId && cachedMoves.meta?.analysisId === positionAnalysisId && Number(cachedMoves.qualityRank || 0) > qualityRank) return;
     if (!isDeepPass && res.lastOpponentMove) {
       updateBehavioralCheatDetector(res);
     }
@@ -5341,7 +5681,7 @@
       recordEvalPoint(state.boardKey, res.best.whitePerspectiveEval ?? res.best.evalPawns, res.opponentEvalDropPawns);
     }
 
-    if (audioRadarEnabled && window.ChessFX && state.actualTurn === state.myColor) {
+    if (audioRadarEnabled && (!mobileSession || mobileSession.effective().audioRadarEnabled) && window.ChessFX && state.actualTurn === state.myColor) {
       const dropVal = parseFloat(res.opponentEvalDropPawns) || 0;
       if (res.best && (res.best.isMateInOne || res.best.isForcedMateInTwo || res.best.isCheckmate)) {
         window.ChessFX.playTacticalAudioPing("mate_lock", state.boardKey);
@@ -5392,12 +5732,12 @@
         const mateTitleEl = $("cc-mate-banner-title");
         if (mateTitleEl) {
           mateTitleEl.textContent = res.best.isMateInOne
-            ? "👑💀 HAHAHA! MATE IN 1 MOVE ON BOARD!"
+            ? "👑💀 HAHAHA! MATE IN 1 MOVE on BOARD!"
             : "👑⚡ FORCED MATE IN 2 MOVES!";
         }
         $("cc-mate-banner-text").textContent = res.best.isMateInOne
-          ? `Move ${res.best.from} → ${res.best.to}# delivers clean MATE IN 1 MOVE! Opponent messed up!`
-          : `Move ${res.best.from} → ${res.best.to}+ guaranteed MATE IN 2 MOVES on any enemy reply!`;
+          ? `Move ${res.best.from} → ${res.best.to}# delivers pure MATE IN 1 MOVE! Opponent messed up!`
+          : `Move ${res.best.from} → ${res.best.to}+ guaranteed delivers MATE IN 2 MOVES on any reply enemy!`;
       } else {
         mateBanner.style.display = "none";
       }
@@ -5442,7 +5782,7 @@
         $("cc-best-title").innerHTML = `✦ BEST MOVE • ${styleLabel}${badgesHtml}`;
       }
 
-      if (!bulletTurboMode && (isDeepPass || res.best.isMateInOne) && isBrilliant && phonkEditEnabled && state.actualTurn === state.myColor && window.ChessFX) {
+      if (!bulletTurboMode && (isDeepPass || res.best.isMateInOne) && isBrilliant && phonkEditEnabled && (!mobileSession || mobileSession.effective().mobileVisualEffects) && state.actualTurn === state.myColor && window.ChessFX) {
         window.ChessFX.triggerBrilliantPhonkEdit(getShadow(), res.best, state, 15000, false);
       }
 
@@ -5452,23 +5792,23 @@
       $("cc-best-eval").textContent = `${evalPrefix}${res.best.evalPawns}`;
       $("cc-best-desc").textContent =
         (improvedByDeep ? "✦ [IMPROVED BY DEPTH] " : "") + explainWithModule(res.best, "best", state.fen);
-      $("cc-best-pv").textContent = res.best.pvLine ? `◈ Line: ${res.best.pvLine}` : "";
+      $("cc-best-pv").textContent = res.best.pvLine ? `◈ Variation: ${res.best.pvLine}` : "";
 
       const openingCard = $("cc-opening-card");
       const detectedOpening = window.ChessOpenings ? window.ChessOpenings.detect(uciHistoryList) : null;
 
       if (res.syzygyActive && res.best.fromSyzygy) {
         if (openingCard) openingCard.style.borderLeftColor = "#c77dff";
-        $("cc-opening-name").textContent = `🔮 SYZYGY TABLEBASE (${res.pieceCount} PIECES ON BOARD)`;
+        $("cc-opening-name").textContent = `🔮 TABLE SYZYGY (${res.pieceCount} PIECES ON BOARD)`;
         $("cc-opening-plan").textContent = `${res.best.syzygyBadge || "100% mathematical accuracy endgame"}. Engine knows the exact number of moves until exchange or mate.`;
       } else if (res.isDangerPosition && !res.best.isMateInOne) {
         if (openingCard) openingCard.style.borderLeftColor = "#ff2a85";
-        $("cc-opening-name").textContent = `🛡 ANTI-MATE RADAR: ${res.dangerReason || "KING THREAT"}!`;
-        $("cc-opening-plan").textContent = `Attention! Engine detected opponent mating threat and enabled deep defense search (${res.best.from} → ${res.best.to}).`;
+        $("cc-opening-name").textContent = `🛡 ANTI-MATE RADAR: ${res.dangerReason || "THREAT KING"}!`;
+        $("cc-opening-plan").textContent = `Attention! Engine detected a mating threat from opponent and enabled deep search defense (${res.best.from} → ${res.best.to}).`;
       } else if (res.hangingSquare && !res.best.isMateInOne) {
         if (openingCard) openingCard.style.borderLeftColor = "#ffbe0b";
-        $("cc-opening-name").textContent = `⚠️ WARNING: SQUARE ${res.hangingSquare.toUpperCase()} UNDER ATTACK!`;
-        $("cc-opening-plan").textContent = `Your pawn or piece on square ${res.hangingSquare} is attacked — defend or move it!`;
+        $("cc-opening-name").textContent = `⚠️ WARNING: square ${res.hangingSquare.toUpperCase()} UNDER ATTACK!`;
+        $("cc-opening-plan").textContent = `Your pawn or piece on square ${res.hangingSquare} is attacked — defense or move away its!`;
       } else {
         if (openingCard) openingCard.style.borderLeftColor = "var(--cc-accent)";
         if (res.best.bookName) {
@@ -5492,7 +5832,7 @@
           !res.best.fromSyzygy
         );
         if (!isDeepPass && needsDeepVerification && !isExtremePanicTime) {
-          setAutoStatusText(`🛡 Checking tactical threats with deep engine...`, "#ffbe0b");
+          setAutoStatusText(`🛡 Checking tactical threats with deep engineк...`, "#ffbe0b");
         } else {
           scheduleAutoMoveIfNeeded();
         }
@@ -5562,6 +5902,7 @@
   }
 
   function applyPremovePlanOnEnemyTurn(state, plan, allowExecution = true) {
+    if (mobileSession && !(mobileSession.effective().premoveEnabled || mobileSession.effective().bulletTurboMode || mobileSession.effective().showPremoveArrows)) return;
     if (plan && plan.telemetry) {
       lastTelemetryData = plan.telemetry;
     }
@@ -5578,7 +5919,7 @@
         hideArrows();
       }
       if (standbySub) {
-        standbySub.textContent = "Old markers cleared. Live telemetry above continues watching clocks and threats!";
+        standbySub.textContent = "Old labels cleared. Live telemetry above aboutcontinues watch for itselfи and threat!";
       }
       return;
     }
@@ -5603,7 +5944,7 @@
     if (standbySub) {
       standbySub.innerHTML = `
         <strong>${plan.reasonText}</strong><br>
-        Our premove: <strong style="color:#c77dff;">${plan.premove.from} → ${plan.premove.to} (${plan.confidence}%)</strong>
+        onш premove: <strong style="color:#c77dff;">${plan.premove.from} → ${plan.premove.to} (${plan.confidence}%)</strong>
       `;
     }
 
@@ -5625,7 +5966,7 @@
         }, 25);
       } else if (lastPremoveSentBoardKey !== state.boardKey) {
         setAutoStatusText(
-          `Forecast ${plan.premove.from}→${plan.premove.to} (${plan.confidence}% < Lv. threshold${premoveRiskLevel})`,
+          `Forecast ${plan.premove.from}→${plan.premove.to} (${plan.confidence}% < bythresholdа Lv.${premoveRiskLevel})`,
           "#94a3b8"
         );
       }
@@ -5633,6 +5974,7 @@
   }
 
   function maybePonderPredictedReply(state, plan) {
+    if (mobileSession) return;
     const predictedUci = plan?.predictedEnemyMove?.uci;
     const resources = StockfishWasmEngine.getResourceProfile?.();
     if (!engineMaxMode || !useStockfishWasm || !resources?.fullNnue || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(predictedUci || "")) return;
@@ -5670,6 +6012,18 @@
 
     hideArrows();
 
+    const effectivePremove = mobileSession?.effective();
+    if (mobileSession && !(effectivePremove.premoveEnabled || effectivePremove.bulletTurboMode || effectivePremove.showPremoveArrows)) {
+      if (isAltPressed || effectivePremove.heatmapAlwaysOn) {
+        safeSendMessage({ type: "GET_BOARD_HEATMAP", fen: state.fen, myColor: state.myColor }, result => {
+          const fresh = captureBoardState(true);
+          if (!fresh || fresh.positionKey !== state.positionKey || !Array.isArray(result?.heatmap)) return;
+          cachedMoves.heatmap = result.heatmap;
+          renderPremovePreviewOverlay(fresh, null);
+        });
+      }
+      return;
+    }
     const localPlan = computeLocalInstantPremovePlan(state);
     if (localPlan && localPlan.canPremove && localPlan.premove) {
       // Local/book data is a preview. The background validates the move against
@@ -5730,7 +6084,8 @@
       shutdownOrphanedScript();
       return;
     }
-    if (document.hidden) return;
+    if (document.hidden || (mobileSession && !mobileSession.isReady)) return;
+    if (mobileSession && window.__CC_ANDROID_SETTINGS_OPEN__ === true) return;
     if (forceByButton) clearAnalysisRetry();
 
     ensurePanel();
@@ -5752,6 +6107,12 @@
     }
     if (state.animating) return;
     adoptPositionState(state);
+    const mobileConfigKey = mobileSession ? getMobileAnalysisConfig() : "";
+    mobileSession?.observe(state, mobileConfigKey);
+    if (mobileSession && isNativeAutoBlocked(state) && state.actualTurn === state.myColor) {
+      releaseEngineForNativeBlock();
+      return;
+    }
     if (pendingAnalysisRetry && (pendingAnalysisRetry.url !== location.href || pendingAnalysisRetry.positionKey !== state.positionKey)) clearAnalysisRetry();
     if (!forceByButton && (isExecutingMove || Date.now() < moveCooldownUntil)) return;
     if (!forceByButton && pendingAnalysisRetry &&
@@ -5774,21 +6135,27 @@
       if (deepBadge) deepBadge.style.display = "none";
       if (standbyBox) {
         standbyBox.style.display = "flex";
-        const mySideText = state.myColor === "w" ? "you are White ⚪" : "you are Black ⚫";
-        $("cc-standby-title").textContent = `Move opponent (${mySideText})`;
+        const mySideText = state.myColor === "w" ? "you for White ⚪" : "you for Black ⚫";
+        $("cc-standby-title").textContent = `Opponent move (${mySideText})`;
       }
       if (activeBox) activeBox.style.display = "none";
       if (autoMoveEnabled && !premoveEnabled && !bulletTurboMode) {
-        setAutoStatusText("Waiting for reply opponent...", "#94a3b8");
+        setAutoStatusText("Waiting reply opponent...", "#94a3b8");
       }
       committedBoardKey = "";
 
+      if (mobileSession) StockfishWasmEngine.terminate();
       handleEnemyTurnInstantPremove(state);
       return;
     }
 
     if (standbyBox) standbyBox.style.display = "none";
     if (activeBox) activeBox.style.display = "flex";
+    if (mobileSession && !mobileSession.canAnalyze(state, forceByButton)) return;
+    if (mobileSession?.hasAnalysis(state.positionKey, mobileConfigKey)) {
+      if (cachedMoves.best && isCachedAnalysisCurrent(state)) scheduleAutoMoveIfNeeded();
+      return;
+    }
 
     if (!forceByButton && state.boardKey === committedBoardKey) {
       if (
@@ -5805,6 +6172,9 @@
       return;
     }
 
+    const lease = mobileSession?.beginAnalysis(state, mobileConfigKey);
+    if (mobileSession && !lease) return;
+    mobileAnalysisLease = lease || null;
     committedBoardKey = state.boardKey;
     committedEnemyBoardKey = "";
     preparedLookahead = null;
@@ -5823,10 +6193,10 @@
     const normalizedElo = Number.isFinite(Number(currentElo))
       ? Math.max(400, Math.min(3000, Math.round(Number(currentElo))))
       : 2000;
-    const isTurboActive = Boolean(currentElo < 2000 && (bulletTurboMode || (workMode !== "legit" && mySecs <= 15)));
+    const isTurboActive = Boolean(currentElo < 2000 && (mobileSession ? mobileSession.effective().bulletTurboMode : (bulletTurboMode || (workMode !== "legit" && mySecs <= 15))));
     const historyTrusted = Boolean(gameStartedFromInitial && state.sideToAnalyze === state.actualTurn);
     const engineUciHistory = historyTrusted ? uciHistoryList : [];
-    const needAvg = Boolean(!engineMaxMode && currentElo < 2000 && (showAverageMove || useAverageMoveSometimes) && workMode !== "hvh");
+    const needAvg = Boolean(!engineMaxMode && (showAverageMove || (currentElo < 2000 && useAverageMoveSometimes)) && workMode !== "hvh");
     const needWorst = Boolean(!engineMaxMode && currentElo < 2000 && showWorstMove && workMode === "all");
 
     safeSendMessage(
@@ -5850,11 +6220,11 @@
         historyTrusted,
         meta: fastMeta
       },
-      (fastRes) => {
+      async (fastRes) => {
         const responseMeta = fastRes?.meta || fastMeta;
         if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(responseMeta)) return;
         if (!fastRes || !fastRes.best || fastRes.error) {
-          activeEngineBoardKey = "";
+          finishCurrentAnalysis(myReqId, "failed");
           clearPositionPresentation(fastRes?.error ? "ANALYSIS ERROR • RETRY..." : "MATE / STALEMATE • NO MOVES");
           committedBoardKey = state.boardKey;
           boardDirty = false;
@@ -5875,7 +6245,7 @@
           (!requiresFinalEngine && isTurboActive && !fastRes.isDangerPosition && !fastRes.hangingSquare)
         ) {
           if (deepBadge) deepBadge.style.display = "none";
-          if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+          finishCurrentAnalysis(myReqId);
           return;
         }
 
@@ -5892,6 +6262,12 @@
         const wasmPromise = shouldRunWasm
           ? StockfishWasmEngine.analyze(state.fen, wasmMovetime, needAvg ? 3 : 1, engineUciHistory, historyTrusted, { ...deepMeta, elo: normalizedElo, engineMax: engineMaxMode, engineMaxMode, isDangerPosition: Boolean(fastRes.isDangerPosition || fastRes.hangingSquare), needAverage: needAvg })
           : Promise.resolve(null);
+        if (shouldRunWasm && window.__CC_ANDROID_RUNTIME__) {
+          const dispatch = await StockfishWasmEngine.whenDispatched();
+          if (myReqId !== analysisRequestId || !isCurrentAnalysisMeta(deepMeta)) return;
+          deepMeta.ownedEngineRequestId = dispatch?.requestId || "";
+          deepMeta.annotationOnly = true;
+        }
 
         safeSendMessage(
           {
@@ -5934,17 +6310,17 @@
             const requiresFinalEngine = engineMaxMode || currentElo >= 2000 || Boolean(finalDeep?.analysisIncomplete);
             if (!backgroundDeepOk && !wasmApplied && !requiresFinalEngine) {
               if (deepBadge) deepBadge.style.display = "none";
-              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              finishCurrentAnalysis(myReqId);
               return;
             }
 
             const hasFinalEngine = Boolean(finalDeep?.engineMeta || finalDeep?.syzygyActive || finalDeep?.best?.fromSyzygy);
             if (requiresFinalEngine && !hasFinalEngine) {
-              if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+              finishCurrentAnalysis(myReqId, "failed");
               if (!useStockfishWasm) {
                 if (deepBadge) deepBadge.style.display = "none";
                 committedBoardKey = state.boardKey;
-                setAutoStatusText(currentElo >= 2000 || engineMaxMode ? "2000+ ELO requires STOCKFISH LOCAL enabled" : "Analysis incomplete: enable Stockfish or move manually.", "#ffbe0b");
+                setAutoStatusText(currentElo >= 2000 || engineMaxMode ? "2000+ ELO requires enabled STOCKFISH LOCAL" : "Analysis not finished: enable Stockfish or move manually.", "#ffbe0b");
                 return;
               }
               if (finalEngineRetryCount < 3) {
@@ -5959,6 +6335,7 @@
                 if (deepBadge) deepBadge.style.display = "none";
                 committedBoardKey = state.boardKey;
                 setAutoStatusText("STOCKFISH unavailable • automove blocked", "#ff2a85");
+                scheduleEngineRecovery(state);
               }
               return;
             }
@@ -5969,7 +6346,7 @@
             finalDeep.meta = deepMeta;
             finalDeep.pass = "deep";
             applyAnalysisResult(state, finalDeep, true, firstBestUci);
-            if (myReqId === analysisRequestId) activeEngineBoardKey = "";
+            finishCurrentAnalysis(myReqId);
           }
         );
       }
@@ -5978,7 +6355,14 @@
 
   let rafPending = false;
   function triggerDebouncedCycle() {
-    if (extensionInvalidated || rafPending || isExecutingMove || Date.now() < moveCooldownUntil) return;
+    if (extensionInvalidated || document.hidden || (mobileSession && !mobileSession.isReady) || rafPending || isExecutingMove) return;
+    if (Date.now() < moveCooldownUntil) {
+      if (mobileSession && !cycleWakeTimer) cycleWakeTimer = setTimeout(() => {
+        cycleWakeTimer = null;
+        triggerDebouncedCycle();
+      }, Math.max(16, moveCooldownUntil - Date.now()));
+      return;
+    }
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
@@ -5990,9 +6374,22 @@
   let observedMovesNode = null;
 
   const domObserver = new MutationObserver((mutations) => {
-    if (mutations.length) markBoardDirty("MOVE");
-    triggerDebouncedCycle();
+    if (!mutations.length) return;
+    clearTimeout(boardMutationTimer);
+    boardMutationTimer = setTimeout(() => {
+      boardMutationTimer = null;
+      markBoardDirty("MOVE");
+      triggerDebouncedCycle();
+    }, 120);
   });
+  const boardDiscoveryObserver = mobileSession ? new MutationObserver(mutations => {
+    if (mutations.some(mutation => [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some(node =>
+      node?.matches?.("cg-board, .round__app__table, .analyse__moves") || node?.querySelector?.("cg-board, .round__app__table, .analyse__moves")
+    ))) {
+      ensureObserversAttached();
+      triggerDebouncedCycle();
+    }
+  }) : null;
 
   function ensureObserversAttached() {
     if (extensionInvalidated || !isContextValid()) return;
@@ -6009,6 +6406,7 @@
       if (cgBoard) {
         domObserver.observe(cgBoard, {
           childList: true,
+          subtree: true,
           attributes: true,
           attributeFilter: ["class", "style"]
         });
@@ -6038,11 +6436,54 @@
     renderArrowsOverlay(state, cachedMoves);
   };
 
-  loadSettings();
-  ensureObserversAttached();
+  function scheduleMobilePoll() {
+    clearTimeout(mobilePollTimer);
+    if (extensionInvalidated || document.hidden || !mobileSession?.isReady) return;
+    mobilePollTimer = setTimeout(() => {
+      mobilePollTimer = null;
+      if (extensionInvalidated || document.hidden) return;
+      ensureObserversAttached();
+       if (!nativeMoveBlockedState && !isExecutingMove && Date.now() >= moveCooldownUntil) runCycle(false);
+       scheduleMobilePoll();
+    }, nativeMoveBlockedState ? 5000 : 1600);
+  }
+
+  const settingsReady = loadSettings();
+  if (mobileSession) {
+    Promise.all([settingsReady, mobileSession.ready]).then(() => {
+      if (extensionInvalidated) return;
+      unregisterMobileCore = mobileSession.registerCore("lichess", {
+        captureState: () => captureBoardState(true),
+        isAnimating: board => Boolean(board.querySelector("piece.anim, piece.dragging")),
+        viewState: () => ({ executing: isExecutingMove, bestUci: cachedMoves.best?.uci || null,
+          finalAnalysis: hasFinalAutoAnalysis(cachedMoves), retryPending: Boolean(pendingAnalysisRetry), nativeInputBlocked: Boolean(nativeMoveBlockedState) }),
+        cancelSearch() {
+          analysisRequestId++;
+          positionAnalysisId++;
+          activeEngineBoardKey = "";
+          mobileAnalysisLease = null;
+          StockfishWasmEngine.cancel();
+          clearAnalysisRetry();
+        },
+        suspend: suspendMobileCore,
+        resume() {
+          boardDirty = true;
+          ensureObserversAttached();
+          if (!flushDeferredRecalculate()) triggerDebouncedCycle();
+          scheduleMobilePoll();
+        },
+        refreshVisuals() { mobileSession.applyVisualPolicy(shadowRoot); triggerDebouncedCycle(); }
+      });
+      boardDiscoveryObserver.observe(document.documentElement, { childList: true, subtree: true });
+      mobileSession.applyVisualPolicy(shadowRoot);
+      ensureObserversAttached();
+      triggerDebouncedCycle();
+      scheduleMobilePoll();
+    }).catch(error => mobileSession.reportError(error));
+  } else ensureObserversAttached();
 
   let lastIdleBoardPollAt = 0;
-  mainIntervalId = setInterval(() => {
+  if (!mobileSession) mainIntervalId = setInterval(() => {
     if (extensionInvalidated || !isContextValid()) {
       shutdownOrphanedScript();
       return;

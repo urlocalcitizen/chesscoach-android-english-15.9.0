@@ -49,6 +49,10 @@ async function syncRoomBeacon(roomId, myColor, style, elo, autoMove) {
 const analyzedStateByClient = new Map();
 const latestAnalysisMetaByClient = new Map();
 const stockfishWorkByPosition = new Map();
+const pendingMobileAnalysis = new Map();
+const activeMobileAnalysis = new Map();
+const mobileAnalysisCache = new Map();
+const cancelledMobileGeneration = new Map();
 
 function createAnalyzedState() {
   return {
@@ -70,6 +74,117 @@ let engineActivityEpoch = 0;
 const engineCancellationByClient = new Map();
 
 const SEARCH_INTERRUPTED = Object.freeze({ message: "Local search budget exhausted" });
+const SEARCH_SUPERSEDED = Object.freeze({ message: "Obsolete analysis", code: "SUPERSEDED" });
+
+function isAnalysisGenerationCurrent(meta, contextKey) {
+  const cancelled = cancelledMobileGeneration.get(contextKey);
+  if (meta && cancelled && meta.sessionId === cancelled.sessionId &&
+      (Number(meta.positionId) < Number(cancelled.positionId) ||
+       (Number(meta.positionId) === Number(cancelled.positionId) && Number(meta.analysisId) <= Number(cancelled.analysisId)))) return false;
+  const latest = latestAnalysisMetaByClient.get(contextKey);
+  if (!meta || !latest) return true;
+  return meta.sessionId === latest.sessionId && (
+    Number(meta.positionId) > Number(latest.positionId) ||
+    (meta.positionId === latest.positionId && Number(meta.analysisId) >= Number(latest.analysisId))
+  );
+}
+
+function analysisContextKey(sender, meta) {
+  const raw = String(meta?.sessionId || "legacy");
+  const session = /^[a-z0-9:._-]{1,96}$/i.test(raw) ? raw : "legacy";
+  return `${sender?.tab?.id ?? sender?.origin ?? sender?.url ?? "unknown"}:${sender?.frameId ?? 0}:${session}`;
+}
+
+function ownedAnnotationCurrent(meta, fen, contextKey) {
+  const work = stockfishWorkByPosition.get(`${meta?.sessionId || ""}|${meta?.positionId ?? ""}|${fen}`);
+  return Boolean(work?.expiresAt > Date.now() && work.requestId === meta?.ownedEngineRequestId &&
+    work.analysisId === meta?.analysisId && work.contextKey === contextKey &&
+    work.lifecycleEpoch === globalThis.__CC_ENGINE_RUNTIME__?.lifecycleEpoch &&
+    (engineCancellationByClient.get(work.clientKey)?.epoch || 0) === work.clientEpoch);
+}
+
+function mobileAnalysisKey(request, contextKey) {
+  const profile = globalThis.__CC_DEVICE_PROFILE__;
+  const power = profile?.power || {};
+  const tier = power.saveMode || power.backgroundRestricted || Number(power.thermalStatus) >= 2
+    ? "LOW" : profile?.recommendation?.tier || "BALANCED";
+  return JSON.stringify([contextKey, request.fen, request.elo, request.style, request.pass,
+    request.calcAverage !== false, request.calcWorst !== false, request.bulletTurbo === true,
+    request.myColor || "w", request.mySeconds ?? 999, request.enemySeconds ?? 999,
+    request.trapRadarEnabled !== false, request.lastEnemyMove || null, request.lastOurMove || null,
+    request.recentPositions || [], request.uciHistory || [], request.historyTrusted === true,
+    request.meta?.annotationOnly === true, tier, profile?.recommendation?.movetimeScale || 1]);
+}
+
+function queueMobileAnalysis(request, sender, contextKey, run, sendResponse) {
+  const previous = pendingMobileAnalysis.get(contextKey);
+  if (previous) {
+    clearTimeout(previous.timer);
+    previous.finish({ error: "Obsolete analysis", code: "SUPERSEDED", status: "error" });
+  }
+  activeMobileAnalysis.get(contextKey)?.controller.abort();
+  const controller = new AbortController();
+  const runtimeEpoch = globalThis.__CC_ENGINE_RUNTIME__?.lifecycleEpoch;
+  const cacheKey = mobileAnalysisKey(request, contextKey);
+  const job = {
+    sender, meta: request.meta, controller, timer: null, settled: false,
+    finish(payload) {
+      if (job.settled) return;
+      job.settled = true;
+      clearTimeout(job.timer);
+      if (pendingMobileAnalysis.get(contextKey) === job) pendingMobileAnalysis.delete(contextKey);
+      try { sendResponse({ ...payload, meta: request.meta || null }); } catch (_) {}
+    }
+  };
+  pendingMobileAnalysis.set(contextKey, job);
+  while (pendingMobileAnalysis.size > 32) {
+    const oldest = pendingMobileAnalysis.values().next().value;
+    oldest.finish({ error: "Analysis queue is full", code: "SUPERSEDED", status: "error" });
+  }
+  // Let queued native tasks replace obsolete generations before any root work.
+  job.timer = setTimeout(async () => {
+    if (job.settled) return;
+    pendingMobileAnalysis.delete(contextKey);
+    activeMobileAnalysis.set(contextKey, job);
+    try {
+      const runtime = globalThis.__CC_ENGINE_RUNTIME__;
+      if (runtime?.suspended || runtime?.lifecycleEpoch !== runtimeEpoch ||
+          !isAnalysisGenerationCurrent(request.meta, contextKey) || controller.signal.aborted) throw SEARCH_SUPERSEDED;
+      if (request.meta?.annotationOnly === true && !ownedAnnotationCurrent(request.meta, request.fen, contextKey)) throw SEARCH_SUPERSEDED;
+      const cached = mobileAnalysisCache.get(cacheKey);
+      if (cached) {
+        const result = JSON.parse(cached);
+        result.search = { ...result.search, cached: true, nodes: 0, elapsedMs: 0 };
+        job.finish({ ...result, status: result.best ? "ok" : "terminal" });
+        return;
+      }
+      const result = await run(controller.signal);
+      if (controller.signal.aborted || !isAnalysisGenerationCurrent(request.meta, contextKey)) throw SEARCH_SUPERSEDED;
+      if (result?.best && result.search?.interrupted === false &&
+          (result.search.annotationOnly || !result.analysisIncomplete)) {
+        const encoded = JSON.stringify({ ...result, meta: null });
+        if (encoded.length <= 64000) setBoundedCacheEntry(mobileAnalysisCache, cacheKey, encoded, 32);
+      }
+      job.finish({ ...result, status: result?.best ? "ok" : "terminal" });
+    } catch (error) {
+      job.finish({ error: error.message, code: error.code || "ANALYSIS_FAILED", status: "error" });
+    } finally {
+      if (activeMobileAnalysis.get(contextKey) === job) activeMobileAnalysis.delete(contextKey);
+    }
+  }, request.bulletTurbo ? 4 : 20);
+}
+
+function cancelMobileAnalysis(sender, meta) {
+  const contextKey = analysisContextKey(sender, meta);
+  const latest = latestAnalysisMetaByClient.get(contextKey) || meta;
+  if (latest) setBoundedCacheEntry(cancelledMobileGeneration, contextKey, { ...latest }, 32);
+  const matches = (key, job) => key === contextKey || (meta?.sessionId && job.meta?.sessionId === meta.sessionId &&
+    job.sender?.origin === sender?.origin && (job.sender?.frameId || 0) === (sender?.frameId || 0));
+  for (const [key, job] of pendingMobileAnalysis) {
+    if (matches(key, job)) job.finish({ error: "Analysis cancelled", code: "CANCELLED", status: "error" });
+  }
+  for (const [key, job] of activeMobileAnalysis) if (matches(key, job)) job.controller.abort();
+}
 
 function searchNow() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -91,6 +206,7 @@ function createSearchBudget(timeBudgetMs, nodeLimit) {
 
 function checkSearchBudget(budget) {
   if (!budget) return;
+  if (budget.isCurrent && !budget.isCurrent()) throw SEARCH_SUPERSEDED;
   budget.lastNow = Math.max(budget.lastNow, searchNow());
   const runtime = globalThis.__CC_ENGINE_RUNTIME__;
   if (budget.interrupted || budget.nodes >= budget.nodeLimit || budget.lastNow >= budget.deadline || (runtime && (runtime.suspended || runtime.lifecycleEpoch !== budget.lifecycleEpoch))) {
@@ -190,6 +306,10 @@ function handleEngineMessage(request, sender, sendResponse) {
   if (type === "ENGINE_CANCEL" || type === "ENGINE_RELEASE") {
     clientEpoch++;
     setBoundedCacheEntry(engineCancellationByClient, clientKey, { epoch: clientEpoch, code: type === "ENGINE_RELEASE" ? "RELEASED" : "CANCELLED" }, 128);
+    for (const [key, work] of stockfishWorkByPosition) {
+      if (work.clientKey === clientKey) stockfishWorkByPosition.delete(key);
+    }
+    if (request.cancelAnalysis) cancelMobileAnalysis(sender, request.meta);
   }
   const canForward = () => {
     const runtime = globalThis.__CC_ENGINE_RUNTIME__;
@@ -229,8 +349,12 @@ function handleEngineMessage(request, sender, sendResponse) {
     }).catch(error => sendResponse({ ok: false, requestId, code: "OFFSCREEN_LOOKUP_FAILED", error: String(error?.message || error) }));
     return true;
   }
-  const positionKey = `${request.meta?.sessionId || ""}|${request.meta?.positionId || ""}|${request.fen || ""}`;
-  const engineWork = { expiresAt: Date.now() + 10000 };
+  const positionKey = `${request.meta?.sessionId || ""}|${request.meta?.positionId ?? ""}|${request.fen || ""}`;
+  const engineWork = {
+    expiresAt: Date.now() + 10000, requestId, analysisId: request.meta?.analysisId, clientKey, clientEpoch,
+    contextKey: analysisContextKey(sender, request.meta),
+    lifecycleEpoch: runtimeEpoch
+  };
   if (type === "ENGINE_ANALYZE") setBoundedCacheEntry(stockfishWorkByPosition, positionKey, engineWork, 32);
   const respond = payload => {
     if (type === "ENGINE_ANALYZE" && stockfishWorkByPosition.get(positionKey) === engineWork && (!payload?.ok || payload.result?.searchCompleted !== true)) {
@@ -652,17 +776,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ error: "Invalid analysis FEN", meta: request.meta || null, status: "error" });
       return false;
     }
-    const rawSessionId = String(request.meta?.sessionId || "legacy");
-    const sessionId = /^[a-z0-9:._-]{1,96}$/i.test(rawSessionId) ? rawSessionId : "legacy";
-    const analysisContextKey = `${sender?.tab?.id ?? sender?.url ?? "unknown"}:${sender?.frameId ?? 0}:${sessionId}`;
+    const contextKey = analysisContextKey(sender, request.meta);
     const requestedElo = Number(request.elo);
     const normalizedElo = Number.isFinite(requestedElo)
       ? Math.max(400, Math.min(3000, Math.round(requestedElo)))
       : 2000;
     const requestedStyle = typeof request.style === "string" ? request.style : "tal";
     const normalizedStyle = Object.hasOwn(GM_STYLES, requestedStyle) ? requestedStyle : "balanced";
-    if (request.meta) setBoundedCacheEntry(latestAnalysisMetaByClient, analysisContextKey, request.meta, 32);
-    experienceReady
+    if (!isAnalysisGenerationCurrent(request.meta, contextKey)) {
+      sendResponse({ error: "Obsolete analysis", code: "SUPERSEDED", meta: request.meta || null, status: "error" });
+      return false;
+    }
+    if (request.meta) setBoundedCacheEntry(latestAnalysisMetaByClient, contextKey, request.meta, 32);
+    const run = signal => experienceReady
       .then(() => analyzeAdaptiveMaster(
         request.fen,
         normalizedElo,
@@ -678,13 +804,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         request.trapRadarEnabled !== false,
         Array.isArray(request.recentPositions) ? request.recentPositions : [],
         request.lastOurMove || null,
-        analysisContextKey,
+        contextKey,
         Array.isArray(request.uciHistory) ? request.uciHistory : [],
         Boolean(request.historyTrusted),
-        request.meta || null
-      ))
+        request.meta || null,
+        signal
+      ));
+    if (globalThis.__CC_ENGINE_RUNTIME__) {
+      queueMobileAnalysis(request, sender, contextKey, run, sendResponse);
+      return true;
+    }
+    run(null)
       .then((res) => sendResponse({ ...res, meta: request.meta || null, status: res?.best ? "ok" : "terminal" }))
-      .catch((err) => sendResponse({ error: err.message, meta: request.meta || null, status: "error" }));
+      .catch((err) => sendResponse({ error: err.message, code: err.code || "ANALYSIS_FAILED", meta: request.meta || null, status: "error" }));
     return true;
   }
 
@@ -765,8 +897,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           enemyWin: wdl.enemyWin,
           evalCp: staticMyEval,
           nearestThreatText: plan && plan.canPremove
-            ? `Premove ready ${plan.premove.from}→${plan.premove.to} (${plan.confidence}%)`
-            : "Waiting for opponent's move (threat control)"
+            ? `Ready premove ${plan.premove.from}→${plan.premove.to} (${plan.confidence}%)`
+            : "Waiting for opponent move (control threats)"
         }
       });
     } catch (err) {
@@ -806,7 +938,7 @@ function computeWinDrawLossChances(scoreCpForUs, isOurMate = false, isEnemyMate 
     return { myWin: 0, draw: 1, enemyWin: 99 };
   }
   const clamped = Math.max(-1000, Math.min(1000, scoreCpForUs));
-  // Сигмоида Lichess Win% = 50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
+  // Сигмоиyes Lichess Win% = 50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
   const expectedScore = 1 / (1 + Math.exp(-0.0038 * clamped));
   const absPawns = Math.abs(clamped) / 100;
   const drawProb = Math.max(4, Math.round(34 * Math.exp(-0.38 * absPawns * absPawns)));
@@ -836,7 +968,15 @@ function hasFreshNegativeCache(cache, key) {
   return true;
 }
 
-async function fetchLichessCloud3000(fen, pieceCount) {
+function linkAnalysisAbort(signal, controller) {
+  if (!signal) return () => {};
+  if (signal.aborted) throw SEARCH_SUPERSEDED;
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  return () => signal.removeEventListener("abort", abort);
+}
+
+async function fetchLichessCloud3000(fen, pieceCount, signal = null) {
   if (pieceCount < 18) return null;
   if (cloudCache.has(fen)) {
     const cached = cloudCache.get(fen);
@@ -853,6 +993,7 @@ async function fetchLichessCloud3000(fen, pieceCount) {
   if (Date.now() >= cloudRetryAfter) {
     const t0 = Date.now();
     const controller = new AbortController();
+    const unlink = linkAnalysisAbort(signal, controller);
     const timer = setTimeout(() => controller.abort(), 650);
     try {
       const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=3`;
@@ -887,14 +1028,17 @@ async function fetchLichessCloud3000(fen, pieceCount) {
         cloudRetryAfter = Date.now() + Math.min(120, retrySeconds) * 1000;
       }
     } catch (e) {
+      if (signal?.aborted) throw SEARCH_SUPERSEDED;
     } finally {
       clearTimeout(timer);
+      unlink();
     }
   }
 
   if (pieceCount >= 22) {
     const t0 = Date.now();
     const expController = new AbortController();
+    const unlink = linkAnalysisAbort(signal, expController);
     const expTimer = setTimeout(() => expController.abort(), 650);
     try {
       const expUrl = `https://explorer.lichess.ovh/masters?topGames=0&moves=6&fen=${encodeURIComponent(fen)}`;
@@ -925,7 +1069,7 @@ async function fetchLichessCloud3000(fen, pieceCount) {
                 source: "explorer",
                 depth: 0,
                 cachedAt: Date.now(),
-                pvChain: `${uci.slice(0, 2)}→${uci.slice(2, 4)} (${mv.san || "Masters Database"} • ${total} games)`
+                pvChain: `${uci.slice(0, 2)}→${uci.slice(2, 4)} (${mv.san || "Masters DB"} • ${total} games.)`
               };
             });
             cloudNegativeCache.delete(fen);
@@ -935,8 +1079,10 @@ async function fetchLichessCloud3000(fen, pieceCount) {
         }
       }
     } catch (e) {
+      if (signal?.aborted) throw SEARCH_SUPERSEDED;
     } finally {
       clearTimeout(expTimer);
+      unlink();
     }
   }
 
@@ -944,7 +1090,7 @@ async function fetchLichessCloud3000(fen, pieceCount) {
   return null;
 }
 
-async function fetchSyzygyTablebase(fen, pieceCount) {
+async function fetchSyzygyTablebase(fen, pieceCount, signal = null) {
   if (pieceCount > 7) return null;
   if (syzygyCache.has(fen)) {
     const cached = syzygyCache.get(fen);
@@ -955,6 +1101,7 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
 
   const t0 = Date.now();
   const controller = new AbortController();
+  const unlink = linkAnalysisAbort(signal, controller);
   const timer = setTimeout(() => controller.abort(), 650);
   try {
     const url = `https://tablebase.lichess.ovh/standard?fen=${encodeURIComponent(fen)}`;
@@ -987,10 +1134,10 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
         const dtzVal = mv.dtz !== null && mv.dtz !== undefined ? Math.abs(mv.dtz) : null;
         const dtmVal = mv.dtm !== null && mv.dtm !== undefined ? Math.abs(mv.dtm) : null;
 
-        let badgeLabel = "SYZYGY TABLEBASE: DRAW (0.00)";
+        let badgeLabel = "TABLE SYZYGY: DRAW (0.00)";
         if (ourOutcome === "win") {
           badgeLabel = dtmVal !== null
-            ? `SYZYGY GOD: WIN (MATE IN ${Math.ceil(dtmVal / 2)} MOVES • DTZ ${dtzVal ?? "-"})`
+            ? `SYZYGY GOD: WIN (MATE В ${Math.ceil(dtmVal / 2)} MOVES • DTZ ${dtzVal ?? "-"})`
             : `SYZYGY GOD: 100% WIN (DTZ ${dtzVal ?? "-"})`;
         } else if (ourOutcome === "cursed-win") {
           badgeLabel = `SYZYGY: WIN (DTZ ${dtzVal ?? "-"})`;
@@ -1025,8 +1172,10 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
       return resultObj;
     }
   } catch (e) {
+    if (signal?.aborted) throw SEARCH_SUPERSEDED;
   } finally {
     clearTimeout(timer);
+    unlink();
   }
   rememberNegativeCache(syzygyNegativeCache, fen, 30000);
   return null;
@@ -1034,32 +1183,32 @@ async function fetchSyzygyTablebase(fen, pieceCount) {
 
 const OPENING_BOOK = {
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w": [
-    { from: "e2", to: "e4", name: "King's opening (1. e4)", bonus: 45 },
-    { from: "d2", to: "d4", name: "Queen's opening (1. d4)", bonus: 45 },
+    { from: "e2", to: "e4", name: "Royal opening (1. e4)", bonus: 45 },
+    { from: "d2", to: "d4", name: "Queen's Pawn Opening (1. d4)", bonus: 45 },
     { from: "c2", to: "c4", name: "English Opening (1. c4)", bonus: 38 }
   ],
   "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b": [
-    { from: "c7", to: "c5", name: "Sicilian Defense (1... c5)", bonus: 48 },
-    { from: "e7", to: "e5", name: "Open game (1... e5)", bonus: 46 },
-    { from: "c7", to: "c6", name: "Caro-Kann Defense (1... c6)", bonus: 42 },
+    { from: "c7", to: "c5", name: "Sicilianorian defense (1... c5)", bonus: 48 },
+    { from: "e7", to: "e5", name: "Open Game (1... e5)", bonus: 46 },
+    { from: "c7", to: "c6", name: "Defense Caro-Kann (1... c6)", bonus: 42 },
     { from: "e7", to: "e6", name: "French Defense (1... e6)", bonus: 40 }
   ],
   "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b": [
     { from: "g8", to: "f6", name: "Indian Defense (1... Nf6)", bonus: 48 },
-    { from: "d7", to: "d5", name: "Classical queen's reply (1... d5)", bonus: 46 }
+    { from: "d7", to: "d5", name: "Classical Queen's Pawn reply (1... d5)", bonus: 46 }
   ],
   "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/2N5/PPP2PPP/R1BQKBNR b": [
     { from: "d5", to: "e4", name: "Caro-Kann: Exchange on e4 (3... dxe4)", bonus: 45 }
   ],
   "rnbqkbnr/pp2pppp/2p5/8/3PN3/8/PPP2PPP/R1BQKBNR b": [
     { from: "c8", to: "f5", name: "Caro-Kann: Classical variation (4... Bf5)", bonus: 48 },
-    { from: "g8", to: "f6", name: "Caro-Kann: Tartakower variation (4... Nf6)", bonus: 44 }
+    { from: "g8", to: "f6", name: "Caro-Kann: Tartakower Variation (4... Nf6)", bonus: 44 }
   ],
   "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w": [
     { from: "e4", to: "d5", name: "Scandinavian Defense (2. exd5!)", bonus: 50 }
   ],
   "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w": [
-    { from: "g1", to: "f3", name: "Attack on e5 pawn (2. Nf3)", bonus: 48 }
+    { from: "g1", to: "f3", name: "Attack pawns e5 (2. Nf3)", bonus: 48 }
   ],
   "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b": [
     { from: "b8", to: "c6", name: "Classical defense (2... Nc6)", bonus: 48 },
@@ -1076,10 +1225,10 @@ const OPENING_BOOK = {
   ],
   "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w": [
     { from: "d2", to: "d3", name: "Quiet Italian (4. d3)", bonus: 46 },
-    { from: "f3", to: "g5", name: "Fried Liver Attack / Attack on f7 (4. Ng5)", bonus: 44 }
+    { from: "f3", to: "g5", name: "Fried Liver Attack / assault on f7 (4. Ng5)", bonus: 44 }
   ],
   "r1bqkb1r/pppp1ppp/2n2n2/4p1N1/2B1P3/8/PPPP1PPP/RNBQK2R b": [
-    { from: "d7", to: "d5", name: "Precise initiative grab by theory (4... d5!)", bonus: 95 }
+    { from: "d7", to: "d5", name: "Precise initiative seize by theory (4... d5!)", bonus: 95 }
   ]
 };
 
@@ -2200,10 +2349,10 @@ function allowsEnemyForcedMateInTwo(boardAfterOurMove, ourColor, enemyColor, cas
 }
 
 function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threatBefore, castling = "-", epSquare = null, budget = null) {
-  if (inCheckBefore) return { isDanger: true, reason: "CHECK TO OUR KING" };
+  if (inCheckBefore) return { isDanger: true, reason: "check OUR KING" };
 
   if (allowsEnemyMateInOne(board, ourColor, enemyColor, castling, epSquare, budget)) {
-    return { isDanger: true, reason: "DIRECT MATE-IN-1 THREAT FROM OPPONENT" };
+    return { isDanger: true, reason: "DIRECT MATE IN 1 THREAT FROM OPPONENT" };
   }
 
   if (allowsEnemyForcedMateInTwo(board, ourColor, enemyColor, castling, epSquare, budget)) {
@@ -2224,10 +2373,10 @@ function detectKingDangerState(board, ourColor, enemyColor, inCheckBefore, threa
   }
 
   if (attackedKingSquares >= 2) {
-    return { isDanger: true, reason: "PRESSURE ON OUR KING ZONE" };
+    return { isDanger: true, reason: "PRESSURE ON THE ZONE OF OUR KING" };
   }
   if (threatBefore >= 320 && attackedKingSquares >= 1) {
-    return { isDanger: true, reason: "TACTICAL HIT ON PIECE AND KING" };
+    return { isDanger: true, reason: "TACTICAL STRIKE ON PIECES AND KING" };
   }
 
   return { isDanger: false, reason: "" };
@@ -2374,9 +2523,9 @@ function computeTrapMetrics(boardAfterOurMove, ourMove, ourColor, enemyColor, ca
       ? `${FILES[savingMoves[0].fromC]}${8 - savingMoves[0].fromR}→${FILES[savingMoves[0].toC]}${8 - savingMoves[0].toR}`
       : "non-obvious";
     const punishDesc = matePunishments > 0
-      ? "a hidden mate"
-      : (queenRookPunishments > 0 ? "loss of queen/rook" : "collapse position");
-    trapSubtitle = `Out of ${totalReplies} enemy replies ${losingReplies} lead to ${punishDesc}! The only save (${saveMoveUci}) extremely hard to find.`;
+      ? "hidden mate"
+      : (queenRookPunishments > 0 ? "byloss queen/rook" : "collapse position");
+    trapSubtitle = `from ${totalReplies} fromreplies enemy ${losingReplies} lead to ${punishDesc}! Only salvation (${saveMoveUci}) extremely hard find.`;
   }
 
   return {
@@ -2626,7 +2775,7 @@ function computeSmartNextPremove(
 
   let confidence = 0;
   let predictionType = "pv_lookahead";
-  let reasonText = `🔮 PREMOVE ON ENEMY 1ST LINE (${enemyFrom}→${enemyTo})`;
+  let reasonText = `🔮 PREMOVE ON 1ST ENEMY LINE (${enemyFrom}→${enemyTo})`;
 
   if (bestReplyObj.isMateIn1 && safeAgainstTopBranches) {
     confidence = 99;
@@ -2635,15 +2784,15 @@ function computeSmartNextPremove(
   } else if (enemyMoves.length === 1 && safeAgainstTopBranches) {
     confidence = 99;
     predictionType = "forced_single";
-    reasonText = `⚡ 100% FORCE: Enemy has 1 legal move (${enemyFrom}→${enemyTo})`;
+    reasonText = `⚡ 100% FORCE: У enemy 1 legal move (${enemyFrom}→${enemyTo})`;
   } else if (bestReplyObj.isRealRecapture && topPredictionConfidence >= 72) {
     confidence = Math.min(96, topPredictionConfidence + 7);
     predictionType = "recapture";
-    reasonText = `⚔ INTERRUPT ON ${ourTo.toUpperCase()} (FORECAST ${topPredictionConfidence}%: ${enemyFrom}→${enemyTo})`;
+    reasonText = `⚔ INTERRUPT on ${ourTo.toUpperCase()} (FORECAST ${topPredictionConfidence}%: ${enemyFrom}→${enemyTo})`;
   } else if (bestReplyObj.isRealRecapture) {
     confidence = 82;
     predictionType = "safe_universal";
-    reasonText = `🛡 RISK-FREE INTERRUPT AGAINST ${bestReplyObj.validatedBranches} LINES`;
+    reasonText = `🛡 INTERRUPT without RISK AGAINST ${bestReplyObj.validatedBranches} LINES`;
   } else if (scoreGap >= 200 && topEnemy.seeScore >= 0 && safeAgainstTopBranches) {
     confidence = Math.max(82, Math.min(94, topPredictionConfidence + 5));
     predictionType = "forced_tactical";
@@ -2693,9 +2842,11 @@ async function analyzeAdaptiveMaster(
   analysisContextKey = "default",
   uciHistory = [],
   historyTrusted = false,
-  analysisMeta = null
+  analysisMeta = null,
+  signal = null
 ) {
   if (!validateEngineFen(fen)) throw new Error("Invalid analysis FEN");
+  if (signal?.aborted || !isAnalysisGenerationCurrent(analysisMeta, analysisContextKey)) throw SEARCH_SUPERSEDED;
   const { board, turn, castling, epSquare: fenEp, halfmoveClock, pieceCount, boardKey } = parseFEN(fen);
   const enemy = turn === "w" ? "b" : "w";
   const lastAnalyzedState = analyzedStateByClient.get(analysisContextKey) || createAnalyzedState();
@@ -2722,13 +2873,15 @@ async function analyzeAdaptiveMaster(
   const mobile = Boolean(globalThis.__CC_ENGINE_RUNTIME__ || deviceProfile?.recommendation);
   const constrained = Boolean(deviceProfile?.power?.saveMode || deviceProfile?.power?.backgroundRestricted || Number(deviceProfile?.power?.thermalStatus) >= 2);
   const tier = constrained ? "LOW" : String(recommendation.tier || "BALANCED").toUpperCase();
-  const positionKey = `${analysisMeta?.sessionId || ""}|${analysisMeta?.positionId || ""}|${fen}`;
-  const annotationOnly = mobile && pass === "deep" && (stockfishWorkByPosition.get(positionKey)?.expiresAt || 0) > Date.now();
+  const annotationOnly = Boolean(mobile && pass === "deep" && analysisMeta?.annotationOnly === true &&
+    ownedAnnotationCurrent(analysisMeta, fen, analysisContextKey));
+  if (mobile && analysisMeta?.annotationOnly === true && !annotationOnly) throw SEARCH_SUPERSEDED;
   const rawTimeBudgetMs = pass === "fast" ? (bulletTurbo ? 26 : 48) : (inCheckBefore ? 340 : bulletTurbo ? 95 : 235);
   const phoneBudgetCap = annotationOnly ? 32 : pass === "fast" ? (tier === "LOW" ? 24 : tier === "HIGH" ? 40 : 32) : (tier === "LOW" ? 60 : tier === "HIGH" ? 120 : 90);
   const deviceMovetimeScale = Math.max(0.5, Math.min(mobile ? 1 : 1.5, Number(recommendation.movetimeScale) || 1));
   const timeBudgetMs = Math.max(18, Math.min(mobile ? phoneBudgetCap : 510, Math.round(rawTimeBudgetMs * deviceMovetimeScale)));
   const budget = createSearchBudget(timeBudgetMs, Math.min(mobile ? 6000 : 50000, timeBudgetMs * 100));
+  budget.isCurrent = () => !signal?.aborted && isAnalysisGenerationCurrent(analysisMeta, analysisContextKey);
   let fallbackScore = 0;
   // Unwind incomplete proof/search frames before constructing a legal fallback.
   try {
@@ -2783,9 +2936,9 @@ async function analyzeAdaptiveMaster(
     cloudLines = cloudCache.get(fen) || null;
   } else if (pieceCount <= 7) {
     if (pass === "fast") {
-      syzygyData = syzygyCache.get(fen) || await fetchSyzygyTablebase(fen, pieceCount);
+      syzygyData = syzygyCache.get(fen) || await fetchSyzygyTablebase(fen, pieceCount, signal);
     } else {
-      syzygyData = await fetchSyzygyTablebase(fen, pieceCount);
+      syzygyData = await fetchSyzygyTablebase(fen, pieceCount, signal);
     }
   } else if (pass === "fast") {
     cloudLines = cloudCache.get(fen) || null;
@@ -2793,7 +2946,7 @@ async function analyzeAdaptiveMaster(
       lastServerSourceTag = cloudLines[0]?.source === "explorer" ? "EXPLORER CACHE (0ms)" : "CLOUD CACHE (0ms)";
     }
   } else if (elo >= 1800) {
-    cloudLines = await fetchLichessCloud3000(fen, pieceCount);
+    cloudLines = await fetchLichessCloud3000(fen, pieceCount, signal);
   }
 
   // Network latency must not consume the local search budget.
@@ -3340,7 +3493,7 @@ async function analyzeAdaptiveMaster(
 
   if (mateThreatCount >= 2 && !isDangerPosition) {
     isDangerPosition = true;
-    dangerReason = "DANGER OF MATING TRAP";
+    dangerReason = "DANGER OF MATING TRAPS";
   }
 
   scored.sort((a, b) => b.trueScore - a.trueScore);
@@ -3388,7 +3541,7 @@ async function analyzeAdaptiveMaster(
     }
   }
 
-  if (!annotationOnly && bestMove && bestMove.rawMove && !bestMove.isMateInOne && !isDangerPosition) {
+  if (!annotationOnly && (!mobile || analysisMeta?.needPremove === true) && bestMove && bestMove.rawMove && !bestMove.isMateInOne && !isDangerPosition) {
     const boardAfterBest = makeMove(board, bestMove.rawMove);
     const nextCast = updateCastlingAfterMove(castling, bestMove.rawMove);
     const nextEpSq = getNextEpSquare(bestMove.rawMove);
@@ -3483,20 +3636,20 @@ async function analyzeAdaptiveMaster(
   if (enemySeconds > 0 && enemySeconds < 10) {
     timeAdvice = {
       mode: "zeitnot_attack",
-      badge: `⏱️ ENEMY TIME TROUBLE: ${enemySeconds.toFixed(1)}s`,
-      text: `Opponent under 10 seconds! Engine picks the most branching strong lines (${bestMove.complexityBranches || legal.length} replies) without draw risk.`
+      badge: `⏱️ TIME TROUBLE ENEMY: ${enemySeconds.toFixed(1)}s`,
+      text: `У opponent less 10 seconds! Engine youpicks itself branched strong aboutcontinuations (${bestMove.complexityBranches || legal.length} fromreplies) without рsearchа draw.`
     };
   } else if (mySeconds > 0 && mySeconds < 12) {
     timeAdvice = {
       mode: "my_panic",
       badge: `⚡ OUR TIME TROUBLE: ${mySeconds.toFixed(1)}s`,
-      text: `Low time on the clock! Accelerated turbo calc and safe SEE-premoves enabled.`
+      text: `Little time on clock! enabled accelerated turbo-mode and safe SEE-premoves.`
     };
   } else if (enemySeconds < 30 && mySeconds > enemySeconds + 15) {
     timeAdvice = {
       mode: "tempo_advantage",
-      badge: `🎯 TIME ADVANTAGE (+${Math.round(mySeconds - enemySeconds)}s)`,
-      text: `Press with tempo: avoid simple exchanges, keep tension on the board.`
+      badge: `🎯 ADVANTAGE by TIME (+${Math.round(mySeconds - enemySeconds)}s)`,
+      text: `In time trouble: avoid simple exchanges, keep the tension on the board.`
     };
   }
 
@@ -3504,7 +3657,7 @@ async function analyzeAdaptiveMaster(
   const legalUcis = legal.map(m => `${FILES[m.fromC]}${8 - m.fromR}${FILES[m.toC]}${8 - m.toR}${m.promo || ""}`);
   const hardRejectedUcis = scored.filter(m => m.blundersMate || m.causesStalemate).map(m => m.uci);
 
-  // Сборка Живой телеметрии 24/7 (Chanceы на победу, sтатуs sервера, ближайшие traps/mateы)
+  // Сchoice Живой phoneметрии 24/7 (Chanceы on bytroubleу, status serverа, closeижайш ловушки/mates)
   const totalElapsedMs = Date.now() - requestStartTime;
   const ourPerspectiveScore = turn === myColor ? bestMove.pureSearchScore : -bestMove.pureSearchScore;
   const wdl = computeWinDrawLossChances(
@@ -3517,13 +3670,13 @@ async function analyzeAdaptiveMaster(
   if (bestMove.isMateInOne) {
     nearestThreatText = `👑 MATE IN 1 MOVE: ${bestMove.from}→${bestMove.to}#`;
   } else if (bestMove.isForcedMateInTwo) {
-    nearestThreatText = `👑 FORCED MATE IN 2 MOVES: ${bestMove.from}→${bestMove.to}+`;
+    nearestThreatText = `👑 FORCE. MATE IN 2 MOVES: ${bestMove.from}→${bestMove.to}+`;
   } else if (bestMove.isTrap && bestMove.trapChance >= 75) {
-    nearestThreatText = `🪤 TRAP ${bestMove.from}→${bestMove.to} (Enemy error: ${bestMove.trapChance}%)`;
+    nearestThreatText = `🪤 TRAP ${bestMove.from}→${bestMove.to} (Error enemy: ${bestMove.trapChance}%)`;
   } else if (isDangerPosition) {
     nearestThreatText = `🛡 THREAT: ${dangerReason} (Defense: ${bestMove.from}→${bestMove.to})`;
   } else if (hangingSquare && threatBefore >= 75) {
-    nearestThreatText = `⚠️ Square ${hangingSquare.toUpperCase()} under attack! Escape: ${bestMove.from}→${bestMove.to}`;
+    nearestThreatText = `⚠️ square ${hangingSquare.toUpperCase()} under attack! Salvation: ${bestMove.from}→${bestMove.to}`;
   } else if (bestMove.fromSyzygy) {
     nearestThreatText = `🔮 ${bestMove.syzygyBadge}`;
   }
